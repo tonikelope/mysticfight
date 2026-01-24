@@ -18,7 +18,7 @@
 #define ID_TRAY_EXIT 1001
 #define ID_TRAY_CONFIG 2001
 
-const wchar_t* APP_VERSION = L"v0.2";
+const wchar_t* APP_VERSION = L"v0.3";
 
 // CONFIG STRUCTURE
 struct Config {
@@ -445,18 +445,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         if (g_LedsEnabled && g_Running) {
             float rawTemp = GetCPUTempFast();
             if (rawTemp <= 0) {
-                // Si falla la lectura, intentamos re-conectar sin cerrar el programa
                 InitWMI();
             }
             else {
+                // Redondeo suave para evitar parpadeos ínfimos
                 float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f;
                 DWORD R = 0, G = 0, B = 0;
+
+                // --- 1. LÓGICA DE ALERTA MÁXIMA ---
                 if (temp >= (float)g_cfg.tempAlert) {
-                    R = 255; G = 0;
+                    R = 255; G = 0; B = 0;
                     if (!modoAlertaActivo && g_cfg.lightningEffect) {
                         lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleLightning);
                         modoAlertaActivo = true;
-                        Log("[MysticFight] ALERT MODE: High temperature detected!");
+                        Log("[MysticFight] ALERT: Threshold reached. Switching to Red Lightning.");
                     }
                 }
                 else {
@@ -464,24 +466,40 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                         lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
                         modoAlertaActivo = false;
                     }
-                    if (temp <= (float)g_cfg.tempLow) { R = 0; G = 255; }
+
+                    // --- 2. TRANSICIÓN DE COLORES (COMO TU IMAGEN) ---
+
+                    if (temp <= (float)g_cfg.tempLow) {
+                        // VERDE PURO (0, 255, 0)
+                        R = 0; G = 255; B = 0;
+                    }
                     else if (temp <= (float)g_cfg.tempHigh) {
-                        R = (DWORD)(255 * (temp - (float)g_cfg.tempLow) / ((float)g_cfg.tempHigh - (float)g_cfg.tempLow));
+                        // TRAMO VERDE -> AMARILLO (Sube el Rojo hasta 255)
+                        float ratio = (temp - (float)g_cfg.tempLow) / ((float)g_cfg.tempHigh - (float)g_cfg.tempLow);
+                        R = (DWORD)(255 * ratio);
                         G = 255;
+                        B = 0;
                     }
-                    else if (temp <= (float)g_cfg.tempAlert) {
+                    else {
+                        // TRAMO AMARILLO -> ROJO (Baja el Verde hasta 0)
+                        // Aquí es donde pasas por el Naranja de tu imagen
+                        float ratio = (temp - (float)g_cfg.tempHigh) / ((float)g_cfg.tempAlert - (float)g_cfg.tempHigh);
                         R = 255;
-                        G = (DWORD)(255 * (1.0f - (temp - (float)g_cfg.tempHigh) / ((float)g_cfg.tempAlert - (float)g_cfg.tempHigh)));
+                        G = (DWORD)(255 * (1.0f - ratio));
+                        B = 0;
                     }
-                    else { R = 255; G = 0; }
                 }
 
+                // Solo enviamos el comando al SDK si el color resultante ha cambiado
                 if (R != lastR || G != lastG) {
-                    for (int i = 0; i < g_totalLeds; i++) lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
+                    for (int i = 0; i < g_totalLeds; i++) {
+                        lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
+                    }
                     lastR = R; lastG = G;
                 }
             }
         }
+
         if (g_Running) MsgWaitForMultipleObjects(0, NULL, FALSE, 500, QS_ALLINPUT);
     }
 
