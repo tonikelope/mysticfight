@@ -24,7 +24,7 @@ Fortunately, while the MSI UI is a mess, people who programmed the **SDK** actua
 ## ⚠️ Requirements
 For this tool to work, you MUST have the following installed/running:
 
-1. **MSI Center:** [Download here](https://www.msi.com/Landing/MSI-Center). You must install the **Mystic Light** module inside it to provide the underlying drivers.
+1. **MSI Center:** [Download here](https://www.msi.com/Landing/MSI-Center). (Remember you must install the **Mystic Light** module inside it to provide the underlying drivers for SDK).
 2. **MysticLight_SDK.dll:** Included in this repo. Must stay in the same folder as the EXE. [Official Link with SDK doc](https://www.msi.com/Landing/mystic-light-rgb-gaming-pc/download).
 3. **LibreHardwareMonitor:** [Download here](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor). Must be running (minimized) to provide temperature data via WMI.
 
@@ -35,3 +35,4 @@ Since the app requires Administrator privileges for SDK and WMI access, use **Wi
 2. **Triggers Tab:** Set to **At log on**.
 3. **Actions Tab:** Start a program -> Select `MysticFight.exe`.
    * **IMPORTANT:** In the **"Start in (optional)"** field, paste the full path to the folder (e.g., `C:\Tools\MysticFight\`). If you leave this blank, the app won't find the DLL or your config.
+4. It's recommended to **delay 30 seconds** to give the SDK time to initialise correctly.
