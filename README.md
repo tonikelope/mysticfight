@@ -15,7 +15,7 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * **Real-time Monitoring:** Temperature tracking via WMI.
 * **Lightweight:** No heavy dashboards; just a simple tray app that stays out of your way.
 * **Customizable Temperature Sensor:** Choose the one you prefer.
-* **Customizable Thresholds:** Same as Mystic Light client.
+* **Customizable Temperature Thresholds:** Green-Yellow-Red
 * **Alert Effect:** Automatic 'Lightning' style during high-temp alerts.
 * **Night-Mode with Global Hotkey:** `Ctrl + Alt + Shift + L` to power-off/on LEDs instantly.
   
@@ -35,3 +35,5 @@ Since the app requires Administrator privileges for SDK and WMI access, use **Wi
 3. **Actions Tab:** Start a program -> Select `MysticFight.exe`.
    * **IMPORTANT:** In the **"Start in (optional)"** field, paste the full path to the folder (e.g., `C:\Tools\MysticFight\`). If you leave this blank, the app won't find the DLL or your config.
 4. It's recommended to **delay 30 seconds** to give the SDK time to initialise correctly.
+
+This is practically a proof of concept for everything that the Mystic Light SDK can do with a little imagination. Enjoy it while it works.
