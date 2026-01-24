@@ -18,9 +18,10 @@ Fortunately, while the MSI UI is a mess, people who programmed the **SDK** actua
 
 ## Features
 * **Real-time Monitoring:** Temperature tracking via WMI.
+* **Customizable Temperature Sensor:** Choose the one you prefer.
 * **Customizable Thresholds:** Green (Cool), Yellow (Warm), Red (Hot).
 * **Alert Effect:** Automatic 'Lightning' style during high-temp alerts.
-* **Global Hotkey:** `Ctrl + Alt + Shift + L` to toggle LEDs instantly.
+* **Night-Mode with Global Hotkey:** `Ctrl + Alt + Shift + L` to power-off/power-on LEDs instantly.
   
 ## ⚠️ Requirements
 For this tool to work, you MUST have the following installed/running:
