@@ -9,11 +9,12 @@ Let's be honest: the official **MSI Center / Mystic Light** software is often bl
 
 The main issue is MSI's built-in temperature monitoring script: **it fails constantly after a system reboot**, forcing you to manually open MSI Center and navigate to the Mystic Light section every single time just to get it working again. This is simply intolerable.
 
-Fortunately, while the MSI UI is a mess, people who programmed the **SDK** actually did a great job. **MysticFight** bypasses the buggy MSI interface and talks directly to the SDK, ensuring:
+Fortunately, while the MSI UI is a mess, people who programmed the **SDK** actually did a great job. **MysticFight** bypasses the buggy MysticLight interface and talks directly to the SDK, ensuring:
 
 * **No Manual Intervention:** It works immediately after login without opening MSI Center.
 * **Rock Solid:** Uses the reliable SDK backbone combined with LibreHardwareMonitor data.
 * **Lightweight:** No heavy dashboards; just a simple tray app that stays out of your way.
+* **Sensor customization:** You can choose to monitor any temperature sensor you prefer.
 
 ## Features
 * **Real-time Monitoring:** Temperature tracking via WMI.
@@ -24,10 +25,10 @@ Fortunately, while the MSI UI is a mess, people who programmed the **SDK** actua
 ## ⚠️ Requirements
 For this tool to work, you MUST have the following installed/running:
 
-1. **MSI Center:** [Download here](https://www.msi.com/Landing/MSI-Center). (Remember you must install the **Mystic Light** module inside it to provide the underlying drivers for SDK).
-   * Disable both in Mystic Light config: Overwrite third part RGB and disable on suspend.
-3. **MysticLight_SDK.dll:** Included in this repo. Must stay in the same folder as the EXE. [Official Link with SDK doc](https://www.msi.com/Landing/mystic-light-rgb-gaming-pc/download).
-4. **LibreHardwareMonitor:** [Download here](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor). Must be running (minimized) to provide temperature data via WMI.
+1. **MSI Center:** [Download here](https://www.msi.com/Landing/MSI-Center). (Remember you must install and enable the **Mystic Light** module inside it to provide the underlying drivers for SDK).
+   * Disable **both** options in Mystic Light config: overwrite third part RGB and disable on suspend.
+3. **MysticLight_SDK.dll:** Included in this repo. Must stay in the same folder as MysticFight.exe [Official Link with SDK doc](https://www.msi.com/Landing/mystic-light-rgb-gaming-pc/download).
+4. **LibreHardwareMonitor:** [Download here](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor). Must be running (minimized on tray) to provide temperature data via WMI.
 
 ## 🚀 How to Run at Startup
 Since the app requires Administrator privileges for SDK and WMI access, use **Windows Task Scheduler**:
