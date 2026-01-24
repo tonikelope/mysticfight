@@ -2,7 +2,7 @@
 
 <img src="rgb.png" width="64" height="64" align="right" />
 
-A lightweight Windows tool to control MSI RGB lighting based on hardware temperatures.
+MSI Mystic Light CPU Temperature Profile Replacement.
 
 ## ❓ Why MysticFight?
 Let's be honest: the official **Mystic Light** software is often unreliable, and "fails more than a fairground shotgun". 
@@ -15,7 +15,7 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * **Real-time Monitoring:** Temperature tracking via WMI.
 * **Lightweight:** No heavy dashboards; just a simple tray app that stays out of your way.
 * **Customizable Temperature Sensor:** Choose the one you prefer.
-* **Customizable Thresholds:** Green (Cool), Yellow (Warm), Red (Hot).
+* **Customizable Thresholds:** Same as Mystic Light client.
 * **Alert Effect:** Automatic 'Lightning' style during high-temp alerts.
 * **Night-Mode with Global Hotkey:** `Ctrl + Alt + Shift + L` to power-off/on LEDs instantly.
   
