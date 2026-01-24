@@ -140,6 +140,9 @@
   <ItemGroup>
     <Image Include="E:\DESCARGAS\favicon.ico" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="MysticLight_SDK.dll" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
