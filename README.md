@@ -9,12 +9,12 @@ Let's be honest: the official **MSI Center / Mystic Light** software is often bl
 
 The main issue is MSI's built-in temperature monitoring script: **it fails constantly after a system reboot**, forcing you to manually open MSI Center and navigate to the Mystic Light section every single time just to get it working again. This is simply intolerable.
 
-Fortunately, while the MSI UI is a mess, the engineers who programmed the **SDK** actually did a great job. **MysticFight** bypasses the buggy MSI interface and talks directly to the SDK, ensuring:
+Fortunately, while the MSI UI is a mess, people who programmed the **SDK** actually did a great job. **MysticFight** bypasses the buggy MSI interface and talks directly to the SDK, ensuring:
 
 * **No Manual Intervention:** It works immediately after login without opening MSI Center.
 * **Rock Solid:** Uses the reliable SDK backbone combined with LibreHardwareMonitor data.
 * **Lightweight:** No heavy dashboards; just a simple tray app that stays out of your way.
-* 
+
 ## ⚠️ Critical Requirements
 For this tool to work, you MUST have the following installed:
 
