@@ -25,8 +25,9 @@ Fortunately, while the MSI UI is a mess, people who programmed the **SDK** actua
 For this tool to work, you MUST have the following installed/running:
 
 1. **MSI Center:** [Download here](https://www.msi.com/Landing/MSI-Center). (Remember you must install the **Mystic Light** module inside it to provide the underlying drivers for SDK).
-2. **MysticLight_SDK.dll:** Included in this repo. Must stay in the same folder as the EXE. [Official Link with SDK doc](https://www.msi.com/Landing/mystic-light-rgb-gaming-pc/download).
-3. **LibreHardwareMonitor:** [Download here](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor). Must be running (minimized) to provide temperature data via WMI.
+   * Disable both in Mystic Light config: Overwrite third part RGB and disable on suspend.
+3. **MysticLight_SDK.dll:** Included in this repo. Must stay in the same folder as the EXE. [Official Link with SDK doc](https://www.msi.com/Landing/mystic-light-rgb-gaming-pc/download).
+4. **LibreHardwareMonitor:** [Download here](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor). Must be running (minimized) to provide temperature data via WMI.
 
 ## 🚀 How to Run at Startup
 Since the app requires Administrator privileges for SDK and WMI access, use **Windows Task Scheduler**:
