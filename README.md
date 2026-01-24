@@ -5,11 +5,11 @@
 A lightweight Windows tool to control MSI RGB lighting based on hardware temperatures.
 
 ## ❓ Why MysticFight?
-Let's be honest: the official **MSI Center / Mystic Light** software is often bloated, unreliable, and "fails more than a fairground shotgun".
+Let's be honest: the official **Mystic Light** software is often unreliable, and "fails more than a fairground shotgun".
 
-The main issue is MSI's built-in temperature monitoring script: **it fails constantly after a system reboot**, forcing you to manually open MSI Center and navigate to the Mystic Light section every single time just to get it working again. This is simply intolerable.
+The main issue is Mystic Light temperature monitoring script: **it fails constantly after a system reboot**, forcing you to manually open MSI Center and navigate to the Mystic Light section every single time just to get it working again. This is simply intolerable.
 
-Fortunately, while the MSI UI is a mess, people who programmed the **SDK** actually did a great job. **MysticFight** bypasses the buggy MysticLight interface and talks directly to the SDK, ensuring:
+Fortunately, while the MSI UI is a mess, people who programmed the **SDK** actually did a good job. **MysticFight** bypasses the buggy MysticLight interface and talks directly to the SDK, ensuring:
 
 * **No Manual Intervention:** It works immediately after login without opening MSI Center.
 * **Rock Solid:** Uses the reliable SDK backbone combined with LibreHardwareMonitor data.
