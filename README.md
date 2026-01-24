@@ -1,4 +1,4 @@
-# MysticFight (by tonikelope)
+# MysticFight
 
 <img src="rgb.png" width="64" height="64" align="right" />
 
