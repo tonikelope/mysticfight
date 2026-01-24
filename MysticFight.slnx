@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="MysticFight.vcxproj" Id="0f182ae4-3c7d-4a24-94ba-95d297f67f9e" />
+</Solution>
