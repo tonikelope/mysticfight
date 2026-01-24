@@ -22,7 +22,7 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 ## ⚠️ Requirements
 For this tool to work, you MUST have the following installed/running:
 
-1. **MSI Center:** [Download here](https://www.msi.com/Landing/MSI-Center). (Remember you must install and enable the **Mystic Light** module inside it to provide the underlying drivers for SDK).
+1. **MSI Center:** [Download here](https://www.msi.com/Landing/MSI-Center). (Just installed, its not required to load with Windows. But remember you must install and enable the **Mystic Light** module inside it to provide the underlying drivers for SDK).
    * Disable **both** options in Mystic Light config: overwrite third part RGB and disable on suspend.
 3. **MysticLight_SDK.dll:** Included in this repo. Must stay in the same folder as MysticFight.exe [Official Link with SDK doc](https://www.msi.com/Landing/mystic-light-rgb-gaming-pc/download).
 4. **LibreHardwareMonitor:** [Download here](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor). Must be running (minimized on tray) to provide temperature data via WMI.
