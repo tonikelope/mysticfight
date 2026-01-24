@@ -18,6 +18,8 @@
 #define ID_TRAY_EXIT 1001
 #define ID_TRAY_CONFIG 2001
 
+const wchar_t* APP_VERSION = L"v0.2";
+
 // CONFIG STRUCTURE
 struct Config {
     wchar_t sensorID[256];
@@ -206,7 +208,7 @@ static void FinalCleanup(HWND hWnd) {
     static bool cleaned = false;
     if (cleaned) return;
     cleaned = true;
-    Log("[MysticFight] Starting resource cleanup...");
+    Log("[MysticFight] Cleaning resources...");
     NOTIFYICONDATA nid = { sizeof(NOTIFYICONDATA) };
     nid.hWnd = hWnd; nid.uID = 1;
     Shell_NotifyIcon(NIM_DELETE, &nid);
@@ -323,18 +325,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
     }
 
-    Log("[MysticFight] Starting...");
+    Log("[MysticFight] Starting application...");
+    wchar_t windowTitle[100];
+    swprintf_s(windowTitle, L"MysticFight %s (by tonikelope)", APP_VERSION);
     WNDCLASS wc = { 0 };
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = L"MSI_Temp_Class";
+    wc.lpszClassName = L"MysticFight_Class";
     wc.hIcon = (HICON)LoadImage(hInstance, MAKEINTRESOURCE(101), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
     RegisterClass(&wc);
-    HWND hWnd = CreateWindowEx(0, wc.lpszClassName, L"RGB_Control", 0, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
+    HWND hWnd = CreateWindowEx(0, wc.lpszClassName, windowTitle, 0, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
 
     g_hLibrary = LoadLibrary(L"MysticLight_SDK.dll");
     if (!g_hLibrary) {
+        Log("[MysticLight] FATAL: Could not find 'MysticLight_SDK.dll'.");
         MessageBox(NULL, L"Could not find 'MysticLight_SDK.dll'.", L"Error", MB_OK | MB_ICONERROR);
+        FinalCleanup(hWnd);
         return 1;
     }
 
@@ -343,11 +349,32 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     lpMLAPI_SetLedColor = (LPMLAPI_SetLedColor)GetProcAddress(g_hLibrary, "MLAPI_SetLedColor");
     lpMLAPI_SetLedStyle = (LPMLAPI_SetLedStyle)GetProcAddress(g_hLibrary, "MLAPI_SetLedStyle");
 
+    // --- LOGICA DE INICIALIZACIÓN SDK CON REINTENTOS ---
+    Log("[MysticLight] Attempting to initialize SDK...");
     if (lpMLAPI_Initialize() != 0) {
-        for (int i = 0; i < 10; i++) {
-            if (lpMLAPI_Initialize() == 0) break;
+        bool initialized = false;
+        for (int i = 1; i <= 10; i++) {
+            char retryMsg[100];
+            snprintf(retryMsg, sizeof(retryMsg), "[MysticLight] Attempt %d/10 failed. Retrying in 5s...", i);
+            Log(retryMsg);
+
+            if (lpMLAPI_Initialize() == 0) {
+                Log("[MysticLight] SDK Initialized successfully on retry.");
+                initialized = true;
+                break;
+            }
+
+            if (i == 10) {
+                Log("[MysticLight] FATAL: SDK could not be initialized after 10 attempts.");
+                MessageBox(NULL, L"MSI SDK Initialization failed. Ensure MSI Center/Dragon Center is installed and service is running.", L"Critical Error", MB_OK | MB_ICONERROR);
+                FinalCleanup(hWnd);
+                return 1;
+            }
             Sleep(5000);
         }
+    }
+    else {
+        Log("[MysticLight] SDK Initialized successfully at first attempt.");
     }
 
     SAFEARRAY* pDevType = nullptr, * pLedCount = nullptr;
@@ -357,20 +384,45 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         g_deviceName = SysAllocString(pData[0]);
         g_totalLeds = _wtoi(pCounts[0]);
         SafeArrayDestroy(pDevType); SafeArrayDestroy(pLedCount);
+
+        char devInfo[150];
+        snprintf(devInfo, sizeof(devInfo), "[MysticLight] Device detected: %ls | LEDs: %d", g_deviceName, g_totalLeds);
+        Log(devInfo);
     }
 
     g_styleSteady = SysAllocString(L"Steady");
     g_styleLightning = SysAllocString(L"Lightning");
 
-    InitWMI();
+    // --- CONEXIÓN WMI CON REINTENTOS ---
+    Log("[WMI] Connecting to LibreHardwareMonitor...");
+    bool wmiConnected = false;
+    for (int j = 1; j <= 5; j++) {
+        if (InitWMI()) {
+            Log("[WMI] Connected to namespace successfully.");
+            wmiConnected = true;
+            break;
+        }
+        char wmiRetry[100];
+        snprintf(wmiRetry, sizeof(wmiRetry), "[WMI] Connection attempt %d/5 failed.", j);
+        Log(wmiRetry);
+
+        if (j == 5) {
+            Log("[WMI] FATAL: Could not connect to WMI. Is LibreHardwareMonitor running?");
+            MessageBox(NULL, L"Could not connect to LibreHardwareMonitor.\nPlease ensure it is open and 'WMI Server' is enabled.", L"WMI Error", MB_OK | MB_ICONWARNING);
+            FinalCleanup(hWnd);
+            return 1;
+        }
+        Sleep(3000);
+    }
+
     RegisterHotKey(hWnd, 1, MOD_CONTROL | MOD_SHIFT | MOD_ALT, 0x4C);
 
     NOTIFYICONDATA nid = { sizeof(NOTIFYICONDATA), hWnd, 1, NIF_ICON | NIF_MESSAGE | NIF_TIP, WM_TRAYICON };
     nid.hIcon = (HICON)LoadImage(hInstance, MAKEINTRESOURCE(101), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
-    wcscpy_s(nid.szTip, L"MysticFight (by tonikelope)");
+    swprintf_s(nid.szTip, L"MysticFight %s (by tonikelope)", APP_VERSION);
     Shell_NotifyIcon(NIM_ADD, &nid);
 
-    ShowNotification(hWnd, hInstance, L"MysticFight (by tonikelope)", L"Temperature Control Active");
+    ShowNotification(hWnd, hInstance, windowTitle, L"Let's dance baby");
 
     DWORD lastR = 999, lastG = 999;
     bool modoAlertaActivo = false;
@@ -392,7 +444,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         if (g_LedsEnabled && g_Running) {
             float rawTemp = GetCPUTempFast();
-            if (rawTemp <= 0) { InitWMI(); }
+            if (rawTemp <= 0) {
+                // Si falla la lectura, intentamos re-conectar sin cerrar el programa
+                InitWMI();
+            }
             else {
                 float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f;
                 DWORD R = 0, G = 0, B = 0;
@@ -401,10 +456,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     if (!modoAlertaActivo && g_cfg.lightningEffect) {
                         lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleLightning);
                         modoAlertaActivo = true;
+                        Log("[MysticFight] ALERT MODE: High temperature detected!");
                     }
                 }
                 else {
-                    if (modoAlertaActivo) { lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady); modoAlertaActivo = false; }
+                    if (modoAlertaActivo) {
+                        lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
+                        modoAlertaActivo = false;
+                    }
                     if (temp <= (float)g_cfg.tempLow) { R = 0; G = 255; }
                     else if (temp <= (float)g_cfg.tempHigh) {
                         R = (DWORD)(255 * (temp - (float)g_cfg.tempLow) / ((float)g_cfg.tempHigh - (float)g_cfg.tempLow));
@@ -416,6 +475,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     }
                     else { R = 255; G = 0; }
                 }
+
                 if (R != lastR || G != lastG) {
                     for (int i = 0; i < g_totalLeds; i++) lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
                     lastR = R; lastG = G;
@@ -424,6 +484,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
         if (g_Running) MsgWaitForMultipleObjects(0, NULL, FALSE, 500, QS_ALLINPUT);
     }
+
     FinalCleanup(hWnd);
     return 0;
 }
