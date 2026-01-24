@@ -9,15 +9,11 @@ Let's be honest: the official **Mystic Light** software is often unreliable, and
 
 The main issue is Mystic Light temperature monitoring script: **it fails constantly after a system reboot**, forcing you to manually open MSI Center and navigate to the Mystic Light section every single time just to get it working again. This is simply intolerable.
 
-Fortunately, while the MSI UI is a mess, people who programmed the **SDK** actually did a good job. **MysticFight** bypasses the buggy MysticLight interface and talks directly to the SDK, ensuring:
-
-* **No Manual Intervention:** It works immediately after login without opening MSI Center.
-* **Rock Solid:** Uses the reliable SDK backbone combined with LibreHardwareMonitor data.
-* **Lightweight:** No heavy dashboards; just a simple tray app that stays out of your way.
-* **Sensor customization:** You can choose to monitor any temperature sensor you prefer.
+Fortunately, while the MSI UI is a mess, people who programmed the **SDK** actually did a good job. **MysticFight** bypasses the buggy MysticLight interface and talks directly to the SDK.
 
 ## Features
 * **Real-time Monitoring:** Temperature tracking via WMI.
+* **Lightweight:** No heavy dashboards; just a simple tray app that stays out of your way.
 * **Customizable Temperature Sensor:** Choose the one you prefer.
 * **Customizable Thresholds:** Green (Cool), Yellow (Warm), Red (Hot).
 * **Alert Effect:** Automatic 'Lightning' style during high-temp alerts.
