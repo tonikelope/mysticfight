@@ -9,7 +9,7 @@ Let's be honest: the official **Mystic Light** software is often unreliable, and
 
 The main issue is Mystic Light cpu temperature monitoring profile: **it fails constantly after a system reboot**, forcing you to manually open MSI Center and navigate to the Mystic Light section every single time just to get it working again. It seems that they fix it in one update but break it in the next, in a endless loop. This is simply intolerable. 
 
-Fortunately, while the MSI UI is a mess, people who programmed the **SDK** actually did a good job. **MysticFight** bypasses the buggy MysticLight interface and talks directly to the SDK.
+Fortunately, while Mystic Light "client" is a mess, people who programmed the **SDK** actually did a good job. **MysticFight** bypasses the buggy MysticLight interface and talks directly to the SDK.
 
 ## Features
 * **Real-time Monitoring:** Temperature tracking via WMI.
