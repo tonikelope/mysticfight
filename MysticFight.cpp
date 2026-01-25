@@ -18,7 +18,7 @@
 #define ID_TRAY_EXIT 1001
 #define ID_TRAY_CONFIG 2001
 
-const wchar_t* APP_VERSION = L"v0.8";
+const wchar_t* APP_VERSION = L"v0.9";
 
 // CONFIG STRUCTURE
 struct Config {
@@ -68,28 +68,33 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"Settings", L"Lightning", g_cfg.lightningEffect ? L"1" : L"0", INI_FILE);
 }
 
-// Fills the ComboBox with real sensors
 void PopulateSensorList(HWND hDlg) {
     HWND hCombo = GetDlgItem(hDlg, IDC_SENSOR_ID);
 
-    // Limpieza previa de memoria de ItemData antes de resetear
+    // 1. Limpieza GARANTIZADA de la memoria anterior
     int count = (int)SendMessage(hCombo, CB_GETCOUNT, 0, 0);
     for (int i = 0; i < count; i++) {
         wchar_t* ptr = (wchar_t*)SendMessage(hCombo, CB_GETITEMDATA, i, 0);
-        if (ptr && ptr != (wchar_t*)CB_ERR) free(ptr);
+        if (ptr && ptr != (wchar_t*)CB_ERR) {
+            free(ptr); // Liberamos el string duplicado
+        }
     }
     SendMessage(hCombo, CB_RESETCONTENT, 0, 0);
 
     if (!g_pSvc) InitWMI();
 
-    bool found = false;
     if (g_pSvc) {
         IEnumWbemClassObject* pEnumerator = NULL;
+        // Optimizamos la query pidiendo solo lo estrictamente necesario
         bstr_t query("SELECT Name, Identifier FROM Sensor WHERE SensorType = 'Temperature'");
 
-        if (SUCCEEDED(g_pSvc->ExecQuery(bstr_t("WQL"), query, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator))) {
+        if (SUCCEEDED(g_pSvc->ExecQuery(bstr_t("WQL"), query,
+            WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator))) {
+
             IWbemClassObject* pclsObj = NULL;
             ULONG uReturn = 0;
+            bool found = false;
+
             while (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK) {
                 VARIANT vtName, vtID;
                 pclsObj->Get(L"Name", 0, &vtName, 0, 0);
@@ -97,30 +102,33 @@ void PopulateSensorList(HWND hDlg) {
 
                 int idx = (int)SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)vtName.bstrVal);
                 if (idx != CB_ERR) {
+                    // Guardamos el Identifier oculto en el item
                     wchar_t* persistentID = _wcsdup(vtID.bstrVal);
                     SendMessage(hCombo, CB_SETITEMDATA, idx, (LPARAM)persistentID);
 
+                    // Auto-seleccionar el sensor actual si coincide
                     if (wcscmp(vtID.bstrVal, g_cfg.sensorID) == 0) {
                         SendMessage(hCombo, CB_SETCURSEL, idx, 0);
                         found = true;
                     }
                 }
 
-                VariantClear(&vtName); VariantClear(&vtID);
+                VariantClear(&vtName);
+                VariantClear(&vtID);
                 pclsObj->Release();
             }
             pEnumerator->Release();
+
+            if (!found && SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 0) {
+                SendMessage(hCombo, CB_SETCURSEL, 0, 0);
+            }
         }
     }
 
+    // Manejo de error si no hay sensores
     if (SendMessage(hCombo, CB_GETCOUNT, 0, 0) == 0) {
-        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"!!! ERROR: OPEN LHM (and close/reopen this settings) !!!");
-        SendMessage(hCombo, CB_SETCURSEL, 0, 0);
+        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Error: No sensors found. Open LHM!");
         EnableWindow(GetDlgItem(hDlg, IDOK), FALSE);
-    }
-    else {
-        if (!found) SendMessage(hCombo, CB_SETCURSEL, 0, 0);
-        EnableWindow(GetDlgItem(hDlg, IDOK), TRUE);
     }
 }
 
