@@ -29,7 +29,7 @@ For this tool to work, you MUST have the following installed/running:
 
 ## 🚀 How to Run at Startup (Step-by-Step)
 
-Since the app requires **Administrator privileges** for SDK and WMI access, it must be launched via **Windows Task Scheduler**. Follow these precise settings to ensure it works forever:
+Since the app requires **Administrator privileges** for SDK and WMI access, it must be launched via **Windows Task Scheduler**. Follow these precise settings:
 
 ### 1. Create the Task
 * Open the **Start Menu**, type `Task Scheduler`, and press **Enter**.
