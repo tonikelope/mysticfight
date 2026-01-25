@@ -16,7 +16,6 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * **VERY Lightweight:** No heavy dashboards; just a simple tray app that stays out of your way.
 * **Customizable Temperature Sensor:** Choose the one you prefer.
 * **Customizable Temperature Thresholds:** Green-Yellow-Red
-* **Alert Effect:** Automatic 'Lightning' style during high-temp alerts.
 * **Night-Mode with Global Hotkey:** `Ctrl + Alt + Shift + L` to power-off/on LEDs instantly.
   
 ## ⚠️ Requirements
