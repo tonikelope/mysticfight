@@ -18,7 +18,7 @@
 #define ID_TRAY_EXIT 1001
 #define ID_TRAY_CONFIG 2001
 
-const wchar_t* APP_VERSION = L"v0.3";
+const wchar_t* APP_VERSION = L"v0.4";
 
 // CONFIG STRUCTURE
 struct Config {
