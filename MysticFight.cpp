@@ -18,7 +18,7 @@
 #define ID_TRAY_EXIT 1001
 #define ID_TRAY_CONFIG 2001
 
-const wchar_t* APP_VERSION = L"v0.5";
+const wchar_t* APP_VERSION = L"v0.6";
 
 // CONFIG STRUCTURE
 struct Config {
@@ -434,6 +434,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     ShowNotification(hWnd, hInstance, windowTitle, L"Let's dance baby");
 
+    lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
+    
+    for (int i = 0; i < g_totalLeds; i++) 
+        lpMLAPI_SetLedColor(g_deviceName, i, 255, 255, 255);
+
+    DWORD R = 0, G = 0, B = 0;
     DWORD lastR = 999, lastG = 999;
     bool modoAlertaActivo = false;
     MSG msg = { 0 };
@@ -445,6 +451,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 
                 if (g_LedsEnabled) {
                     MessageBeep(MB_OK);
+
+                    lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
+
+                    for (int i = 0; i < g_totalLeds; i++) {
+                        lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
+                    }
+
                 }else {
                     MessageBeep(MB_ICONHAND);
                     lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
@@ -464,8 +477,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             else {
                 // Update RGB colors in 0.25 Celsius degrees steps for not flooding MOBO RGB controller
                 float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f;
-                DWORD R = 0, G = 0, B = 0;
-
+                
                 if (temp >= (float)g_cfg.tempAlert) {
                     
                     R = 255; G = 0; B = 0;
