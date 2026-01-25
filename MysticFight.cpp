@@ -105,7 +105,7 @@ void PopulateSensorList(HWND hDlg) {
 
     // IF NO SENSORS FOUND (LHM CLOSED OR WMI ERROR)
     if (SendMessage(hCombo, CB_GETCOUNT, 0, 0) == 0) {
-        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"!!! ERROR: OPEN LIBREHARDWAREMONITOR !!!");
+        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"!!! ERROR: OPEN LHM (and close/reopen this settings) !!!");
         SendMessage(hCombo, CB_SETCURSEL, 0, 0);
         EnableWindow(GetDlgItem(hDlg, IDOK), FALSE);
     }
@@ -349,13 +349,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     lpMLAPI_SetLedColor = (LPMLAPI_SetLedColor)GetProcAddress(g_hLibrary, "MLAPI_SetLedColor");
     lpMLAPI_SetLedStyle = (LPMLAPI_SetLedStyle)GetProcAddress(g_hLibrary, "MLAPI_SetLedStyle");
 
-    // --- LOGICA DE INICIALIZACIÓN SDK CON REINTENTOS ---
+
     Log("[MysticLight] Attempting to initialize SDK...");
     if (lpMLAPI_Initialize() != 0) {
         bool initialized = false;
         for (int i = 1; i <= 10; i++) {
+            
             char retryMsg[100];
+            
             snprintf(retryMsg, sizeof(retryMsg), "[MysticLight] Attempt %d/10 failed. Retrying in 5s...", i);
+            
             Log(retryMsg);
 
             if (lpMLAPI_Initialize() == 0) {
@@ -370,6 +373,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 FinalCleanup(hWnd);
                 return 1;
             }
+
             Sleep(5000);
         }
     }
@@ -393,26 +397,32 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     g_styleSteady = SysAllocString(L"Steady");
     g_styleLightning = SysAllocString(L"Lightning");
 
-    // --- CONEXIÓN WMI CON REINTENTOS ---
     Log("[WMI] Connecting to LibreHardwareMonitor...");
+    
     bool wmiConnected = false;
-    for (int j = 1; j <= 5; j++) {
+    
+    for (int j = 1; j <= 10; j++) {
+        
         if (InitWMI()) {
             Log("[WMI] Connected to namespace successfully.");
             wmiConnected = true;
             break;
         }
+        
         char wmiRetry[100];
-        snprintf(wmiRetry, sizeof(wmiRetry), "[WMI] Connection attempt %d/5 failed.", j);
+        
+        snprintf(wmiRetry, sizeof(wmiRetry), "[WMI] Connection attempt %d/10 failed.", j);
+        
         Log(wmiRetry);
 
-        if (j == 5) {
+        if (j == 10) {
             Log("[WMI] FATAL: Could not connect to WMI. Is LibreHardwareMonitor running?");
             MessageBox(NULL, L"Could not connect to LibreHardwareMonitor.\nPlease ensure it is open and 'WMI Server' is enabled.", L"WMI Error", MB_OK | MB_ICONWARNING);
             FinalCleanup(hWnd);
             return 1;
         }
-        Sleep(3000);
+
+        Sleep(5000);
     }
 
     RegisterHotKey(hWnd, 1, MOD_CONTROL | MOD_SHIFT | MOD_ALT, 0x4C);
@@ -448,13 +458,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 InitWMI();
             }
             else {
-                // Redondeo suave para evitar parpadeos ínfimos
+                // 0.5ºC 
                 float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f;
                 DWORD R = 0, G = 0, B = 0;
 
-                // --- 1. LÓGICA DE ALERTA MÁXIMA ---
                 if (temp >= (float)g_cfg.tempAlert) {
+                    
                     R = 255; G = 0; B = 0;
+                    
                     if (!modoAlertaActivo && g_cfg.lightningEffect) {
                         lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleLightning);
                         modoAlertaActivo = true;
@@ -462,27 +473,25 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     }
                 }
                 else {
+                    
                     if (modoAlertaActivo) {
                         lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
                         modoAlertaActivo = false;
                     }
 
-                    // --- 2. TRANSICIÓN DE COLORES (COMO TU IMAGEN) ---
-
                     if (temp <= (float)g_cfg.tempLow) {
-                        // VERDE PURO (0, 255, 0)
+                        
                         R = 0; G = 255; B = 0;
                     }
                     else if (temp <= (float)g_cfg.tempHigh) {
-                        // TRAMO VERDE -> AMARILLO (Sube el Rojo hasta 255)
+                        
                         float ratio = (temp - (float)g_cfg.tempLow) / ((float)g_cfg.tempHigh - (float)g_cfg.tempLow);
                         R = (DWORD)(255 * ratio);
                         G = 255;
                         B = 0;
                     }
                     else {
-                        // TRAMO AMARILLO -> ROJO (Baja el Verde hasta 0)
-                        // Aquí es donde pasas por el Naranja de tu imagen
+                        
                         float ratio = (temp - (float)g_cfg.tempHigh) / ((float)g_cfg.tempAlert - (float)g_cfg.tempHigh);
                         R = 255;
                         G = (DWORD)(255 * (1.0f - ratio));
@@ -490,7 +499,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     }
                 }
 
-                // Solo enviamos el comando al SDK si el color resultante ha cambiado
                 if (R != lastR || G != lastG) {
                     for (int i = 0; i < g_totalLeds; i++) {
                         lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
