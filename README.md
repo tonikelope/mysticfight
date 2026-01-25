@@ -7,7 +7,7 @@ MSI Mystic Light CPU Temperature Profile Replacement.
 ## ❓ Why MysticFight?
 Let's be honest: the official **Mystic Light** software is often unreliable, and "fails more than a fairground shotgun". 
 
-The main issue with Mystic Light cpu temperature profile: **it fails randomly after a system reboot**, forcing you to manually open MSI Center and navigate to the Mystic Light section every single time just to get it working again. It seems that they fix it in one update but break it in the next, in a endless loop. This is simply intolerable. 
+The main issue with Mystic Light CPU temperature profile: **it fails randomly after a system reboot**, forcing you to manually open MSI Center and navigate to the Mystic Light section every single time just to get it working again. It seems that they fix it in one update but break it in the next, in a endless loop. This is simply intolerable. 
 
 Fortunately, while Mystic Light "client" is a mess, people who programmed the **SDK** actually did a good job. **MysticFight** bypasses the buggy MysticLight interface and talks directly to the SDK.
 
