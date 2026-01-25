@@ -458,7 +458,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 InitWMI();
             }
             else {
-                // 0.5ºC 
+                // Update RGB colors in 0.25 Celsius degrees steps for not flooding MOBO RGB controller
                 float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f;
                 DWORD R = 0, G = 0, B = 0;
 
