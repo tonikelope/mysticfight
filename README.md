@@ -28,12 +28,25 @@ For this tool to work, you MUST have the following installed/running:
 4. **LibreHardwareMonitor:** [Download here](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor). Must be running (minimized on tray) to provide temperature data via WMI.
 
 ## 🚀 How to Run at Startup
-Since the app requires Administrator privileges for SDK and WMI access, use **Windows Task Scheduler**:
 
-1. **General Tab:** Name it `MysticFight` and check **Run with highest privileges**.
-2. **Triggers Tab:** Set to **At log on**.
-3. **Actions Tab:** Start a program -> Select `MysticFight.exe`.
-   * **IMPORTANT:** In the **"Start in (optional)"** field, paste the full path to the folder (e.g., `C:\Tools\MysticFight\`). If you leave this blank, the app won't find the DLL or your config.
-4. It's recommended to **delay 30 seconds** to give the SDK time to initialise correctly.
+Since the app requires **Administrator privileges** for SDK and WMI access, you must use the **Windows Task Scheduler** instead of the standard Startup folder:
 
-This is practically a proof of concept for everything that the Mystic Light SDK can do with a little imagination. Enjoy it while it works.
+1.  **Create Task:** Open the **Task Scheduler** and select **Create Task...** (on the right panel).
+2.  **General Tab:**
+    * Name it `MysticFight`.
+    * **CRITICAL:** Check the box **Run with highest privileges**. (Otherwise, SDK/WMI access will fail).
+3.  **Triggers Tab:**
+    * Click **New...** and select **At log on** in the top dropdown.
+    * Under "Advanced settings", check **Delay task for:** and set it to **30 seconds**.
+    * *Note: This gives the MSI SDK services enough time to initialize after boot.*
+4.  **Actions Tab:**
+    * Click **New...** -> **Start a program**.
+    * **Program/script:** Browse and select your `MysticFight.exe`.
+    * **Start in (optional):** ⚠️ **REQUIRED.** Paste the full path to the folder containing the exe.
+        * *Example:* `C:\Tools\MysticFight\`
+        * *Why?* If left blank, the app won't find `MysticLight_SDK.dll` or your configuration files.
+5.  **Conditions Tab:**
+    * Uncheck **Stop if the computer switches to battery power** (if you are on a laptop).
+> **Quick Test:** Once created, right-click the task in the "Task Scheduler Library" and click **Run**. If the tray icon appears and the LEDs respond, the configuration is perfect.
+
+This is practically a proof of concept for everything that the Mystic Light SDK can do with a little imagination. Carpe diem!
