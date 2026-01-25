@@ -18,7 +18,7 @@
 #define ID_TRAY_EXIT 1001
 #define ID_TRAY_CONFIG 2001
 
-const wchar_t* APP_VERSION = L"v0.9";
+const wchar_t* APP_VERSION = L"v1.0";
 
 // CONFIG STRUCTURE
 struct Config {
@@ -153,7 +153,6 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 		SetDlgItemInt(hDlg, IDC_TEMP_LOW, g_cfg.tempLow, TRUE);
 		SetDlgItemInt(hDlg, IDC_TEMP_HIGH, g_cfg.tempHigh, TRUE);
 		SetDlgItemInt(hDlg, IDC_TEMP_ALERT, g_cfg.tempAlert, TRUE);
-		CheckDlgButton(hDlg, IDC_CHECK_ALERTA, g_cfg.lightningEffect ? BST_CHECKED : BST_UNCHECKED);
 		return (INT_PTR)TRUE;
 	}
 	case WM_COMMAND:
@@ -180,7 +179,6 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 			g_cfg.tempLow = tLow;
 			g_cfg.tempHigh = tHigh;
 			g_cfg.tempAlert = tAlert;
-			g_cfg.lightningEffect = (IsDlgButtonChecked(hDlg, IDC_CHECK_ALERTA) == BST_CHECKED);
 
 			SaveSettings();
 			EndDialog(hDlg, IDOK);
@@ -523,7 +521,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	DWORD R = 0, G = 0, B = 0;
 	DWORD lastR = 999, lastG = 999;
-	bool modoAlertaActivo = false;
+	
 	MSG msg = { 0 };
 
 	while (g_Running) {
@@ -535,9 +533,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			}
 			if (msg.message == WM_HOTKEY) {
 				g_LedsEnabled = !g_LedsEnabled;
-				// RESET DE SEGURIDAD: Volvemos a modo Steady y desactivamos bandera de alerta
-				if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
-				modoAlertaActivo = false;
+				
 				lastR = 999; lastG = 999;
 
 				if (g_LedsEnabled) {
@@ -567,19 +563,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			else {
 				float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f;
 
-				if (temp >= (float)g_cfg.tempAlert) {
-					R = 255; G = 0; B = 0;
-					if (!modoAlertaActivo && g_cfg.lightningEffect) {
-						if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleLightning);
-						modoAlertaActivo = true;
-					}
-				}
-				else {
-					if (modoAlertaActivo) {
-						if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
-						modoAlertaActivo = false;
-					}
-
 					if (temp <= (float)g_cfg.tempLow) {
 						R = 0; G = 255; B = 0;
 					}
@@ -598,10 +581,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 						G = (DWORD)(255 * (1.0f - ratio));
 						B = 0;
 					}
-				}
+				
 
 				// Solo actualizar el SDK si el color realmente cambió
-				if (!modoAlertaActivo && (R != lastR || G != lastG)) {
+				if (R != lastR || G != lastG) {
 					for (int i = 0; i < g_totalLeds; i++) {
 						if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
 					}

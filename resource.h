@@ -4,4 +4,3 @@
 #define IDC_TEMP_LOW                    1002
 #define IDC_TEMP_HIGH                   1003
 #define IDC_TEMP_ALERT                  1004
-#define IDC_CHECK_ALERTA                1005
