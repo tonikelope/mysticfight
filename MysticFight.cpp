@@ -18,7 +18,7 @@
 #define ID_TRAY_EXIT 1001
 #define ID_TRAY_CONFIG 2001
 
-const wchar_t* APP_VERSION = L"v0.6";
+const wchar_t* APP_VERSION = L"v0.7";
 
 // CONFIG STRUCTURE
 struct Config {
@@ -70,6 +70,13 @@ void SaveSettings() {
 // Fills the ComboBox with real sensors
 void PopulateSensorList(HWND hDlg) {
     HWND hCombo = GetDlgItem(hDlg, IDC_SENSOR_ID);
+
+    // Limpieza previa de memoria de ItemData antes de resetear
+    int count = (int)SendMessage(hCombo, CB_GETCOUNT, 0, 0);
+    for (int i = 0; i < count; i++) {
+        wchar_t* ptr = (wchar_t*)SendMessage(hCombo, CB_GETITEMDATA, i, 0);
+        if (ptr && ptr != (wchar_t*)CB_ERR) free(ptr);
+    }
     SendMessage(hCombo, CB_RESETCONTENT, 0, 0);
 
     if (!g_pSvc) InitWMI();
@@ -88,12 +95,14 @@ void PopulateSensorList(HWND hDlg) {
                 pclsObj->Get(L"Identifier", 0, &vtID, 0, 0);
 
                 int idx = (int)SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)vtName.bstrVal);
-                wchar_t* persistentID = _wcsdup(vtID.bstrVal);
-                SendMessage(hCombo, CB_SETITEMDATA, idx, (LPARAM)persistentID);
+                if (idx != CB_ERR) {
+                    wchar_t* persistentID = _wcsdup(vtID.bstrVal);
+                    SendMessage(hCombo, CB_SETITEMDATA, idx, (LPARAM)persistentID);
 
-                if (wcscmp(vtID.bstrVal, g_cfg.sensorID) == 0) {
-                    SendMessage(hCombo, CB_SETCURSEL, idx, 0);
-                    found = true;
+                    if (wcscmp(vtID.bstrVal, g_cfg.sensorID) == 0) {
+                        SendMessage(hCombo, CB_SETCURSEL, idx, 0);
+                        found = true;
+                    }
                 }
 
                 VariantClear(&vtName); VariantClear(&vtID);
@@ -103,7 +112,6 @@ void PopulateSensorList(HWND hDlg) {
         }
     }
 
-    // IF NO SENSORS FOUND (LHM CLOSED OR WMI ERROR)
     if (SendMessage(hCombo, CB_GETCOUNT, 0, 0) == 0) {
         SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"!!! ERROR: OPEN LHM (and close/reopen this settings) !!!");
         SendMessage(hCombo, CB_SETCURSEL, 0, 0);
@@ -157,7 +165,9 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                 return TRUE;
             }
 
-            if (selectedID) wcscpy_s(g_cfg.sensorID, selectedID);
+            if (selectedID && selectedID != (wchar_t*)CB_ERR) {
+                wcscpy_s(g_cfg.sensorID, selectedID);
+            }
             g_cfg.tempLow = tLow;
             g_cfg.tempHigh = tHigh;
             g_cfg.tempAlert = tAlert;
@@ -175,7 +185,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         int count = (int)SendMessage(hCombo, CB_GETCOUNT, 0, 0);
         for (int i = 0; i < count; i++) {
             wchar_t* ptr = (wchar_t*)SendMessage(hCombo, CB_GETITEMDATA, i, 0);
-            if (ptr) free(ptr);
+            if (ptr && ptr != (wchar_t*)CB_ERR) free(ptr);
         }
         break;
     }
@@ -209,6 +219,16 @@ static void FinalCleanup(HWND hWnd) {
     if (cleaned) return;
     cleaned = true;
     Log("[MysticFight] Cleaning resources...");
+
+    if (lpMLAPI_SetLedStyle && g_deviceName) {
+
+        lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
+
+        for (int i = 0; i < g_totalLeds; i++) {
+            if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
+        }
+    }
+
     NOTIFYICONDATA nid = { sizeof(NOTIFYICONDATA) };
     nid.hWnd = hWnd; nid.uID = 1;
     Shell_NotifyIcon(NIM_DELETE, &nid);
@@ -284,7 +304,8 @@ static float GetCPUTempFast() {
         if (pEnumerator->Next(100, 1, &pclsObj, &uReturn) == S_OK && uReturn > 0) {
             VARIANT vtProp;
             pclsObj->Get(L"Value", 0, &vtProp, 0, 0);
-            temp = vtProp.fltVal;
+            if (vtProp.vt == VT_R4) temp = vtProp.fltVal;
+            else if (vtProp.vt == VT_R8) temp = (float)vtProp.dblVal;
             VariantClear(&vtProp);
             pclsObj->Release();
         }
@@ -319,7 +340,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     if (wcslen(g_cfg.sensorID) == 0) {
         if (DialogBoxW(hInstance, MAKEINTRESOURCE(IDD_SETTINGS), NULL, SettingsDlgProc) == IDCANCEL) {
-            if (g_hMutex) CloseHandle(g_hMutex);
+            if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); }
             CoUninitialize();
             return 0;
         }
@@ -344,24 +365,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return 1;
     }
 
-    auto lpMLAPI_Initialize = (LPMLAPI_Initialize)GetProcAddress(g_hLibrary, "MLAPI_Initialize");
-    auto lpMLAPI_GetDeviceInfo = (LPMLAPI_GetDeviceInfo)GetProcAddress(g_hLibrary, "MLAPI_GetDeviceInfo");
+    auto fnMLAPI_Initialize = (LPMLAPI_Initialize)GetProcAddress(g_hLibrary, "MLAPI_Initialize");
+    auto fnMLAPI_GetDeviceInfo = (LPMLAPI_GetDeviceInfo)GetProcAddress(g_hLibrary, "MLAPI_GetDeviceInfo");
     lpMLAPI_SetLedColor = (LPMLAPI_SetLedColor)GetProcAddress(g_hLibrary, "MLAPI_SetLedColor");
     lpMLAPI_SetLedStyle = (LPMLAPI_SetLedStyle)GetProcAddress(g_hLibrary, "MLAPI_SetLedStyle");
 
-
     Log("[MysticLight] Attempting to initialize SDK...");
-    if (lpMLAPI_Initialize() != 0) {
+    if (!fnMLAPI_Initialize || fnMLAPI_Initialize() != 0) {
         bool initialized = false;
         for (int i = 1; i <= 10; i++) {
-            
             char retryMsg[100];
-            
             snprintf(retryMsg, sizeof(retryMsg), "[MysticLight] Attempt %d/10 failed. Retrying in 5s...", i);
-            
             Log(retryMsg);
 
-            if (lpMLAPI_Initialize() == 0) {
+            if (fnMLAPI_Initialize && fnMLAPI_Initialize() == 0) {
                 Log("[MysticLight] SDK Initialized successfully on retry.");
                 initialized = true;
                 break;
@@ -373,7 +390,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 FinalCleanup(hWnd);
                 return 1;
             }
-
             Sleep(5000);
         }
     }
@@ -382,7 +398,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     SAFEARRAY* pDevType = nullptr, * pLedCount = nullptr;
-    if (lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0 && pDevType) {
+    if (fnMLAPI_GetDeviceInfo && fnMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0 && pDevType) {
         BSTR* pData = (BSTR*)(pDevType->pvData);
         BSTR* pCounts = (BSTR*)(pLedCount->pvData);
         g_deviceName = SysAllocString(pData[0]);
@@ -398,21 +414,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     g_styleLightning = SysAllocString(L"Lightning");
 
     Log("[WMI] Connecting to LibreHardwareMonitor...");
-    
     bool wmiConnected = false;
-    
     for (int j = 1; j <= 10; j++) {
-        
         if (InitWMI()) {
             Log("[WMI] Connected to namespace successfully.");
             wmiConnected = true;
             break;
         }
-        
         char wmiRetry[100];
-        
         snprintf(wmiRetry, sizeof(wmiRetry), "[WMI] Connection attempt %d/10 failed.", j);
-        
         Log(wmiRetry);
 
         if (j == 10) {
@@ -421,7 +431,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             FinalCleanup(hWnd);
             return 1;
         }
-
         Sleep(5000);
     }
 
@@ -434,10 +443,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     ShowNotification(hWnd, hInstance, windowTitle, L"Let's dance baby");
 
-    lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
-    
-    for (int i = 0; i < g_totalLeds; i++) 
-        lpMLAPI_SetLedColor(g_deviceName, i, 255, 255, 255);
+    if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
+    for (int i = 0; i < g_totalLeds; i++)
+        if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, 255, 255, 255);
 
     DWORD R = 0, G = 0, B = 0;
     DWORD lastR = 999, lastG = 999;
@@ -448,21 +456,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         while (g_Running && PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_HOTKEY) {
                 g_LedsEnabled = !g_LedsEnabled;
-                
                 if (g_LedsEnabled) {
                     MessageBeep(MB_OK);
-
-                    lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
-
+                    if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
                     for (int i = 0; i < g_totalLeds; i++) {
-                        lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
+                        if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
                     }
-
-                }else {
+                }
+                else {
                     MessageBeep(MB_ICONHAND);
-                    lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
+                    if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
                     modoAlertaActivo = false;
-                    for (int i = 0; i < g_totalLeds; i++) lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
+                    for (int i = 0; i < g_totalLeds; i++)
+                        if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
                     lastR = 999; lastG = 999;
                 }
             }
@@ -475,39 +481,32 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 InitWMI();
             }
             else {
-                // Update RGB colors in 0.25 Celsius degrees steps for not flooding MOBO RGB controller
                 float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f;
-                
                 if (temp >= (float)g_cfg.tempAlert) {
                     
                     R = 255; G = 0; B = 0;
                     
                     if (!modoAlertaActivo && g_cfg.lightningEffect) {
-                        lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleLightning);
+                        if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleLightning);
                         modoAlertaActivo = true;
-                        Log("[MysticFight] ALERT: Threshold reached. Switching to Red Lightning.");
-                    }
-                }
-                else {
-                    
-                    if (modoAlertaActivo) {
-                        lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
-                        modoAlertaActivo = false;
                     }
 
+                }
+                else {
+                    if (modoAlertaActivo) {
+                        if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
+                        modoAlertaActivo = false;
+                    }
                     if (temp <= (float)g_cfg.tempLow) {
-                        
                         R = 0; G = 255; B = 0;
                     }
                     else if (temp <= (float)g_cfg.tempHigh) {
-                        
                         float ratio = (temp - (float)g_cfg.tempLow) / ((float)g_cfg.tempHigh - (float)g_cfg.tempLow);
                         R = (DWORD)(255 * ratio);
                         G = 255;
                         B = 0;
                     }
                     else {
-                        
                         float ratio = (temp - (float)g_cfg.tempHigh) / ((float)g_cfg.tempAlert - (float)g_cfg.tempHigh);
                         R = 255;
                         G = (DWORD)(255 * (1.0f - ratio));
@@ -517,13 +516,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
                 if (R != lastR || G != lastG) {
                     for (int i = 0; i < g_totalLeds; i++) {
-                        lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
+                        if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
                     }
                     lastR = R; lastG = G;
                 }
             }
         }
-
         if (g_Running) MsgWaitForMultipleObjects(0, NULL, FALSE, 500, QS_ALLINPUT);
     }
 
