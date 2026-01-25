@@ -37,12 +37,11 @@ Since the app requires **Administrator privileges** for SDK and WMI access, you 
     * **CRITICAL:** Check the box **Run with highest privileges**. (Otherwise, SDK/WMI access will fail).
 3.  **Triggers Tab:**
     * Click **New...** and select **At log on** in the top dropdown.
-    * Under "Advanced settings", check **Delay task for:** and set it to **30 seconds**.
-    * *Note: This gives the MSI SDK services enough time to initialize after boot.*
+    * Under "Advanced settings", check **Delay task for:** and set it to **30 seconds**. (This gives the MSI SDK services enough time to initialize after boot).
 4.  **Actions Tab:**
     * Click **New...** -> **Start a program**.
     * **Program/script:** Browse and select your `MysticFight.exe`.
-    * **Start in (optional):** ⚠️ **REQUIRED.** Paste the full path to the folder containing the exe.
+    * **Start in:** ⚠️ **REQUIRED.** Paste the full path to the folder containing the exe.
         * *Example:* `C:\Tools\MysticFight\`
         * *Why?* If left blank, the app won't find `MysticLight_SDK.dll` or your configuration files.
 5.  **Conditions Tab:**
