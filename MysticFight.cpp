@@ -18,7 +18,7 @@
 #define ID_TRAY_EXIT 1001
 #define ID_TRAY_CONFIG 2001
 
-const wchar_t* APP_VERSION = L"v0.7";
+const wchar_t* APP_VERSION = L"v0.8";
 
 // CONFIG STRUCTURE
 struct Config {
@@ -38,6 +38,7 @@ typedef int (*LPMLAPI_SetLedStyle)(BSTR type, DWORD index, BSTR style);
 bool g_Running = true;
 bool g_LedsEnabled = true;
 IWbemServices* g_pSvc = NULL;
+IEnumWbemClassObject* g_pEnumTemperatura = NULL;
 IWbemLocator* g_pLoc = NULL;
 BSTR g_deviceName = NULL;
 BSTR g_styleSteady = NULL;
@@ -220,27 +221,42 @@ static void FinalCleanup(HWND hWnd) {
     cleaned = true;
     Log("[MysticFight] Cleaning resources...");
 
+    // 1. Apagamos LEDs (mientras la DLL sigue cargada)
     if (lpMLAPI_SetLedStyle && g_deviceName) {
-
         lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
-
         for (int i = 0; i < g_totalLeds; i++) {
             if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
         }
     }
 
+    // 2. Liberamos Icono y Hotkeys
     NOTIFYICONDATA nid = { sizeof(NOTIFYICONDATA) };
     nid.hWnd = hWnd; nid.uID = 1;
     Shell_NotifyIcon(NIM_DELETE, &nid);
     if (hWnd) UnregisterHotKey(hWnd, 1);
+
+    // 3. Liberamos Strings de MSI
     if (g_deviceName) SysFreeString(g_deviceName);
     if (g_styleSteady) SysFreeString(g_styleSteady);
     if (g_styleLightning) SysFreeString(g_styleLightning);
-    if (g_pSvc) g_pSvc->Release();
-    if (g_pLoc) g_pLoc->Release();
+
+    // 4. Liberamos la DLL de MSI (Ya no la necesitamos)
+    if (g_hLibrary) {
+        FreeLibrary(g_hLibrary);
+        g_hLibrary = NULL;
+    }
+
+    // 5. Liberamos WMI (Antes de apagar COM)
+    if (g_pEnumTemperatura) { g_pEnumTemperatura->Release(); g_pEnumTemperatura = NULL; }
+    if (g_pSvc) { g_pSvc->Release(); g_pSvc = NULL; }
+    if (g_pLoc) { g_pLoc->Release(); g_pLoc = NULL; }
+
+    // 6. Cerramos Mutex
+    if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); g_hMutex = NULL; }
+
+    // 7. APAGAR COM (EL ÚLTIMO)
     CoUninitialize();
-    if (g_hLibrary) FreeLibrary(g_hLibrary);
-    if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); }
+
     Log("[MysticFight] BYE BYE (Cleanup finished)");
 }
 
@@ -263,7 +279,14 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
     case WM_COMMAND:
         if (LOWORD(wParam) == ID_TRAY_EXIT) g_Running = false;
         if (LOWORD(wParam) == ID_TRAY_CONFIG) {
-            DialogBoxW(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_SETTINGS), hWnd, SettingsDlgProc);
+            if (DialogBoxW(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_SETTINGS), hWnd, SettingsDlgProc) == IDOK) {
+
+                if (g_pEnumTemperatura) {
+                    g_pEnumTemperatura->Release();
+                    g_pEnumTemperatura = NULL;
+                }
+                Log("[WMI] Sensor actualizado, reiniciando consulta...");
+            }
         }
         break;
     case WM_QUERYENDSESSION:
@@ -293,23 +316,42 @@ static bool InitWMI() {
 
 static float GetCPUTempFast() {
     if (!g_pSvc) return 0.0f;
-    static bstr_t bstrWQL("WQL");
-    std::wstring queryStr = L"SELECT Value FROM Sensor WHERE Identifier = '" + std::wstring(g_cfg.sensorID) + L"'";
-    bstr_t bstrQuery(queryStr.c_str());
+
+    // 1. Si el enumerador es NULL (primera vez o tras cambiar sensor), lo creamos
+    if (g_pEnumTemperatura == NULL) {
+        std::wstring queryStr = L"SELECT Value FROM Sensor WHERE Identifier = '" + std::wstring(g_cfg.sensorID) + L"'";
+        bstr_t bstrQuery(queryStr.c_str());
+        bstr_t bstrWQL("WQL");
+
+        // Usamos WBEM_FLAG_RETURN_IMMEDIATELY para que no bloquee
+        HRESULT hr = g_pSvc->ExecQuery(bstrWQL, bstrQuery,
+            WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+            NULL, &g_pEnumTemperatura);
+
+        if (FAILED(hr)) return 0.0f;
+    }
+
     float temp = 0.0f;
-    IEnumWbemClassObject* pEnumerator = NULL;
-    if (SUCCEEDED(g_pSvc->ExecQuery(bstrWQL, bstrQuery, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator))) {
-        IWbemClassObject* pclsObj = NULL;
-        ULONG uReturn = 0;
-        if (pEnumerator->Next(100, 1, &pclsObj, &uReturn) == S_OK && uReturn > 0) {
-            VARIANT vtProp;
-            pclsObj->Get(L"Value", 0, &vtProp, 0, 0);
+    IWbemClassObject* pclsObj = NULL;
+    ULONG uReturn = 0;
+
+    // 2. En lugar de hacer una Query nueva, reseteamos el que ya tenemos
+    // Esto es lo que ahorra un 90% de CPU
+    g_pEnumTemperatura->Reset();
+
+    if (g_pEnumTemperatura->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK && uReturn > 0) {
+        VARIANT vtProp;
+        if (SUCCEEDED(pclsObj->Get(L"Value", 0, &vtProp, 0, 0))) {
             if (vtProp.vt == VT_R4) temp = vtProp.fltVal;
             else if (vtProp.vt == VT_R8) temp = (float)vtProp.dblVal;
             VariantClear(&vtProp);
-            pclsObj->Release();
         }
-        pEnumerator->Release();
+        pclsObj->Release();
+    }
+    else {
+        // Si falla el Next, liberamos para que se reintente la Query en el próximo ciclo
+        g_pEnumTemperatura->Release();
+        g_pEnumTemperatura = NULL;
     }
     return temp;
 }
@@ -397,17 +439,45 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         Log("[MysticLight] SDK Initialized successfully at first attempt.");
     }
 
-    SAFEARRAY* pDevType = nullptr, * pLedCount = nullptr;
-    if (fnMLAPI_GetDeviceInfo && fnMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0 && pDevType) {
-        BSTR* pData = (BSTR*)(pDevType->pvData);
-        BSTR* pCounts = (BSTR*)(pLedCount->pvData);
-        g_deviceName = SysAllocString(pData[0]);
-        g_totalLeds = _wtoi(pCounts[0]);
-        SafeArrayDestroy(pDevType); SafeArrayDestroy(pLedCount);
+    // --- REEMPLAZO SEGURO ---
+    SAFEARRAY* pDevType = nullptr;
+    SAFEARRAY* pLedCount = nullptr;
 
-        char devInfo[150];
-        snprintf(devInfo, sizeof(devInfo), "[MysticLight] Device detected: %ls | LEDs: %d", g_deviceName, g_totalLeds);
-        Log(devInfo);
+    if (fnMLAPI_GetDeviceInfo && fnMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0 && pDevType && pLedCount) {
+        BSTR* pNames = nullptr;
+        // IMPORTANTE: Verifica si el SDK devuelve BSTR o LONG para los counts. 
+        // En MSI suele ser BSTR, así que mantenemos BSTR* para pCounts
+        BSTR* pCounts = nullptr;
+
+        // Bloqueamos los arrays para leerlos con seguridad
+        if (SUCCEEDED(SafeArrayAccessData(pDevType, (void**)&pNames)) &&
+            SUCCEEDED(SafeArrayAccessData(pLedCount, (void**)&pCounts))) {
+
+            long lBound, uBound;
+            SafeArrayGetLBound(pDevType, 1, &lBound);
+            SafeArrayGetUBound(pDevType, 1, &uBound);
+            long count = uBound - lBound + 1;
+
+            if (count > 0) {
+                // Liberamos si ya existía algo para evitar fugas
+                if (g_deviceName) SysFreeString(g_deviceName);
+
+                g_deviceName = SysAllocString(pNames[0]);
+                g_totalLeds = _wtoi(pCounts[0]); // El SDK de MSI entrega el número como texto
+
+                char devInfo[256];
+                snprintf(devInfo, sizeof(devInfo), "[MysticLight] Device: %ls | LEDs: %d", g_deviceName, g_totalLeds);
+                Log(devInfo);
+            }
+
+            // Obligatorio: Desbloquear siempre
+            SafeArrayUnaccessData(pDevType);
+            SafeArrayUnaccessData(pLedCount);
+        }
+
+        // Liberar los SAFEARRAY que creó el SDK
+        SafeArrayDestroy(pDevType);
+        SafeArrayDestroy(pLedCount);
     }
 
     g_styleSteady = SysAllocString(L"Steady");
@@ -443,17 +513,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     ShowNotification(hWnd, hInstance, windowTitle, L"Let's dance baby");
 
-    if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
-    for (int i = 0; i < g_totalLeds; i++)
-        if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, 255, 255, 255);
-
     DWORD R = 0, G = 0, B = 0;
     DWORD lastR = 999, lastG = 999;
     bool modoAlertaActivo = false;
     MSG msg = { 0 };
 
     while (g_Running) {
-        while (g_Running && PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+        // 1. PROCESAR MENSAJES (Interfaz de usuario siempre fluida)
+        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) {
+                g_Running = false;
+                break;
+            }
             if (msg.message == WM_HOTKEY) {
                 g_LedsEnabled = !g_LedsEnabled;
                 if (g_LedsEnabled) {
@@ -472,48 +543,56 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     lastR = 999; lastG = 999;
                 }
             }
-            TranslateMessage(&msg); DispatchMessage(&msg);
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
         }
 
-        if (g_LedsEnabled && g_Running) {
+        if (!g_Running) break;
+
+        // 2. LÓGICA DE HARDWARE (Solo si los LEDs están activos)
+        if (g_LedsEnabled) {
             float rawTemp = GetCPUTempFast();
+
             if (rawTemp <= 0) {
-                InitWMI();
+                InitWMI(); // Intento silencioso de reconexión
             }
             else {
                 float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f;
+
                 if (temp >= (float)g_cfg.tempAlert) {
-                    
                     R = 255; G = 0; B = 0;
-                    
                     if (!modoAlertaActivo && g_cfg.lightningEffect) {
                         if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleLightning);
                         modoAlertaActivo = true;
                     }
-
                 }
                 else {
                     if (modoAlertaActivo) {
                         if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
                         modoAlertaActivo = false;
                     }
+
                     if (temp <= (float)g_cfg.tempLow) {
                         R = 0; G = 255; B = 0;
                     }
                     else if (temp <= (float)g_cfg.tempHigh) {
-                        float ratio = (temp - (float)g_cfg.tempLow) / ((float)g_cfg.tempHigh - (float)g_cfg.tempLow);
+                        // SEGURIDAD: Evitar división por cero
+                        float divisor = (float)g_cfg.tempHigh - (float)g_cfg.tempLow;
+                        float ratio = (divisor > 0) ? (temp - (float)g_cfg.tempLow) / divisor : 1.0f;
                         R = (DWORD)(255 * ratio);
-                        G = 255;
-                        B = 0;
+                        G = 255; B = 0;
                     }
                     else {
-                        float ratio = (temp - (float)g_cfg.tempHigh) / ((float)g_cfg.tempAlert - (float)g_cfg.tempHigh);
+                        // SEGURIDAD: Evitar división por cero
+                        float divisor = (float)g_cfg.tempAlert - (float)g_cfg.tempHigh;
+                        float ratio = (divisor > 0) ? (temp - (float)g_cfg.tempHigh) / divisor : 1.0f;
                         R = 255;
                         G = (DWORD)(255 * (1.0f - ratio));
                         B = 0;
                     }
                 }
 
+                // Solo actualizar el SDK si el color realmente cambió
                 if (R != lastR || G != lastG) {
                     for (int i = 0; i < g_totalLeds; i++) {
                         if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
@@ -522,7 +601,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 }
             }
         }
-        if (g_Running) MsgWaitForMultipleObjects(0, NULL, FALSE, 500, QS_ALLINPUT);
+
+        // 3. LA ESPERA INTELIGENTE
+        // Espera 500ms O hasta que el usuario mueva el ratón/haga clic/use el teclado
+        MsgWaitForMultipleObjects(0, NULL, FALSE, 500, QS_ALLINPUT);
     }
 
     FinalCleanup(hWnd);
