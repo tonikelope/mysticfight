@@ -443,10 +443,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     ShowNotification(hWnd, hInstance, windowTitle, L"Let's dance baby");
 
-    if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
-    for (int i = 0; i < g_totalLeds; i++)
-        if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, 255, 255, 255);
-
     DWORD R = 0, G = 0, B = 0;
     DWORD lastR = 999, lastG = 999;
     bool modoAlertaActivo = false;
