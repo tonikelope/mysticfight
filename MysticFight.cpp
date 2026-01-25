@@ -18,7 +18,7 @@
 #define ID_TRAY_EXIT 1001
 #define ID_TRAY_CONFIG 2001
 
-const wchar_t* APP_VERSION = L"v0.4";
+const wchar_t* APP_VERSION = L"v0.5";
 
 // CONFIG STRUCTURE
 struct Config {
@@ -442,7 +442,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         while (g_Running && PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_HOTKEY) {
                 g_LedsEnabled = !g_LedsEnabled;
-                if (!g_LedsEnabled) {
+                
+                if (g_LedsEnabled) {
+                    MessageBeep(MB_OK);
+                }else {
+                    MessageBeep(MB_ICONHAND);
                     lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
                     modoAlertaActivo = false;
                     for (int i = 0; i < g_totalLeds; i++) lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
