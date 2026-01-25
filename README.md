@@ -27,25 +27,46 @@ For this tool to work, you MUST have the following installed/running:
 3. **MysticLight_SDK.dll:** Included in this repo. Must stay in the same folder as MysticFight.exe [Official Link with SDK doc](https://www.msi.com/Landing/mystic-light-rgb-gaming-pc/download).
 4. **LibreHardwareMonitor:** [Download here](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor). Must be running (minimized on tray) to provide temperature data via WMI.
 
-## 🚀 How to Run at Startup
+## 🚀 How to Run at Startup (Step-by-Step)
 
-Since the app requires **Administrator privileges** for SDK and WMI access, you must use the **Windows Task Scheduler** instead of the standard Startup folder:
+Since the app requires **Administrator privileges** for SDK and WMI access, it must be launched via **Windows Task Scheduler**. Follow these precise settings to ensure it works forever:
 
-1.  **Create Task:** Open the **Task Scheduler** and select **Create Task...** (on the right panel).
-2.  **General Tab:**
-    * Name it `MysticFight`.
-    * **CRITICAL:** Check the box **Run with highest privileges**. (Otherwise, SDK/WMI access will fail).
-3.  **Triggers Tab:**
-    * Click **New...** and select **At log on** in the top dropdown.
-    * Under "Advanced settings", check **Delay task for:** and set it to **30 seconds**. (This gives the MSI SDK services enough time to initialize after boot).
-4.  **Actions Tab:**
-    * Click **New...** -> **Start a program**.
-    * **Program/script:** Browse and select your `MysticFight.exe`.
-    * **Start in:** ⚠️ **REQUIRED.** Paste the full path to the folder containing the exe.
-        * *Example:* `C:\Tools\MysticFight\`
-        * *Why?* If left blank, the app won't find `MysticLight_SDK.dll` or your configuration files.
-5.  **Conditions Tab:**
-    * Uncheck **Stop if the computer switches to battery power** (if you are on a laptop).
-> **Quick Test:** Once created, right-click the task in the "Task Scheduler Library" and click **Run**. If the tray icon appears and the LEDs respond, the configuration is perfect.
+### 1. Create the Task
+* Open the **Start Menu**, type `Task Scheduler`, and press **Enter**.
+* On the right panel, click **Create Task...** (Do not use "Basic Task").
+
+### 2. Tab-by-Tab Configuration
+
+#### **General Tab**
+* **Name:** `MysticFight`
+* **Security options:** Check **Run with highest privileges**. 👈 *Essential for SDK access.*
+* **Configure for:** Select **Windows 10** or **Windows 11**.
+
+#### **Triggers Tab**
+1. Click **New...**
+2. **Begin the task:** Select `At log on`.
+3. **Advanced settings:**
+   * Check **Delay task for:** and set to `30 seconds`. (Gives MSI services time to start).
+   * Check **Enabled**.
+4. Click **OK**.
+
+#### **Actions Tab**
+1. Click **New...** -> **Action:** `Start a program`.
+2. **Program/script:** Click *Browse* and select your `MysticFight.exe`.
+3. **Start in (optional):** ⚠️ **MANDATORY:** Paste the full path to the folder where the EXE is located (e.g., `C:\Tools\MysticFight\`).
+   * *Note: Do not use quotes in this field.*
+4. Click **OK**.
+
+#### **Conditions Tab**
+* **Power:** Uncheck **Start the task only if the computer is on AC power**.
+* **Power:** Uncheck **Stop if the computer switches to battery power**.
+
+#### **Settings Tab**
+* Check **Allow task to be run on demand**. 👈 *Allows you to start it manually if needed.*
+* Uncheck **Stop the task if it runs longer than**. 👈 *Critical: Otherwise Windows kills the app after 3 days.*
+* Check **If the running task does not end when requested, force it to stop**.
+  
+> [!TIP]
+> **Verification:** Once saved, right-click the task in the library and select **Run**. If the icon appears in the tray and the LEDs respond, you've nailed it.
 
 This is practically a proof of concept for everything that the Mystic Light SDK can do with a little imagination. Carpe diem!
