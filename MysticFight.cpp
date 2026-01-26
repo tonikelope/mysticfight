@@ -18,7 +18,7 @@
 #define ID_TRAY_EXIT 1001
 #define ID_TRAY_CONFIG 2001
 
-const wchar_t* APP_VERSION = L"v1.0";
+const wchar_t* APP_VERSION = L"v1.1";
 
 // CONFIG STRUCTURE
 struct Config {
@@ -41,7 +41,6 @@ IEnumWbemClassObject* g_pEnumTemperatura = NULL;
 IWbemLocator* g_pLoc = NULL;
 BSTR g_deviceName = NULL;
 BSTR g_styleSteady = NULL;
-BSTR g_styleLightning = NULL;
 HMODULE g_hLibrary = NULL;
 int g_totalLeds = 0;
 LPMLAPI_SetLedColor lpMLAPI_SetLedColor = nullptr;
@@ -56,7 +55,7 @@ void LoadSettings() {
 	g_cfg.tempLow = GetPrivateProfileIntW(L"Settings", L"TempLow", 50, INI_FILE);
 	g_cfg.tempHigh = GetPrivateProfileIntW(L"Settings", L"TempHigh", 70, INI_FILE);
 	g_cfg.tempAlert = GetPrivateProfileIntW(L"Settings", L"TempAlert", 90, INI_FILE);
-	g_cfg.lightningEffect = GetPrivateProfileIntW(L"Settings", L"Lightning", 1, INI_FILE) != 0;
+
 }
 
 void SaveSettings() {
@@ -64,7 +63,7 @@ void SaveSettings() {
 	WritePrivateProfileStringW(L"Settings", L"TempLow", std::to_wstring(g_cfg.tempLow).c_str(), INI_FILE);
 	WritePrivateProfileStringW(L"Settings", L"TempHigh", std::to_wstring(g_cfg.tempHigh).c_str(), INI_FILE);
 	WritePrivateProfileStringW(L"Settings", L"TempAlert", std::to_wstring(g_cfg.tempAlert).c_str(), INI_FILE);
-	WritePrivateProfileStringW(L"Settings", L"Lightning", g_cfg.lightningEffect ? L"1" : L"0", INI_FILE);
+
 }
 
 void PopulateSensorList(HWND hDlg) {
@@ -243,7 +242,7 @@ static void FinalCleanup(HWND hWnd) {
 	// 3. Liberamos Strings de MSI
 	if (g_deviceName) SysFreeString(g_deviceName);
 	if (g_styleSteady) SysFreeString(g_styleSteady);
-	if (g_styleLightning) SysFreeString(g_styleLightning);
+
 
 	// 4. Liberamos la DLL de MSI (Ya no la necesitamos)
 	if (g_hLibrary) {
@@ -486,7 +485,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	}
 
 	g_styleSteady = SysAllocString(L"Steady");
-	g_styleLightning = SysAllocString(L"Lightning");
+
 
 	Log("[WMI] Connecting to LibreHardwareMonitor...");
 	bool wmiConnected = false;
