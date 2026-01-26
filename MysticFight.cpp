@@ -5,7 +5,7 @@
 #include <fstream>
 #include <ctime>
 #include <vector>
-#include <shellapi.h> 
+#include <shellapi.h>Â 
 #include <string>
 #include <math.h>
 #include "resource.h"
@@ -24,7 +24,6 @@ const wchar_t* APP_VERSION = L"v1.0";
 struct Config {
 	wchar_t sensorID[256];
 	int tempLow, tempHigh, tempAlert;
-	bool lightningEffect;
 };
 
 Config g_cfg;
@@ -260,7 +259,7 @@ static void FinalCleanup(HWND hWnd) {
 	// 6. Cerramos Mutex
 	if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); g_hMutex = NULL; }
 
-	// 7. APAGAR COM (EL ÚLTIMO)
+	// 7. APAGAR COM (EL ÃšLTIMO)
 	CoUninitialize();
 
 	Log("[MysticFight] BYE BYE (Cleanup finished)");
@@ -355,7 +354,7 @@ static float GetCPUTempFast() {
 		pclsObj->Release();
 	}
 	else {
-		// Si falla el Next, liberamos para que se reintente la Query en el próximo ciclo
+		// Si falla el Next, liberamos para que se reintente la Query en el prÃ³ximo ciclo
 		g_pEnumTemperatura->Release();
 		g_pEnumTemperatura = NULL;
 	}
@@ -451,8 +450,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	if (fnMLAPI_GetDeviceInfo && fnMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0 && pDevType && pLedCount) {
 		BSTR* pNames = nullptr;
-		// IMPORTANTE: Verifica si el SDK devuelve BSTR o LONG para los counts. 
-		// En MSI suele ser BSTR, así que mantenemos BSTR* para pCounts
+		// IMPORTANTE: Verifica si el SDK devuelve BSTR o LONG para los counts.Â 
+		// En MSI suele ser BSTR, asÃ­ que mantenemos BSTR* para pCounts
 		BSTR* pCounts = nullptr;
 
 		// Bloqueamos los arrays para leerlos con seguridad
@@ -465,11 +464,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			long count = uBound - lBound + 1;
 
 			if (count > 0) {
-				// Liberamos si ya existía algo para evitar fugas
+				// Liberamos si ya existÃ­a algo para evitar fugas
 				if (g_deviceName) SysFreeString(g_deviceName);
 
 				g_deviceName = SysAllocString(pNames[0]);
-				g_totalLeds = _wtoi(pCounts[0]); // El SDK de MSI entrega el número como texto
+				g_totalLeds = _wtoi(pCounts[0]); // El SDK de MSI entrega el nÃºmero como texto
 
 				char devInfo[256];
 				snprintf(devInfo, sizeof(devInfo), "[MysticLight] Device: %ls | LEDs: %d", g_deviceName, g_totalLeds);
@@ -481,7 +480,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			SafeArrayUnaccessData(pLedCount);
 		}
 
-		// Liberar los SAFEARRAY que creó el SDK
+		// Liberar los SAFEARRAY que creÃ³ el SDK
 		SafeArrayDestroy(pDevType);
 		SafeArrayDestroy(pLedCount);
 	}
@@ -553,12 +552,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 		if (!g_Running) break;
 
-		// 2. LÓGICA DE HARDWARE (Solo si los LEDs están activos)
+		// 2. LÃ“GICA DE HARDWARE (Solo si los LEDs estÃ¡n activos)
 		if (g_LedsEnabled) {
 			float rawTemp = GetCPUTempFast();
 
 			if (rawTemp <= 0) {
-				InitWMI(); // Intento silencioso de reconexión
+				InitWMI(); // Intento silencioso de reconexiÃ³n
 			}
 			else {
 				float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f;
@@ -567,14 +566,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 						R = 0; G = 255; B = 0;
 					}
 					else if (temp <= (float)g_cfg.tempHigh) {
-						// SEGURIDAD: Evitar división por cero
+						// SEGURIDAD: Evitar divisiÃ³n por cero
 						float divisor = (float)g_cfg.tempHigh - (float)g_cfg.tempLow;
 						float ratio = (divisor > 0) ? (temp - (float)g_cfg.tempLow) / divisor : 1.0f;
 						R = (DWORD)(255 * ratio);
 						G = 255; B = 0;
 					}
 					else {
-						// SEGURIDAD: Evitar división por cero
+						// SEGURIDAD: Evitar divisiÃ³n por cero
 						float divisor = (float)g_cfg.tempAlert - (float)g_cfg.tempHigh;
 						float ratio = (divisor > 0) ? (temp - (float)g_cfg.tempHigh) / divisor : 1.0f;
 						R = 255;
@@ -583,7 +582,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 					}
 				
 
-				// Solo actualizar el SDK si el color realmente cambió
+				// Solo actualizar el SDK si el color realmente cambiÃ³
 				if (R != lastR || G != lastG) {
 					for (int i = 0; i < g_totalLeds; i++) {
 						if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
@@ -594,7 +593,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		}
 
 		// 3. LA ESPERA INTELIGENTE
-		// Espera 500ms O hasta que el usuario mueva el ratón/haga clic/use el teclado
+		// Espera 500ms O hasta que el usuario mueva el ratÃ³n/haga clic/use el teclado
 		MsgWaitForMultipleObjects(0, NULL, FALSE, 500, QS_ALLINPUT);
 	}
 
