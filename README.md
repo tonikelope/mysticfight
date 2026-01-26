@@ -23,7 +23,7 @@ For this tool to work, you MUST have the following installed/running:
 
 1. **MSI Center:** [Download here](https://www.msi.com/Landing/MSI-Center). (Just installed, its not required to load with Windows. But remember you must install and enable the **Mystic Light** module inside it to provide the underlying drivers for SDK).
    * Disable **both** options in Mystic Light config: overwrite third part RGB and power saving mode.
-3. **Mystic Light SDK:** [Download here](https://www.msi.com/Landing/mystic-light-rgb-gaming-pc/download). MysticLight_SDK.dll must stay in the same folder as MysticFight.exe (DLL is included with MysticFight.exe)
+3. **Mystic Light SDK:** MysticLight_SDK.dll must stay in the same folder as MysticFight.exe (DLL is included with MysticFight.exe)
 4. **LibreHardwareMonitor:** [Download here](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor). Must be running (minimized on tray) to provide temperature data via WMI. (Yes, i know there is a LibreHardwareMonitorLib available, but I don't have the time or inclination to mess around with CLR DLL wrappers such when WMI works perfectly well for this task and LHM client is lightweight and useful for other monitoring applications such as RainMeter).
 
 ## 🚀 How to Run at Startup (Step-by-Step)
