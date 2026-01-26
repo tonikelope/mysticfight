@@ -18,7 +18,7 @@
 #define ID_TRAY_EXIT 1001
 #define ID_TRAY_CONFIG 2001
 
-const wchar_t* APP_VERSION = L"v1.1";
+const wchar_t* APP_VERSION = L"v1.2";
 
 // CONFIG STRUCTURE
 struct Config {
@@ -371,7 +371,7 @@ static void ShowNotification(HWND hWnd, HINSTANCE hInstance, const wchar_t* titl
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
 	SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
 	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-	CoInitializeEx(0, COINIT_MULTITHREADED);
+	CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
 	LoadSettings();
 
 	g_hMutex = CreateMutex(NULL, TRUE, L"Global\\MysticFight_Unique_Mutex");
