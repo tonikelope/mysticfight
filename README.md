@@ -15,7 +15,7 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * **Real-time Monitoring:** Temperature tracking via WMI.
 * **VERY Lightweight:** No heavy dashboards; just a simple tray app that stays out of your way.
 * **Customizable Temperature Sensor:** Choose the one you prefer.
-* **Customizable Temperature Thresholds:** Green-Yellow-Red
+* **Customizable Temperature Thresholds:** Green-Yellow-Red pattern.
 * **Night-Mode with Global Hotkey:** `Ctrl + Alt + Shift + L` to power-off/on LEDs instantly.
   
 ## ⚠️ Requirements
