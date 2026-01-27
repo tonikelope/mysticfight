@@ -21,7 +21,7 @@
 #define ID_TRAY_CONFIG 2001
 #define ID_TRAY_LOG 3001
 
-const wchar_t* APP_VERSION = L"v1.8";
+const wchar_t* APP_VERSION = L"v1.9";
 
 struct Config {
 	wchar_t sensorID[256];
@@ -55,9 +55,10 @@ _COM_SMARTPTR_TYPEDEF(ITriggerCollection, __uuidof(ITriggerCollection));
 _COM_SMARTPTR_TYPEDEF(ITrigger, __uuidof(ITrigger));
 _COM_SMARTPTR_TYPEDEF(ILogonTrigger, __uuidof(ILogonTrigger));
 
-// VARIABLES GLOBALES (CORREGIDAS: Sin duplicados)
+// VARIABLES GLOBALES 
 bool g_Running = true;
 bool g_LedsEnabled = true;
+_bstr_t g_bstrQuery=L"";
 
 IWbemServicesPtr g_pSvc = nullptr;
 IWbemLocatorPtr g_pLoc = nullptr;
@@ -121,25 +122,46 @@ static bool InitWMI() {
 	return SUCCEEDED(hr);
 }
 
+// --- LOGGING OPTIMIZADO ---
 static void Log(const char* text) {
 	const char* filename = "debug_log.txt";
-	std::vector<std::string> lines;
-	{
-		std::ifstream in(filename);
-		std::string line;
-		while (std::getline(in, line)) lines.push_back(line);
-	}
+
 	time_t now = time(0);
 	char dt[26];
 	ctime_s(dt, sizeof(dt), &now);
 	dt[24] = '\0';
-	char buffer[1024];
-	snprintf(buffer, sizeof(buffer), "[%s] %s", dt, text);
-	lines.push_back(buffer);
-	if (lines.size() > 500) lines.erase(lines.begin(), lines.begin() + (lines.size() - 500));
-	std::ofstream out(filename, std::ios::trunc);
-	if (!out) return;
-	for (const auto& l : lines) out << l << "\n";
+
+	// Abrir en modo append (ios::app) es O(1), no depende del tamaño del archivo
+	std::ofstream out(filename, std::ios::app);
+	if (out) {
+		out << "[" << dt << "] " << text << "\n";
+	}
+}
+
+// Llama a esto SOLO UNA VEZ en WinMain al iniciar
+static void TrimLogFile() {
+	const char* filename = "debug_log.txt";
+	std::vector<std::string> lines;
+	std::string line;
+
+	{
+		std::ifstream in(filename);
+		while (std::getline(in, line)) lines.push_back(line);
+	}
+
+	if (lines.size() > 500) {
+		std::ofstream out(filename, std::ios::trunc);
+		for (size_t i = lines.size() - 500; i < lines.size(); ++i) {
+			out << lines[i] << "\n";
+		}
+	}
+}
+
+static void PrepareLHMSensorWMIQuery() {
+	if (wcslen(g_cfg.sensorID) == 0) return;
+
+	std::wstring q = L"SELECT Value FROM Sensor WHERE Identifier = '" + std::wstring(g_cfg.sensorID) + L"'";
+	g_bstrQuery = q.c_str(); // El operador = de _bstr_t maneja la memoria por ti
 }
 
 static void SetRunAtStartup(bool run) {
@@ -497,7 +519,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 		}
 		// DENTRO DE WndProc -> switch (message) -> case WM_COMMAND
 		if (LOWORD(wParam) == ID_TRAY_CONFIG) {
-			DialogBoxW(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_SETTINGS), hWnd, SettingsDlgProc);
+			if (DialogBoxW(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_SETTINGS), hWnd, SettingsDlgProc) == IDOK) {
+				PrepareLHMSensorWMIQuery();
+				Log("[MysticFight] Sensor updated.");
+			}
 		}
 		break;
 	case WM_QUERYENDSESSION:
@@ -518,20 +543,18 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 }
 
 static float GetCPUTempFast() {
-	if (!g_pSvc || wcslen(g_cfg.sensorID) == 0) return 0.0f;
+	// Si no hay query preparada o no hay WMI, no hacemos nada
+	if (!g_pSvc || g_bstrQuery.length() == 0) return 0.0f;
 
 	IEnumWbemClassObjectPtr pEnum = nullptr;
-	// Consulta directa: Solo pedimos el Value del sensor exacto
-	std::wstring query = L"SELECT Value FROM Sensor WHERE Identifier = '" + std::wstring(g_cfg.sensorID) + L"'";
 
-	// Flags de velocidad: RETURN_IMMEDIATELY + FORWARD_ONLY
-	HRESULT hr = g_pSvc->ExecQuery(_bstr_t(L"WQL"), _bstr_t(query.c_str()),
+	// USAMOS g_bstrQuery (YA CACHEADA)
+	HRESULT hr = g_pSvc->ExecQuery(_bstr_t(L"WQL"), g_bstrQuery,
 		WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnum);
 
 	if (SUCCEEDED(hr) && pEnum) {
 		IWbemClassObjectPtr pObj = nullptr;
 		ULONG uRet = 0;
-		// Solo necesitamos el primer (y único) resultado
 		if (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uRet) == S_OK && uRet > 0) {
 			_variant_t vtVal;
 			if (SUCCEEDED(pObj->Get(L"Value", 0, &vtVal, 0, 0))) {
@@ -571,12 +594,42 @@ static void ShowNotification(HWND hWnd, HINSTANCE hInstance, const wchar_t* titl
 	nid.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON;
 	Shell_NotifyIcon(NIM_MODIFY, &nid);
 }
+// --- EXTRACCIÓN SEGURA DE DATOS DEL SDK ---
+static int GetIntFromSafeArray(void* pRawData, VARTYPE vt, int index) {
+	if (!pRawData) return 0;
+
+	switch (vt) {
+	case VT_BSTR: {
+		BSTR* pBstrArray = (BSTR*)pRawData;
+		return _wtoi(pBstrArray[index]);
+	}
+	case VT_I4:
+	case VT_INT: {
+		long* pLongArray = (long*)pRawData;
+		return (int)pLongArray[index];
+	}
+	case VT_UI4:
+	case VT_UINT: {
+		unsigned int* pULongArray = (unsigned int*)pRawData;
+		return (int)pULongArray[index];
+	}
+	case VT_I2: {
+		short* pShortArray = (short*)pRawData;
+		return (int)pShortArray[index];
+	}
+	default:
+		return 0; // Tipo no soportado
+	}
+}
+
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
 	SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
 	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
 	
 	HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+
+	TrimLogFile();
 	
 	if (FAILED(hr)) {
 		// Critical error: cannot use WMI or Task Scheduler without COM
@@ -593,6 +646,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	Log(versionMsg);
 
 	LoadSettings();
+
+	PrepareLHMSensorWMIQuery();
 
 	g_hMutex = CreateMutex(NULL, TRUE, L"Global\\MysticFight_Unique_Mutex");
 	if (g_hMutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -699,21 +754,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 			if (count > 0) {
 				if (g_deviceName) SysFreeString(g_deviceName);
+				
 				g_deviceName = SysAllocString(pNames[0]);
 
-				// Lógica dual según el tipo de dato
-				if (vtCount == VT_BSTR) {
-					BSTR* pBstrCounts = (BSTR*)pCountsRaw;
-					g_totalLeds = _wtoi(pBstrCounts[0]);
-				}
-				else if (vtCount == VT_I4 || vtCount == VT_INT) {
-					long* pLongCounts = (long*)pCountsRaw;
-					g_totalLeds = (int)pLongCounts[0];
-				}
-
+				g_totalLeds = GetIntFromSafeArray(pCountsRaw, vtCount, 0);
+				
 				char devInfo[256];
-				snprintf(devInfo, sizeof(devInfo), "[MysticFight] Device: %ls | LEDs: %d (Type: %s)",
-					g_deviceName, g_totalLeds, (vtCount == VT_BSTR ? "BSTR" : "INT"));
+				
+				snprintf(devInfo, sizeof(devInfo), "[MysticFight] Device: %ls | LEDs: %d",
+					g_deviceName, g_totalLeds);
+				
 				Log(devInfo);
 			}
 
