@@ -21,7 +21,7 @@
 #define ID_TRAY_CONFIG 2001
 #define ID_TRAY_LOG 3001
 
-const wchar_t* APP_VERSION = L"v1.4";
+const wchar_t* APP_VERSION = L"v1.5";
 
 struct Config {
 	wchar_t sensorID[256];
@@ -424,7 +424,7 @@ static void FinalCleanup(HWND hWnd) {
 				lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
 			}
 		}
-		Log("[MysticLight] LEDs power off");
+		Log("[MysticFight] LEDs power off");
 	}
 
 	// 3. LIMPIEZA DE INTERFAZ DE USUARIO (Shell y Hotkeys)
@@ -626,7 +626,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	g_hLibrary = LoadLibrary(L"MysticLight_SDK.dll");
 	if (!g_hLibrary) {
-		Log("[MysticLight] FATAL: Could not find 'MysticLight_SDK.dll'.");
+		Log("[MysticFight] FATAL: Could not find 'MysticLight_SDK.dll'.");
 		MessageBox(NULL, L"Could not find 'MysticLight_SDK.dll'.", L"Error", MB_OK | MB_ICONERROR);
 		FinalCleanup(hWnd);
 		return 1;
@@ -637,22 +637,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	lpMLAPI_SetLedColor = (LPMLAPI_SetLedColor)GetProcAddress(g_hLibrary, "MLAPI_SetLedColor");
 	lpMLAPI_SetLedStyle = (LPMLAPI_SetLedStyle)GetProcAddress(g_hLibrary, "MLAPI_SetLedStyle");
 
-	Log("[MysticLight] Attempting to initialize SDK...");
+	Log("[MysticFight] Attempting to initialize SDK...");
 	if (!fnMLAPI_Initialize || fnMLAPI_Initialize() != 0) {
 		bool initialized = false;
 		for (int i = 1; i <= 10; i++) {
 			char retryMsg[100];
-			snprintf(retryMsg, sizeof(retryMsg), "[MysticLight] Attempt %d/10 failed. Retrying in 5s...", i);
+			snprintf(retryMsg, sizeof(retryMsg), "[MysticFight] Attempt %d/10 failed. Retrying in 5s...", i);
 			Log(retryMsg);
 
 			if (fnMLAPI_Initialize && fnMLAPI_Initialize() == 0) {
-				Log("[MysticLight] SDK Initialized successfully on retry.");
+				Log("[MysticFight] SDK Initialized successfully on retry.");
 				initialized = true;
 				break;
 			}
 
 			if (i == 10) {
-				Log("[MysticLight] FATAL: SDK could not be initialized after 10 attempts.");
+				Log("[MysticFight] FATAL: SDK could not be initialized after 10 attempts.");
 				MessageBox(NULL, L"MSI SDK Initialization failed. Ensure MSI Center/Dragon Center is installed and service is running.", L"Critical Error", MB_OK | MB_ICONERROR);
 				FinalCleanup(hWnd);
 				return 1;
@@ -661,7 +661,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		}
 	}
 	else {
-		Log("[MysticLight] SDK Initialized successfully at first attempt.");
+		Log("[MysticFight] SDK Initialized successfully at first attempt.");
 	}
 
 	// --- REEMPLAZO SEGURO ---
@@ -699,7 +699,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				}
 
 				char devInfo[256];
-				snprintf(devInfo, sizeof(devInfo), "[MysticLight] Device: %ls | LEDs: %d (Type: %s)",
+				snprintf(devInfo, sizeof(devInfo), "[MysticFight] Device: %ls | LEDs: %d (Type: %s)",
 					g_deviceName, g_totalLeds, (vtCount == VT_BSTR ? "BSTR" : "INT"));
 				Log(devInfo);
 			}
@@ -715,7 +715,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	if (lpMLAPI_SetLedStyle && g_deviceName) {
 		lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
-		Log("[MysticLight] LED Style set to Steady.");
+		Log("[MysticFight] LED Style set to Steady.");
 	}
 
 
