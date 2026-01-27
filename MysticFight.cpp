@@ -21,7 +21,7 @@
 #define ID_TRAY_CONFIG 2001
 #define ID_TRAY_LOG 3001
 
-const wchar_t* APP_VERSION = L"v1.3";
+const wchar_t* APP_VERSION = L"v1.4";
 
 struct Config {
 	wchar_t sensorID[256];
@@ -59,7 +59,6 @@ bool g_Running = true;
 bool g_LedsEnabled = true;
 
 IWbemServicesPtr g_pSvc = nullptr;
-IEnumWbemClassObjectPtr g_pEnumTemperatura = nullptr;
 IWbemLocatorPtr g_pLoc = nullptr;
 
 BSTR g_deviceName = NULL;
@@ -460,9 +459,6 @@ static void FinalCleanup(HWND hWnd) {
 	}
 
 	// 6. DESTRUCCIÓN DE SMART POINTERS (CRÍTICO)
-	// Deben ponerse a nullptr ANTES de CoUninitialize.
-	// Al asignar nullptr, el Smart Pointer llama internamente a ->Release()
-	g_pEnumTemperatura = nullptr;
 	g_pSvc = nullptr;
 	g_pLoc = nullptr;
 
@@ -503,11 +499,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 		}
 		// DENTRO DE WndProc -> switch (message) -> case WM_COMMAND
 		if (LOWORD(wParam) == ID_TRAY_CONFIG) {
-			if (DialogBoxW(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_SETTINGS), hWnd, SettingsDlgProc) == IDOK) {
-				// Resetear el enumerador para que GetCPUTempFast use el nuevo sensorID
-				g_pEnumTemperatura = nullptr;
-				Log("[MysticFight] Sensor updated, resetting WMI ...");
-			}
+			DialogBoxW(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_SETTINGS), hWnd, SettingsDlgProc);
 		}
 		break;
 	case WM_QUERYENDSESSION:
@@ -528,54 +520,35 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 }
 
 static float GetCPUTempFast() {
-	// Si no hay conexión WMI, intentamos conectar
-	if (!g_pSvc) {
-		if (!InitWMI()) return 0.0f;
-	}
+	if (!g_pSvc) return 0.0f;
 
-	// Si cambia el ID del sensor, reseteamos el enumerador
-	static std::wstring lastKnownID;
-	if (lastKnownID != g_cfg.sensorID) {
-		g_pEnumTemperatura = nullptr;
-		lastKnownID = g_cfg.sensorID;
-	}
+	// Usamos un puntero local para asegurar frescura total en cada lectura
+	IEnumWbemClassObjectPtr pEnumerator = nullptr;
+	std::wstring queryStr = L"SELECT Value FROM Sensor WHERE Identifier = '" + std::wstring(g_cfg.sensorID) + L"'";
 
-	// Si no tenemos el enumerador creado, lo pedimos a WMI
-	if (g_pEnumTemperatura == nullptr) {
-		std::wstring queryStr = L"SELECT Value FROM Sensor WHERE Identifier = '" + std::wstring(g_cfg.sensorID) + L"'";
+	// 1. Hacemos la Query (equivalente a tu antiguo 'if NULL')
+	HRESULT hr = g_pSvc->ExecQuery(_bstr_t(L"WQL"), _bstr_t(queryStr.c_str()),
+		WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+		NULL, &pEnumerator);
 
-		// IMPORTANTE: Quitamos WBEM_FLAG_FORWARD_ONLY para que Reset() funcione
-		HRESULT hr = g_pSvc->ExecQuery(_bstr_t(L"WQL"), _bstr_t(queryStr.c_str()),
-			WBEM_FLAG_RETURN_IMMEDIATELY,
-			NULL, &g_pEnumTemperatura);
-
-		if (FAILED(hr)) return 0.0f;
-	}
+	if (FAILED(hr)) return 0.0f;
 
 	float temp = 0.0f;
-	IWbemClassObjectPtr pclsObj = nullptr; // Smart Pointer local
+	IWbemClassObjectPtr pclsObj = nullptr;
 	ULONG uReturn = 0;
 
-	// Ahora Reset() es legal porque el cursor no es "Forward Only"
-	if (SUCCEEDED(g_pEnumTemperatura->Reset())) {
-		if (g_pEnumTemperatura->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK && uReturn > 0) {
-			_variant_t vtProp;
-			if (SUCCEEDED(pclsObj->Get(L"Value", 0, &vtProp, 0, 0))) {
-				if (vtProp.vt == VT_R4) temp = vtProp.fltVal;
-				else if (vtProp.vt == VT_R8) temp = (float)vtProp.dblVal;
-			}
-			// pclsObj se libera solo gracias al Smart Pointer
+	// 2. Leemos el valor (equivalente a tu 'Next')
+	if (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK && uReturn > 0) {
+		_variant_t vtProp;
+		if (SUCCEEDED(pclsObj->Get(L"Value", 0, &vtProp, 0, 0))) {
+			if (vtProp.vt == VT_R4) temp = vtProp.fltVal;
+			else if (vtProp.vt == VT_R8) temp = (float)vtProp.dblVal;
 		}
-		else {
-			// Si Next falla, algo va mal con el sensor
-			g_pEnumTemperatura = nullptr;
-		}
-	}
-	else {
-		// Si Reset falla, recreamos el enumerador
-		g_pEnumTemperatura = nullptr;
+		// pclsObj se libera solo al salir del if
 	}
 
+	// 3. pEnumerator se libera SOLO al salir de la función
+	// Esto garantiza que en la siguiente llamada WMI nos dé un valor nuevo (Real-time)
 	return temp;
 }
 
@@ -740,6 +713,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	g_styleSteady = SysAllocString(L"Steady");
 
+	if (lpMLAPI_SetLedStyle && g_deviceName) {
+		lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
+		Log("[MysticLight] LED Style set to Steady.");
+	}
+
 
 	Log("[MysticFight] Connecting to LibreHardwareMonitor...");
 	bool wmiConnected = false;
@@ -804,7 +782,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			// Variable de control de logs (estática para que persista entre ciclos)
 			static bool s_sensorEnFallo = false;
 
-			if (rawTemp <= 0.0f && g_pEnumTemperatura == nullptr) {
+			if (rawTemp <= 0.0f) {
 				// FALLO DETECTADO: Solo avisamos la primera vez
 				if (!s_sensorEnFallo) {
 					Log("[ERROR] Sensor lost. Check if LibreHardwareMonitor is running.");
