@@ -21,7 +21,7 @@
 #define ID_TRAY_CONFIG 2001
 #define ID_TRAY_LOG 3001
 
-const wchar_t* APP_VERSION = L"v1.9";
+const wchar_t* APP_VERSION = L"v2.0";
 
 struct Config {
 	wchar_t sensorID[256];
@@ -162,6 +162,10 @@ static void PrepareLHMSensorWMIQuery() {
 
 	std::wstring q = L"SELECT Value FROM Sensor WHERE Identifier = '" + std::wstring(g_cfg.sensorID) + L"'";
 	g_bstrQuery = q.c_str(); // El operador = de _bstr_t maneja la memoria por ti
+
+	char sensorLog[512];
+	snprintf(sensorLog, sizeof(sensorLog), "[MysticFight] Target Sensor updated to: %ls", g_cfg.sensorID);
+	Log(sensorLog);
 }
 
 static void SetRunAtStartup(bool run) {
@@ -647,6 +651,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	LoadSettings();
 
+	char startupCfg[512];
+	snprintf(startupCfg, sizeof(startupCfg),
+		"[MysticFight] Config Loaded - Sensor: %ls | Low: %d | High: %d | Alert: %d",
+		g_cfg.sensorID, g_cfg.tempLow, g_cfg.tempHigh, g_cfg.tempAlert);
+	Log(startupCfg);
+
 	PrepareLHMSensorWMIQuery();
 
 	g_hMutex = CreateMutex(NULL, TRUE, L"Global\\MysticFight_Unique_Mutex");
@@ -849,17 +859,28 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				
 				// Lógica de colores normal
 				float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f;
-
-				if (temp <= (float)g_cfg.tempLow) { R = 0; G = 255; B = 0; }
+				float ratio;
+				
+				if (temp <= (float)g_cfg.tempLow) {
+					R = 0; G = 255; B = 0;
+				}
 				else if (temp <= (float)g_cfg.tempHigh) {
 					float divisor = (float)g_cfg.tempHigh - (float)g_cfg.tempLow;
-					float ratio = (divisor > 0) ? (temp - (float)g_cfg.tempLow) / divisor : 1.0f;
+					ratio = (temp - (float)g_cfg.tempLow) / divisor;
+					if (ratio > 1.0f) ratio = 1.0f; // Seguridad
 					R = (DWORD)(255 * ratio); G = 255; B = 0;
 				}
 				else {
 					float divisor = (float)g_cfg.tempAlert - (float)g_cfg.tempHigh;
-					float ratio = (divisor > 0) ? (temp - (float)g_cfg.tempHigh) / divisor : 1.0f;
-					R = 255; G = (DWORD)(255 * (1.0f - ratio)); B = 0;
+					ratio = (temp - (float)g_cfg.tempHigh) / divisor;
+
+					// Si ratio es 1.0 o más, ya estamos en zona de alerta máxima
+					if (ratio >= 1.0f) {
+						R = 255; G = 0; B = 0;
+					}
+					else {
+						R = 255; G = (DWORD)(255 * (1.0f - ratio)); B = 0;
+					}
 				}
 
 				if (R != lastR || G != lastG) {
