@@ -21,7 +21,7 @@
 #define ID_TRAY_CONFIG 2001
 #define ID_TRAY_LOG 3001
 
-const wchar_t* APP_VERSION = L"v1.7";
+const wchar_t* APP_VERSION = L"v1.8";
 
 struct Config {
 	wchar_t sensorID[256];
@@ -35,6 +35,7 @@ typedef int (*LPMLAPI_Initialize)();
 typedef int (*LPMLAPI_GetDeviceInfo)(SAFEARRAY** pDevType, SAFEARRAY** pLedCount);
 typedef int (*LPMLAPI_SetLedColor)(BSTR type, DWORD index, DWORD R, DWORD G, DWORD B);
 typedef int (*LPMLAPI_SetLedStyle)(BSTR type, DWORD index, BSTR style);
+typedef int (*LPMLAPI_SetLedSpeed)(BSTR type, DWORD index, DWORD level);
 
 // SMART POINTERS DEFINITIONS
 _COM_SMARTPTR_TYPEDEF(IWbemLocator, __uuidof(IWbemLocator));
@@ -62,11 +63,11 @@ IWbemServicesPtr g_pSvc = nullptr;
 IWbemLocatorPtr g_pLoc = nullptr;
 
 BSTR g_deviceName = NULL;
-BSTR g_styleSteady = NULL;
 HMODULE g_hLibrary = NULL;
 int g_totalLeds = 0;
 LPMLAPI_SetLedColor lpMLAPI_SetLedColor = nullptr;
 LPMLAPI_SetLedStyle lpMLAPI_SetLedStyle = nullptr;
+LPMLAPI_SetLedSpeed lpMLAPI_SetLedSpeed = nullptr;
 HANDLE g_hMutex = NULL;
 
 // --- GESTIÓN SEGURA DE MEMORIA ---
@@ -416,14 +417,15 @@ static void FinalCleanup(HWND hWnd) {
 	// Se hace mientras la DLL y los BSTRs siguen siendo válidos en memoria.
 	if (g_hLibrary && g_deviceName) {
 		// Volver al estilo estático y apagar todos los LEDs
-		if (lpMLAPI_SetLedStyle && g_deviceName) {
-			lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
+		
+		_bstr_t bstrSteady(L"Steady");
+
+		lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+		
+		for (int i = 0; i < g_totalLeds; i++) {
+			lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
 		}
-		if (lpMLAPI_SetLedColor) {
-			for (int i = 0; i < g_totalLeds; i++) {
-				lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
-			}
-		}
+		
 		Log("[MysticFight] LEDs power off");
 	}
 
@@ -444,11 +446,7 @@ static void FinalCleanup(HWND hWnd) {
 		SysFreeString(g_deviceName);
 		g_deviceName = NULL;
 	}
-	if (g_styleSteady) {
-		SysFreeString(g_styleSteady);
-		g_styleSteady = NULL;
-	}
-
+	
 	// 5. LIBERACIÓN DE LA LIBRERÍA (DLL)
 	if (g_hLibrary) {
 		FreeLibrary(g_hLibrary);
@@ -520,36 +518,50 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 }
 
 static float GetCPUTempFast() {
-	if (!g_pSvc) return 0.0f;
+	if (!g_pSvc || wcslen(g_cfg.sensorID) == 0) return 0.0f;
 
-	// Usamos un puntero local para asegurar frescura total en cada lectura
-	IEnumWbemClassObjectPtr pEnumerator = nullptr;
-	std::wstring queryStr = L"SELECT Value FROM Sensor WHERE Identifier = '" + std::wstring(g_cfg.sensorID) + L"'";
+	IEnumWbemClassObjectPtr pEnum = nullptr;
+	// Consulta directa: Solo pedimos el Value del sensor exacto
+	std::wstring query = L"SELECT Value FROM Sensor WHERE Identifier = '" + std::wstring(g_cfg.sensorID) + L"'";
 
-	// 1. Hacemos la Query (equivalente a tu antiguo 'if NULL')
-	HRESULT hr = g_pSvc->ExecQuery(_bstr_t(L"WQL"), _bstr_t(queryStr.c_str()),
-		WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
-		NULL, &pEnumerator);
+	// Flags de velocidad: RETURN_IMMEDIATELY + FORWARD_ONLY
+	HRESULT hr = g_pSvc->ExecQuery(_bstr_t(L"WQL"), _bstr_t(query.c_str()),
+		WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnum);
 
-	if (FAILED(hr)) return 0.0f;
-
-	float temp = 0.0f;
-	IWbemClassObjectPtr pclsObj = nullptr;
-	ULONG uReturn = 0;
-
-	// 2. Leemos el valor (equivalente a tu 'Next')
-	if (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK && uReturn > 0) {
-		_variant_t vtProp;
-		if (SUCCEEDED(pclsObj->Get(L"Value", 0, &vtProp, 0, 0))) {
-			if (vtProp.vt == VT_R4) temp = vtProp.fltVal;
-			else if (vtProp.vt == VT_R8) temp = (float)vtProp.dblVal;
+	if (SUCCEEDED(hr) && pEnum) {
+		IWbemClassObjectPtr pObj = nullptr;
+		ULONG uRet = 0;
+		// Solo necesitamos el primer (y único) resultado
+		if (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uRet) == S_OK && uRet > 0) {
+			_variant_t vtVal;
+			if (SUCCEEDED(pObj->Get(L"Value", 0, &vtVal, 0, 0))) {
+				if (vtVal.vt == VT_R4) return vtVal.fltVal;
+				if (vtVal.vt == VT_R8) return (float)vtVal.dblVal;
+			}
 		}
-		// pclsObj se libera solo al salir del if
 	}
+	return 0.0f;
+}
 
-	// 3. pEnumerator se libera SOLO al salir de la función
-	// Esto garantiza que en la siguiente llamada WMI nos dé un valor nuevo (Real-time)
-	return temp;
+void DebugListAllSensors() {
+	if (!g_pSvc) return;
+	IEnumWbemClassObjectPtr pEnum = nullptr;
+	HRESULT hr = g_pSvc->ExecQuery(_bstr_t(L"WQL"), _bstr_t(L"SELECT Identifier, Name FROM Sensor WHERE SensorType='Temperature'"),
+		WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnum);
+
+	if (SUCCEEDED(hr)) {
+		IWbemClassObjectPtr pObj = nullptr;
+		ULONG uRet = 0;
+		Log("AVAILABLE SENSORS FROM LHM:");
+		while (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uRet) == S_OK) {
+			_variant_t vtID, vtName;
+			pObj->Get(L"Identifier", 0, &vtID, 0, 0);
+			pObj->Get(L"Name", 0, &vtName, 0, 0);
+			char buf[512];
+			snprintf(buf, sizeof(buf), "ID: %ls | Nombre: %ls", vtID.bstrVal, vtName.bstrVal);
+			Log(buf);
+		}
+	}
 }
 
 static void ShowNotification(HWND hWnd, HINSTANCE hInstance, const wchar_t* title, const wchar_t* info) {
@@ -636,6 +648,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	auto fnMLAPI_GetDeviceInfo = (LPMLAPI_GetDeviceInfo)GetProcAddress(g_hLibrary, "MLAPI_GetDeviceInfo");
 	lpMLAPI_SetLedColor = (LPMLAPI_SetLedColor)GetProcAddress(g_hLibrary, "MLAPI_SetLedColor");
 	lpMLAPI_SetLedStyle = (LPMLAPI_SetLedStyle)GetProcAddress(g_hLibrary, "MLAPI_SetLedStyle");
+	lpMLAPI_SetLedSpeed = (LPMLAPI_SetLedSpeed)GetProcAddress(g_hLibrary, "MLAPI_SetLedSpeed");
 
 	Log("[MysticFight] Attempting to initialize SDK...");
 	if (!fnMLAPI_Initialize || fnMLAPI_Initialize() != 0) {
@@ -711,8 +724,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		SafeArrayDestroy(pLedCount);
 	}
 
-	g_styleSteady = SysAllocString(L"Steady");
-
 	Log("[MysticFight] Connecting to LibreHardwareMonitor...");
 
 	bool wmiConnected = false;
@@ -735,6 +746,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		Sleep(5000);
 	}
 
+	DebugListAllSensors();
+
 	RegisterHotKey(hWnd, 1, MOD_CONTROL | MOD_SHIFT | MOD_ALT, 0x4C);
 
 	NOTIFYICONDATA nid = { sizeof(NOTIFYICONDATA), hWnd, 1, NIF_ICON | NIF_MESSAGE | NIF_TIP, WM_TRAYICON };
@@ -743,6 +756,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	Shell_NotifyIcon(NIM_ADD, &nid);
 
 	ShowNotification(hWnd, hInstance, windowTitle, L"Let's dance baby");
+
+	_bstr_t bstrSteady(L"Steady");
 
 	DWORD R = 0, G = 0, B = 0;
 	DWORD lastR = 999, lastG = 999;
@@ -762,11 +777,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 					MessageBeep(MB_ICONHAND);
 					
 					if (lpMLAPI_SetLedStyle && g_deviceName) {
-						lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
-					}
 
-					for (int i = 0; i < g_totalLeds; i++)
-						if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
+						lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+
+						for (int i = 0; i < g_totalLeds; i++)
+							if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
+					}
 				}
 			}
 			TranslateMessage(&msg);
@@ -779,24 +795,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		if (g_LedsEnabled) {
 			float rawTemp = GetCPUTempFast();
 
-			// Variable de control de logs (estática para que persista entre ciclos)
-			static bool s_sensorEnFallo = false;
-
-			if (rawTemp <= 0.0f) {
-				// FALLO DETECTADO: Solo avisamos la primera vez
-				if (!s_sensorEnFallo) {
-					Log("[ERROR] Sensor lost. Check if LibreHardwareMonitor is running.");
-					s_sensorEnFallo = true;
-				}
-				InitWMI(); // Intento silencioso de reconexión
-			}
-			else if (rawTemp > 0.0f) {
-				// RECUPERACIÓN: Solo avisamos si veníamos de un fallo
-				if (s_sensorEnFallo) {
-					Log("[OK] Sensor detected again. Resuming operations.");
-					s_sensorEnFallo = false;
-				}
-
+			if (rawTemp > 0.0f) {
+				
 				// Lógica de colores normal
 				float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f;
 
@@ -814,13 +814,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 				if (R != lastR || G != lastG) {
 					
-					if (lpMLAPI_SetLedStyle && g_deviceName) {
-						lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
-					}
-
+					lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+					
 					for (int i = 0; i < g_totalLeds; i++) {
 						if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
 					}
+
 					lastR = R; lastG = G;
 				}
 			}
