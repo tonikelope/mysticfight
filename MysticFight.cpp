@@ -21,7 +21,7 @@
 #define ID_TRAY_CONFIG 2001
 #define ID_TRAY_LOG 3001
 
-const wchar_t* APP_VERSION = L"v1.5";
+const wchar_t* APP_VERSION = L"v1.7";
 
 struct Config {
 	wchar_t sensorID[256];
@@ -416,7 +416,7 @@ static void FinalCleanup(HWND hWnd) {
 	// Se hace mientras la DLL y los BSTRs siguen siendo válidos en memoria.
 	if (g_hLibrary && g_deviceName) {
 		// Volver al estilo estático y apagar todos los LEDs
-		if (lpMLAPI_SetLedStyle) {
+		if (lpMLAPI_SetLedStyle && g_deviceName) {
 			lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
 		}
 		if (lpMLAPI_SetLedColor) {
@@ -713,13 +713,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	g_styleSteady = SysAllocString(L"Steady");
 
-	if (lpMLAPI_SetLedStyle && g_deviceName) {
-		lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
-		Log("[MysticFight] LED Style set to Steady.");
-	}
-
-
 	Log("[MysticFight] Connecting to LibreHardwareMonitor...");
+
 	bool wmiConnected = false;
 	for (int j = 1; j <= 10; j++) {
 		if (InitWMI()) {
@@ -765,6 +760,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				if (g_LedsEnabled) MessageBeep(MB_OK);
 				else {
 					MessageBeep(MB_ICONHAND);
+					
+					if (lpMLAPI_SetLedStyle && g_deviceName) {
+						lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
+					}
+
 					for (int i = 0; i < g_totalLeds; i++)
 						if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
 				}
@@ -813,6 +813,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				}
 
 				if (R != lastR || G != lastG) {
+					
+					if (lpMLAPI_SetLedStyle && g_deviceName) {
+						lpMLAPI_SetLedStyle(g_deviceName, 0, g_styleSteady);
+					}
+
 					for (int i = 0; i < g_totalLeds; i++) {
 						if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
 					}
