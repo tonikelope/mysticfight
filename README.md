@@ -26,46 +26,4 @@ For this tool to work, you MUST have the following installed/running:
 3. **Mystic Light SDK:** MysticLight_SDK.dll must stay in the same folder as MysticFight.exe (DLL is included with MysticFight.exe)
 4. **LibreHardwareMonitor:** [Download here](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor). Must be running (minimized on tray) to provide temperature data via WMI. (Yes, i know there is a LibreHardwareMonitorLib available, but I don't have the time or inclination to mess around with CLR DLL wrappers such when WMI works perfectly well for this task and LHM client is lightweight and useful for other monitoring applications such as RainMeter).
 
-## 🚀 How to Run at Startup (Step-by-Step)
-
-Since the app requires **Administrator privileges** for SDK and WMI access, it must be launched via **Windows Task Scheduler**. Follow these precise settings:
-
-### 1. Create the Task
-* Open the **Start Menu**, type `Task Scheduler`, and press **Enter**.
-* On the right panel, click **Create Task...** (Do not use "Basic Task").
-
-### 2. Tab-by-Tab Configuration
-
-#### **General Tab**
-* **Name:** `MysticFight`
-* **Security options:** Check **Run with highest privileges**. 👈 *Essential for SDK access.*
-* **Configure for:** Select **Windows 10** or **Windows 11**.
-
-#### **Triggers Tab**
-1. Click **New...**
-2. **Begin the task:** Select `At log on`.
-3. **Advanced settings:**
-   * Check **Delay task for:** and set to `30 seconds`. (Gives MSI services time to start).
-   * Check **Enabled**.
-4. Click **OK**.
-
-#### **Actions Tab**
-1. Click **New...** -> **Action:** `Start a program`.
-2. **Program/script:** Click *Browse* and select your `MysticFight.exe`.
-3. **Start in (optional):** ⚠️ **MANDATORY:** Paste the full path to the folder where the EXE is located (e.g., `C:\Tools\MysticFight\`).
-   * *Note: Do not use quotes in this field.*
-4. Click **OK**.
-
-#### **Conditions Tab**
-* **Power:** Uncheck **Start the task only if the computer is on AC power**.
-* **Power:** Uncheck **Stop if the computer switches to battery power**.
-
-#### **Settings Tab**
-* Check **Allow task to be run on demand**. 👈 *Allows you to start it manually if needed.*
-* Uncheck **Stop the task if it runs longer than**. 👈 *Critical: Otherwise Windows kills the app after 3 days.*
-* Check **If the running task does not end when requested, force it to stop**.
-  
-> [!TIP]
-> **Verification:** Once saved, right-click the task in the library and select **Run**. If the icon appears in the tray and the LEDs respond, you've nailed it.
-
 This is practically a proof of concept for everything that the Mystic Light SDK can do with a little imagination. Carpe diem!
