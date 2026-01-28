@@ -21,7 +21,7 @@
 #define ID_TRAY_CONFIG 2001
 #define ID_TRAY_LOG 3001
 
-const wchar_t* APP_VERSION = L"v2.5";
+const wchar_t* APP_VERSION = L"v2.6";
 const wchar_t* LOG_FILENAME = L"debug.log";
 
 struct Config {
@@ -36,9 +36,11 @@ const wchar_t* INI_FILE = L".\\config.ini";
 
 typedef int (*LPMLAPI_Initialize)();
 typedef int (*LPMLAPI_GetDeviceInfo)(SAFEARRAY** pDevType, SAFEARRAY** pLedCount);
+typedef int (*LPMLAPI_GetDeviceNameEx)(BSTR type, DWORD index, BSTR* pDevName);
 typedef int (*LPMLAPI_SetLedColor)(BSTR type, DWORD index, DWORD R, DWORD G, DWORD B);
 typedef int (*LPMLAPI_SetLedStyle)(BSTR type, DWORD index, BSTR style);
 typedef int (*LPMLAPI_SetLedSpeed)(BSTR type, DWORD index, DWORD level);
+typedef int (*LPMLAPI_Release)();
 
 // SMART POINTERS DEFINITIONS
 _COM_SMARTPTR_TYPEDEF(IWbemLocator, __uuidof(IWbemLocator));
@@ -71,9 +73,13 @@ DWORD lastR = 999, lastG = 999, lastB = 999;
 BSTR g_deviceName = NULL;
 HMODULE g_hLibrary = NULL;
 int g_totalLeds = 0;
+LPMLAPI_Initialize lpMLAPI_Initialize = nullptr;
+LPMLAPI_GetDeviceInfo lpMLAPI_GetDeviceInfo = nullptr;
 LPMLAPI_SetLedColor lpMLAPI_SetLedColor = nullptr;
 LPMLAPI_SetLedStyle lpMLAPI_SetLedStyle = nullptr;
 LPMLAPI_SetLedSpeed lpMLAPI_SetLedSpeed = nullptr;
+LPMLAPI_Release lpMLAPI_Release = nullptr;
+LPMLAPI_GetDeviceNameEx lpMLAPI_GetDeviceNameEx = nullptr;
 HANDLE g_hMutex = NULL;
 
 static bool IsValidHex(const wchar_t* hex) {
@@ -116,6 +122,8 @@ static void ClearComboHeapData(HWND hCombo) {
 	}
 	SendMessage(hCombo, CB_RESETCONTENT, 0, 0);
 }
+
+
 
 static bool InitWMI() {
 	// Al asignar nullptr, los Smart Pointers liberan cualquier referencia previa de forma segura
@@ -663,56 +671,52 @@ static void FinalCleanup(HWND hWnd) {
 
 	Log("[MysticFight] Starting cleaning...");
 
-	// 2. APAGADO DE HARDWARE (Prioridad Máxima)
-	// Se hace mientras la DLL y los BSTRs siguen siendo válidos en memoria.
-	if (g_hLibrary && g_deviceName) {
-		
-		for (int i = 0; i < g_totalLeds; i++) {
-			lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
+	// 1. APAGADO DE HARDWARE
+	if (g_hLibrary) {
+		// Apagar LEDs si el dispositivo es válido
+		if (g_deviceName && lpMLAPI_SetLedColor) {
+			for (int i = 0; i < g_totalLeds; i++) {
+				lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
+			}
+			Log("[MysticFight] LEDs power off");
 		}
-		
-		Log("[MysticFight] LEDs power off");
+
+		// --- NOVEDAD: Liberar el SDK antes de cerrar la DLL ---
+		if (lpMLAPI_Release) {
+			lpMLAPI_Release();
+			Log("[MysticFight] MSI SDK Released");
+		}
+
+		FreeLibrary(g_hLibrary);
+		g_hLibrary = NULL;
 	}
 
-	// 3. LIMPIEZA DE INTERFAZ DE USUARIO (Shell y Hotkeys)
-	if (hWnd) {
-		NOTIFYICONDATA nid = {};
-		nid.cbSize = sizeof(NOTIFYICONDATA);
-		nid.hWnd = hWnd;
-		nid.uID = 1;
-		Shell_NotifyIcon(NIM_DELETE, &nid);
-
-		UnregisterHotKey(hWnd, 1);
-	}
-
-	// 4. LIBERACIÓN DE MEMORIA BSTR (MSI SDK)
-	// Es vital poner a NULL después de liberar para evitar "Dangling Pointers"
+	// 2. LIMPIEZA DE BSTRs GLOBALES
 	if (g_deviceName) {
 		SysFreeString(g_deviceName);
 		g_deviceName = NULL;
 	}
-	
-	// 5. LIBERACIÓN DE LA LIBRERÍA (DLL)
-	if (g_hLibrary) {
-		FreeLibrary(g_hLibrary);
-		g_hLibrary = NULL;
-		// Limpiamos los punteros a funciones por seguridad
-		lpMLAPI_SetLedColor = nullptr;
-		lpMLAPI_SetLedStyle = nullptr;
+	g_bstrQuery = L""; // Limpiar el wrapper de BSTR antes de CoUninitialize
+
+	// 3. LIMPIEZA DE INTERFAZ
+	if (hWnd) {
+		NOTIFYICONDATA nid = { sizeof(NOTIFYICONDATA), hWnd, 1 };
+		Shell_NotifyIcon(NIM_DELETE, &nid);
+		UnregisterHotKey(hWnd, 1);
 	}
 
-	// 6. DESTRUCCIÓN DE SMART POINTERS (CRÍTICO)
+	// 4. DESTRUCCIÓN DE SMART POINTERS (WMI)
 	g_pSvc = nullptr;
 	g_pLoc = nullptr;
 
-	// 7. SINCRONIZACIÓN Y COM
+	// 5. SINCRONIZACIÓN
 	if (g_hMutex) {
 		ReleaseMutex(g_hMutex);
 		CloseHandle(g_hMutex);
 		g_hMutex = NULL;
 	}
 
-	// Último paso: Cerrar el entorno COM de Windows
+	// 6. CERRAR COM
 	CoUninitialize();
 
 	Log("[MysticFight] Cleaning finished.");
@@ -975,21 +979,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	
 	HWND hWnd = CreateWindowEx(0, wc.lpszClassName, windowTitle, 0, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
 
-	auto fnMLAPI_Initialize = (LPMLAPI_Initialize)GetProcAddress(g_hLibrary, "MLAPI_Initialize");
-	auto fnMLAPI_GetDeviceInfo = (LPMLAPI_GetDeviceInfo)GetProcAddress(g_hLibrary, "MLAPI_GetDeviceInfo");
+	lpMLAPI_Initialize = (LPMLAPI_Initialize)GetProcAddress(g_hLibrary, "MLAPI_Initialize");
+	lpMLAPI_GetDeviceInfo = (LPMLAPI_GetDeviceInfo)GetProcAddress(g_hLibrary, "MLAPI_GetDeviceInfo");
 	lpMLAPI_SetLedColor = (LPMLAPI_SetLedColor)GetProcAddress(g_hLibrary, "MLAPI_SetLedColor");
 	lpMLAPI_SetLedStyle = (LPMLAPI_SetLedStyle)GetProcAddress(g_hLibrary, "MLAPI_SetLedStyle");
 	lpMLAPI_SetLedSpeed = (LPMLAPI_SetLedSpeed)GetProcAddress(g_hLibrary, "MLAPI_SetLedSpeed");
+	lpMLAPI_Release = (LPMLAPI_Release)GetProcAddress(g_hLibrary, "MLAPI_Release");
+	lpMLAPI_GetDeviceNameEx = (LPMLAPI_GetDeviceNameEx)GetProcAddress(g_hLibrary, "MLAPI_GetDeviceNameEx");
 
 	Log("[MysticFight] Attempting to initialize SDK...");
-	if (!fnMLAPI_Initialize || fnMLAPI_Initialize() != 0) {
+	if (!lpMLAPI_Initialize || lpMLAPI_Initialize() != 0) {
 		bool initialized = false;
 		for (int i = 1; i <= 10; i++) {
 			char retryMsg[100];
 			snprintf(retryMsg, sizeof(retryMsg), "[MysticFight] Attempt %d/10 failed. Retrying in 5s...", i);
 			Log(retryMsg);
 
-			if (fnMLAPI_Initialize && fnMLAPI_Initialize() == 0) {
+			if (lpMLAPI_Initialize && lpMLAPI_Initialize() == 0) {
 				Log("[MysticFight] SDK Initialized successfully on retry.");
 				initialized = true;
 				break;
@@ -1008,19 +1014,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		Log("[MysticFight] SDK Initialized successfully at first attempt.");
 	}
 
-	// --- REEMPLAZO SEGURO ---
+	// --- BLOQUE DE DETECCIÓN CON NOMBRE FRIENDLY ---
 	SAFEARRAY* pDevType = nullptr;
 	SAFEARRAY* pLedCount = nullptr;
 
-	if (fnMLAPI_GetDeviceInfo && fnMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0 && pDevType && pLedCount) {
-		BSTR* pNames = nullptr;
+	if (lpMLAPI_GetDeviceInfo && lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0 && pDevType && pLedCount) {
+		BSTR* pTypes = nullptr;
 		void* pCountsRaw = nullptr;
 		VARTYPE vtCount;
-
-		// Obtenemos el tipo real del array de conteo
 		SafeArrayGetVartype(pLedCount, &vtCount);
 
-		if (SUCCEEDED(SafeArrayAccessData(pDevType, (void**)&pNames)) &&
+		if (SUCCEEDED(SafeArrayAccessData(pDevType, (void**)&pTypes)) &&
 			SUCCEEDED(SafeArrayAccessData(pLedCount, &pCountsRaw))) {
 
 			long lBound, uBound;
@@ -1029,17 +1033,29 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			long count = uBound - lBound + 1;
 
 			if (count > 0) {
+				// 1. Guardamos el tipo técnico (MSI_MB)
 				if (g_deviceName) SysFreeString(g_deviceName);
-				
-				g_deviceName = SysAllocString(pNames[0]);
-
+				g_deviceName = SysAllocString(pTypes[0]);
 				g_totalLeds = GetIntFromSafeArray(pCountsRaw, vtCount, 0);
-				
-				char devInfo[256];
-				
-				snprintf(devInfo, sizeof(devInfo), "[MysticFight] Device: %ls | LEDs: %d", g_deviceName, g_totalLeds);
-				
+
+				// 2. OBTENEMOS EL NOMBRE FRIENDLY
+				BSTR friendlyName = NULL;
+				if (lpMLAPI_GetDeviceNameEx) {
+					// Pedimos el nombre extendido del dispositivo 0 de este tipo
+					lpMLAPI_GetDeviceNameEx(g_deviceName, 0, &friendlyName);
+				}
+
+				// 3. LOG FORMATEADO
+				char devInfo[512];
+				snprintf(devInfo, sizeof(devInfo), "[MysticFight] %ls (Type: %ls) | Total LEDs: %d",
+					(friendlyName ? friendlyName : L"Unknown Device"),
+					g_deviceName,
+					g_totalLeds);
+
 				Log(devInfo);
+
+				// Limpieza del nombre temporal
+				if (friendlyName) SysFreeString(friendlyName);
 			}
 
 			SafeArrayUnaccessData(pDevType);
