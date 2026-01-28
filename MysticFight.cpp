@@ -21,7 +21,7 @@
 #define ID_TRAY_CONFIG 2001
 #define ID_TRAY_LOG 3001
 
-const wchar_t* APP_VERSION = L"v2.6";
+const wchar_t* APP_VERSION = L"v2.7";
 const wchar_t* LOG_FILENAME = L"debug.log";
 
 struct Config {
@@ -629,7 +629,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
 			SetRunAtStartup(wantStartup);
 
-			WritePrivateProfileStringW(L"Settings", L"TaskAsked", L"1", INI_FILE);
+			WritePrivateProfileStringW(L"Settings", L"BootTaskAsked", L"1", INI_FILE);
 
 			SaveSettings();
 
