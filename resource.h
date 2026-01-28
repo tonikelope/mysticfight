@@ -2,6 +2,10 @@
 #define IDD_SETTINGS                    102
 #define IDC_SENSOR_ID                   1001
 #define IDC_TEMP_LOW                    1002
-#define IDC_TEMP_HIGH                   1003
-#define IDC_TEMP_ALERT                  1004
+#define IDC_TEMP_MED                   1003
+#define IDC_TEMP_HIGH                  1004
 #define IDR_MSI_DLL						2001
+#define IDC_HEX_LOW                     4001
+#define IDC_HEX_MED                    4002
+#define IDC_HEX_HIGH                   4003
+#define IDC_BTN_RESET                   4004

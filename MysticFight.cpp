@@ -21,12 +21,14 @@
 #define ID_TRAY_CONFIG 2001
 #define ID_TRAY_LOG 3001
 
-const wchar_t* APP_VERSION = L"v2.1";
+const wchar_t* APP_VERSION = L"v2.2";
 const wchar_t* LOG_FILENAME = L"debug.log";
 
 struct Config {
 	wchar_t sensorID[256];
-	int tempLow, tempHigh, tempAlert;
+	int tempLow, tempMed, tempHigh;
+	// Nuevos campos de color
+	COLORREF colorLow, colorMed, colorHigh;
 };
 
 Config g_cfg;
@@ -64,6 +66,8 @@ _bstr_t g_bstrQuery=L"";
 IWbemServicesPtr g_pSvc = nullptr;
 IWbemLocatorPtr g_pLoc = nullptr;
 
+DWORD lastR = 999, lastG = 999, lastB = 999;
+
 BSTR g_deviceName = NULL;
 HMODULE g_hLibrary = NULL;
 int g_totalLeds = 0;
@@ -71,6 +75,29 @@ LPMLAPI_SetLedColor lpMLAPI_SetLedColor = nullptr;
 LPMLAPI_SetLedStyle lpMLAPI_SetLedStyle = nullptr;
 LPMLAPI_SetLedSpeed lpMLAPI_SetLedSpeed = nullptr;
 HANDLE g_hMutex = NULL;
+
+static bool IsValidHex(const wchar_t* hex) {
+	if (!hex || wcslen(hex) != 7 || hex[0] != L'#') return false;
+	for (int i = 1; i < 7; i++) {
+		if (!iswxdigit(hex[i])) return false;
+	}
+	return true;
+}
+
+// Convierte una cadena L"#RRGGBB" a COLORREF (0x00BBGGRR)
+static COLORREF HexToColor(const wchar_t* hex) {
+	if (hex[0] == L'#') hex++;
+	unsigned int r = 0, g = 0, b = 0;
+	if (swscanf_s(hex, L"%02x%02x%02x", &r, &g, &b) == 3) {
+		return RGB(r, g, b);
+	}
+	return RGB(0, 0, 0); // Negro por defecto si falla
+}
+
+// Convierte un COLORREF a una cadena L"#RRGGBB"
+static void ColorToHex(COLORREF color, wchar_t* out, size_t size) {
+	swprintf_s(out, size, L"#%02X%02X%02X", GetRValue(color), GetGValue(color), GetBValue(color));
+}
 
 // --- GESTIÓN SEGURA DE MEMORIA ---
 static wchar_t* HeapDupString(const wchar_t* src) {
@@ -178,7 +205,7 @@ static void PrepareLHMSensorWMIQuery() {
 	g_bstrQuery = q.c_str(); // El operador = de _bstr_t maneja la memoria por ti
 
 	char sensorLog[512];
-	snprintf(sensorLog, sizeof(sensorLog), "[MysticFight] Target Sensor updated to: %ls", g_cfg.sensorID);
+	snprintf(sensorLog, sizeof(sensorLog), "[MysticFight] WMI Sensor updated to: %ls", g_cfg.sensorID);
 	Log(sensorLog);
 }
 
@@ -317,21 +344,51 @@ static bool IsTaskValid() {
 	return false;
 }
 
-// --- CONFIGURATION MANAGEMENT ---
-void LoadSettings() {
-	GetPrivateProfileStringW(L"Settings", L"SensorID", L"", g_cfg.sensorID, 256, INI_FILE);
-	g_cfg.tempLow = GetPrivateProfileIntW(L"Settings", L"TempLow", 50, INI_FILE);
-	g_cfg.tempHigh = GetPrivateProfileIntW(L"Settings", L"TempHigh", 70, INI_FILE);
-	g_cfg.tempAlert = GetPrivateProfileIntW(L"Settings", L"TempAlert", 90, INI_FILE);
-
-}
-
 void SaveSettings() {
 	WritePrivateProfileStringW(L"Settings", L"SensorID", g_cfg.sensorID, INI_FILE);
 	WritePrivateProfileStringW(L"Settings", L"TempLow", std::to_wstring(g_cfg.tempLow).c_str(), INI_FILE);
+	WritePrivateProfileStringW(L"Settings", L"TempMed", std::to_wstring(g_cfg.tempMed).c_str(), INI_FILE);
 	WritePrivateProfileStringW(L"Settings", L"TempHigh", std::to_wstring(g_cfg.tempHigh).c_str(), INI_FILE);
-	WritePrivateProfileStringW(L"Settings", L"TempAlert", std::to_wstring(g_cfg.tempAlert).c_str(), INI_FILE);
 
+	wchar_t hL[10], hM[10], hH[10];
+	ColorToHex(g_cfg.colorLow, hL, 10);
+	ColorToHex(g_cfg.colorMed, hM, 10);
+	ColorToHex(g_cfg.colorHigh, hH, 10);
+
+	WritePrivateProfileStringW(L"Settings", L"ColorLow", hL, INI_FILE);
+	WritePrivateProfileStringW(L"Settings", L"ColorMed", hM, INI_FILE);
+	WritePrivateProfileStringW(L"Settings", L"ColorHigh", hH, INI_FILE);
+}
+
+void LoadSettings() {
+	bool needsReset = false;
+
+	int tL = GetPrivateProfileIntW(L"Settings", L"TempLow", 50, INI_FILE);
+	int tM = GetPrivateProfileIntW(L"Settings", L"TempMed", 70, INI_FILE);
+	int tH = GetPrivateProfileIntW(L"Settings", L"TempHigh", 90, INI_FILE);
+
+	wchar_t hL[10], hM[10], hH[10];
+	GetPrivateProfileStringW(L"Settings", L"ColorLow", L"#00FF00", hL, 10, INI_FILE);
+	GetPrivateProfileStringW(L"Settings", L"ColorMed", L"#FFFF00", hM, 10, INI_FILE);
+	GetPrivateProfileStringW(L"Settings", L"ColorHigh", L"#FF0000", hH, 10, INI_FILE);
+
+	// Validación lógica: Low < Med < High
+	if (tL < 0 || tH > 110 || tL >= tM || tM >= tH ||
+		!IsValidHex(hL) || !IsValidHex(hM) || !IsValidHex(hH)) {
+		needsReset = true;
+	}
+
+	if (needsReset) {
+		g_cfg.tempLow = 50; g_cfg.tempMed = 70; g_cfg.tempHigh = 90;
+		g_cfg.colorLow = RGB(0, 255, 0); g_cfg.colorMed = RGB(255, 255, 0); g_cfg.colorHigh = RGB(255, 0, 0);
+		SaveSettings();
+		MessageBoxW(NULL, L"Configuration was corrupted. Factory defaults restored.", L"MysticFight", MB_OK | MB_ICONINFORMATION);
+	}
+	else {
+		g_cfg.tempLow = tL; g_cfg.tempMed = tM; g_cfg.tempHigh = tH;
+		g_cfg.colorLow = HexToColor(hL); g_cfg.colorMed = HexToColor(hM); g_cfg.colorHigh = HexToColor(hH);
+	}
+	GetPrivateProfileStringW(L"Settings", L"SensorID", L"", g_cfg.sensorID, 256, INI_FILE);
 }
 
 void PopulateSensorList(HWND hDlg) {
@@ -367,11 +424,42 @@ void PopulateSensorList(HWND hDlg) {
 }
 
 
-
+// Función para decidir si el texto debe ser blanco o negro (Contraste)
+static bool IsColorDark(COLORREF col) {
+	double brightness = (GetRValue(col) * 299 + GetGValue(col) * 587 + GetBValue(col) * 114) / 1000.0;
+	return brightness < 128.0;
+}
 // --- PROCEDIMIENTO DE DIÁLOGO DE CONFIGURACIÓN ---
 
 INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
+	static HBRUSH hBrushLow = NULL, hBrushMed = NULL, hBrushHigh = NULL;
+
 	switch (message) {
+	case WM_CTLCOLOREDIT: {
+		HDC hdc = (HDC)wParam;
+		HWND hCtrl = (HWND)lParam;
+		int id = GetDlgCtrlID(hCtrl);
+
+		HBRUSH hSelectedBrush = NULL;
+
+		if (id == IDC_HEX_LOW)  hSelectedBrush = hBrushLow;
+		if (id == IDC_HEX_MED)  hSelectedBrush = hBrushMed;
+		if (id == IDC_HEX_HIGH) hSelectedBrush = hBrushHigh;
+
+		if (hSelectedBrush) {
+			wchar_t buf[10];
+			GetWindowTextW(hCtrl, buf, 10);
+			if (IsValidHex(buf)) {
+				COLORREF c = HexToColor(buf);
+				SetBkColor(hdc, c);
+				// Si el fondo es oscuro, ponemos el texto blanco
+				if (IsColorDark(c)) SetTextColor(hdc, RGB(255, 255, 255));
+				else SetTextColor(hdc, RGB(0, 0, 0));
+				return (INT_PTR)hSelectedBrush;
+			}
+		}
+		return (INT_PTR)GetStockObject(WHITE_BRUSH);
+	}
 	case WM_INITDIALOG: {
 		// 1. Estética: Iconos y centrar ventana
 		HICON hIcon = (HICON)LoadImage(GetModuleHandle(NULL), MAKEINTRESOURCE(101), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
@@ -380,6 +468,10 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 			SendMessage(hDlg, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
 		}
 
+		hBrushLow = CreateSolidBrush(g_cfg.colorLow);
+		hBrushMed = CreateSolidBrush(g_cfg.colorMed);
+		hBrushHigh = CreateSolidBrush(g_cfg.colorHigh);
+
 		RECT rcOwner, rcDlg;
 		GetWindowRect(GetDesktopWindow(), &rcOwner);
 		GetWindowRect(hDlg, &rcDlg);
@@ -387,60 +479,151 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 		int y = ((rcOwner.bottom - rcOwner.top) - (rcDlg.bottom - rcDlg.top)) / 2;
 		SetWindowPos(hDlg, HWND_TOP, x, y, 0, 0, SWP_NOSIZE);
 
-		// 2. Rellenar lista y cargar valores actuales
+		// 2. Rellenar lista y cargar valores actuales de temperatura
 		PopulateSensorList(hDlg);
 		SetDlgItemInt(hDlg, IDC_TEMP_LOW, g_cfg.tempLow, TRUE);
+		SetDlgItemInt(hDlg, IDC_TEMP_MED, g_cfg.tempMed, TRUE);
 		SetDlgItemInt(hDlg, IDC_TEMP_HIGH, g_cfg.tempHigh, TRUE);
-		SetDlgItemInt(hDlg, IDC_TEMP_ALERT, g_cfg.tempAlert, TRUE);
+
+		// 3. Cargar los colores actuales en los cajetines HEX
+		SendMessage(GetDlgItem(hDlg, IDC_HEX_LOW), EM_SETLIMITTEXT, 7, 0);
+		SendMessage(GetDlgItem(hDlg, IDC_HEX_MED), EM_SETLIMITTEXT, 7, 0);
+		SendMessage(GetDlgItem(hDlg, IDC_HEX_HIGH), EM_SETLIMITTEXT, 7, 0);
+
+		wchar_t hexBuf[10];
+		ColorToHex(g_cfg.colorLow, hexBuf, 10);
+		SetDlgItemTextW(hDlg, IDC_HEX_LOW, hexBuf);
+
+		ColorToHex(g_cfg.colorMed, hexBuf, 10);
+		SetDlgItemTextW(hDlg, IDC_HEX_MED, hexBuf);
+
+		ColorToHex(g_cfg.colorHigh, hexBuf, 10);
+		SetDlgItemTextW(hDlg, IDC_HEX_HIGH, hexBuf);
+
 		return (INT_PTR)TRUE;
 	}
 
-	case WM_COMMAND:
-		switch (LOWORD(wParam)) {
+	case WM_COMMAND: {
+		int id = LOWORD(wParam);
+		int code = HIWORD(wParam);
+
+		// --- 1. LÓGICA DE CAMBIO EN TIEMPO REAL (COLOR PREVIEW) ---
+		if (code == EN_CHANGE) {
+			wchar_t buf[10];
+			GetDlgItemTextW(hDlg, id, buf, 10);
+
+			// Si el usuario termina de escribir un Hex válido (#RRGGBB)
+			if (IsValidHex(buf)) {
+				COLORREF newCol = HexToColor(buf);
+				HBRUSH newBrush = CreateSolidBrush(newCol);
+
+				if (id == IDC_HEX_LOW) {
+					if (hBrushLow) DeleteObject(hBrushLow);
+					hBrushLow = newBrush;
+				}
+				else if (id == IDC_HEX_MED) {
+					if (hBrushMed) DeleteObject(hBrushMed);
+					hBrushMed = newBrush;
+				}
+				else if (id == IDC_HEX_HIGH) {
+					if (hBrushHigh) DeleteObject(hBrushHigh);
+					hBrushHigh = newBrush;
+				}
+
+				// Forzamos a la caja de texto a repintarse con el nuevo color
+				InvalidateRect(GetDlgItem(hDlg, id), NULL, TRUE);
+			}
+			return TRUE;
+		}
+
+		switch (id) {
+			// --- 2. BOTÓN RESET DEFAULTS ---
+		case IDC_BTN_RESET: {
+			// Temperaturas por defecto
+			SetDlgItemInt(hDlg, IDC_TEMP_LOW, 50, TRUE);
+			SetDlgItemInt(hDlg, IDC_TEMP_MED, 70, TRUE);
+			SetDlgItemInt(hDlg, IDC_TEMP_HIGH, 90, TRUE);
+
+			// Colores por defecto (esto disparará EN_CHANGE automáticamente)
+			SetDlgItemTextW(hDlg, IDC_HEX_LOW, L"#00FF00"); // Green
+			SetDlgItemTextW(hDlg, IDC_HEX_MED, L"#FFFF00"); // Yellow
+			SetDlgItemTextW(hDlg, IDC_HEX_HIGH, L"#FF0000"); // Red
+
+			Log("[UI] UI restored to factory defaults.");
+			return TRUE;
+		}
+
+						  // --- 3. BOTÓN SAVE (IDOK) ---
 		case IDOK: {
+			// A. Validar Sensor
 			HWND hCombo = GetDlgItem(hDlg, IDC_SENSOR_ID);
 			int idx = (int)SendMessage(hCombo, CB_GETCURSEL, 0, 0);
-
 			if (idx == CB_ERR) {
 				MessageBoxW(hDlg, L"Please select a sensor to continue.", L"Configuration Error", MB_ICONWARNING);
 				return TRUE;
 			}
 
-			// Sacamos el ID del sensor (el puntero al Heap)
-			wchar_t* selectedID = (wchar_t*)SendMessage(hCombo, CB_GETITEMDATA, idx, 0);
+			// B. Recoger y Validar Colores Hex
+			wchar_t hL[10], hM[10], hH[10];
+			GetDlgItemTextW(hDlg, IDC_HEX_LOW, hL, 10);
+			GetDlgItemTextW(hDlg, IDC_HEX_MED, hM, 10);
+			GetDlgItemTextW(hDlg, IDC_HEX_HIGH, hH, 10);
 
-			int tLow = GetDlgItemInt(hDlg, IDC_TEMP_LOW, NULL, TRUE);
-			int tHigh = GetDlgItemInt(hDlg, IDC_TEMP_HIGH, NULL, TRUE);
-			int tAlert = GetDlgItemInt(hDlg, IDC_TEMP_ALERT, NULL, TRUE);
-
-			// Validación lógica
-			if (tLow < 0 || tAlert > 110 || tLow >= tHigh || tHigh >= tAlert) {
-				MessageBoxW(hDlg, L"Invalid temperature range. Order must be: Green < Yellow < Red.", L"Validation Error", MB_ICONWARNING);
+			if (!IsValidHex(hL) || !IsValidHex(hM) || !IsValidHex(hH)) {
+				MessageBoxW(hDlg, L"Invalid color codes.\nFormat must be #RRGGBB (e.g., #FF0000).", L"Validation Error", MB_ICONERROR);
 				return TRUE;
 			}
 
-			// Guardar configuración
-			if (selectedID && selectedID != (wchar_t*)CB_ERR) wcscpy_s(g_cfg.sensorID, selectedID);
-			g_cfg.tempLow = tLow;
-			g_cfg.tempHigh = tHigh;
-			g_cfg.tempAlert = tAlert;
+			// C. Recoger y Validar Temperaturas
+			int tL = GetDlgItemInt(hDlg, IDC_TEMP_LOW, NULL, TRUE);
+			int tM = GetDlgItemInt(hDlg, IDC_TEMP_MED, NULL, TRUE);
+			int tH = GetDlgItemInt(hDlg, IDC_TEMP_HIGH, NULL, TRUE);
+
+			if (tL < 0 || tH > 110 || tL >= tM || tM >= tH) {
+				MessageBoxW(hDlg, L"Invalid temperature range.\nOrder must be: Low < Med < High.", L"Validation Error", MB_ICONWARNING);
+				return TRUE;
+			}
+
+			// D. Guardado Final en la estructura Global
+			wchar_t* selectedID = (wchar_t*)SendMessage(hCombo, CB_GETITEMDATA, idx, 0);
+			if (selectedID && selectedID != (wchar_t*)CB_ERR) {
+				wcscpy_s(g_cfg.sensorID, selectedID);
+			}
+
+			g_cfg.tempLow = tL;  g_cfg.tempMed = tM;  g_cfg.tempHigh = tH;
+			g_cfg.colorLow = HexToColor(hL);
+			g_cfg.colorMed = HexToColor(hM);
+			g_cfg.colorHigh = HexToColor(hH);
+
+			// Forzamos actualización de hardware
+			lastR = 999; lastG = 999; lastB = 999;
 
 			SaveSettings();
 			EndDialog(hDlg, IDOK);
-			return (INT_PTR)TRUE;
+			return TRUE;
 		}
 
-		case IDCANCEL:
+				 // --- 4. BOTÓN CANCEL ---
+		case IDCANCEL: {
 			EndDialog(hDlg, IDCANCEL);
-			return (INT_PTR)TRUE;
+			return TRUE;
+		}
 		}
 		break;
+	}
 
-	case WM_DESTROY:
-		// --- AQUÍ ESTÁ LA MAGIA ---
-		// Liberamos los strings del Heap antes de que el ComboBox desaparezca
+	case WM_DESTROY: {
+		// BORRAR PINCELES PARA EVITAR FUGAS DE MEMORIA (GDI Leaks)
+		if (hBrushLow)  DeleteObject(hBrushLow);
+		if (hBrushMed)  DeleteObject(hBrushMed);
+		if (hBrushHigh) DeleteObject(hBrushHigh);
+
+		hBrushLow = hBrushMed = hBrushHigh = NULL;
+
+		// Liberamos los strings del Heap del ComboBox (lo que ya tenías)
 		ClearComboHeapData(GetDlgItem(hDlg, IDC_SENSOR_ID));
 		break;
+	}
 	}
 	return (INT_PTR)FALSE;
 }
@@ -538,8 +721,28 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 		// DENTRO DE WndProc -> switch (message) -> case WM_COMMAND
 		if (LOWORD(wParam) == ID_TRAY_CONFIG) {
 			if (DialogBoxW(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_SETTINGS), hWnd, SettingsDlgProc) == IDOK) {
+				
+				// 1. Creamos buffers temporales para los textos de los colores
+				wchar_t hL[10], hM[10], hH[10];
+				ColorToHex(g_cfg.colorLow, hL, 10);
+				ColorToHex(g_cfg.colorMed, hM, 10);
+				ColorToHex(g_cfg.colorHigh, hH, 10);
+
+				// 2. Ahora sí, el snprintf con los buffers de texto (hL, hH, hA)
+				char config_new[512];
+				snprintf(config_new, sizeof(config_new),
+					"[MysticFight] Config Updated - Sensor: %ls | Low: %dºC (%ls) | Med: %dºC (%ls) | High: %dºC (%ls)",
+					g_cfg.sensorID,
+					g_cfg.tempLow, hL,
+					g_cfg.tempMed, hM,
+					g_cfg.tempHigh, hH
+				);
+
+				Log(config_new);
+
 				PrepareLHMSensorWMIQuery();
-				Log("[MysticFight] Sensor updated.");
+
+				lastR = 999;
 			}
 		}
 		break;
@@ -714,11 +917,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	LoadSettings();
 
-	char startupCfg[512];
-	snprintf(startupCfg, sizeof(startupCfg),"[MysticFight] Config Loaded - Sensor: %ls | Low: %d | High: %d | Alert: %d", g_cfg.sensorID, g_cfg.tempLow, g_cfg.tempHigh, g_cfg.tempAlert);
-	Log(startupCfg);
+	// 1. Creamos buffers temporales para los textos de los colores
+	wchar_t hL[10], hH[10], hA[10];
+	ColorToHex(g_cfg.colorLow, hL, 10);
+	ColorToHex(g_cfg.colorMed, hH, 10);
+	ColorToHex(g_cfg.colorHigh, hA, 10);
 
-	PrepareLHMSensorWMIQuery();
+	// 2. Ahora sí, el snprintf con los buffers de texto (hL, hH, hA)
+	char startupCfg[512];
+	snprintf(startupCfg, sizeof(startupCfg),
+		"[MysticFight] Config Loaded - Sensor: %ls | Low: %dºC (%ls) | Med: %dºC (%ls) | High: %dºC (%ls)",
+		g_cfg.sensorID,
+		g_cfg.tempLow, hL,
+		g_cfg.tempMed, hH,
+		g_cfg.tempHigh, hA
+	);
+
+	Log(startupCfg);
 
 	// --- 2. VERIFICACIÓN DE AUTO-INICIO (Task Scheduler) ---
 	// Comprobamos si la tarea existe y si la ruta coincide
@@ -742,6 +957,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			return 0;
 		}
 	}
+
 	wchar_t windowTitle[100];
 	swprintf_s(windowTitle, L"MysticFight %s (by tonikelope)", APP_VERSION);
 	WNDCLASS wc = { 0 };
@@ -865,10 +1081,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	_bstr_t bstrSteady(L"Steady");
 
 	DWORD R = 0, G = 0, B = 0;
-	DWORD lastR = 999, lastG = 999;
+	lastR = 999, lastG = 999, lastB=999;
 	int wmiRetryCounter = 0;
 	const int WMI_RETRY_DELAY = 10;
 	MSG msg = { 0 };
+	PrepareLHMSensorWMIQuery();
 
 	while (g_Running) {
 		// 1. PROCESAR MENSAJES
@@ -876,7 +1093,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			if (msg.message == WM_QUIT) { g_Running = false; break; }
 			if (msg.message == WM_HOTKEY) {
 				g_LedsEnabled = !g_LedsEnabled;
-				lastR = 999; lastG = 999; // Forzar actualización de color
+				lastR = 999; lastG = 999; lastB = 999;
 				if (g_LedsEnabled) MessageBeep(MB_OK);
 				else {
 					MessageBeep(MB_ICONHAND);
@@ -901,42 +1118,51 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			float rawTemp = GetCPUTempFast();
 
 			if (rawTemp > 0.0f) {
-				
-				// Lógica de colores normal
+				// Redondeo para evitar parpadeos por micro-variaciones
 				float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f;
-				float ratio;
-				
+				float ratio = 0.0f;
+				DWORD R = 0, G = 0, B = 0;
+
+				// --- CÁLCULO DE INTERPOLACIÓN POR TRAMOS ---
+
 				if (temp <= (float)g_cfg.tempLow) {
-					R = 0; G = 255; B = 0;
+					// Caso: Por debajo del umbral mínimo
+					R = GetRValue(g_cfg.colorLow);
+					G = GetGValue(g_cfg.colorLow);
+					B = GetBValue(g_cfg.colorLow);
 				}
-				else if (temp <= (float)g_cfg.tempHigh) {
-					float divisor = (float)g_cfg.tempHigh - (float)g_cfg.tempLow;
-					ratio = (temp - (float)g_cfg.tempLow) / divisor;
-					if (ratio > 1.0f) ratio = 1.0f; // Seguridad
-					R = (DWORD)(255 * ratio); G = 255; B = 0;
+				else if (temp <= (float)g_cfg.tempMed) {
+					// TRAMO 1: Entre Low y High
+					ratio = (temp - (float)g_cfg.tempLow) / ((float)g_cfg.tempMed - (float)g_cfg.tempLow);
+
+					R = GetRValue(g_cfg.colorLow) + (DWORD)(ratio * (int(GetRValue(g_cfg.colorMed)) - int(GetRValue(g_cfg.colorLow))));
+					G = GetGValue(g_cfg.colorLow) + (DWORD)(ratio * (int(GetGValue(g_cfg.colorMed)) - int(GetGValue(g_cfg.colorLow))));
+					B = GetBValue(g_cfg.colorLow) + (DWORD)(ratio * (int(GetBValue(g_cfg.colorMed)) - int(GetBValue(g_cfg.colorLow))));
 				}
 				else {
-					float divisor = (float)g_cfg.tempAlert - (float)g_cfg.tempHigh;
-					ratio = (temp - (float)g_cfg.tempHigh) / divisor;
+					// TRAMO 2: Entre High y Alert
+					ratio = (temp - (float)g_cfg.tempMed) / ((float)g_cfg.tempHigh - (float)g_cfg.tempMed);
+					if (ratio > 1.0f) ratio = 1.0f; // Clamping de seguridad
 
-					// Si ratio es 1.0 o más, ya estamos en zona de alerta máxima
-					if (ratio >= 1.0f) {
-						R = 255; G = 0; B = 0;
-					}
-					else {
-						R = 255; G = (DWORD)(255 * (1.0f - ratio)); B = 0;
-					}
+					R = GetRValue(g_cfg.colorMed) + (DWORD)(ratio * (int(GetRValue(g_cfg.colorHigh)) - int(GetRValue(g_cfg.colorMed))));
+					G = GetGValue(g_cfg.colorMed) + (DWORD)(ratio * (int(GetGValue(g_cfg.colorHigh)) - int(GetGValue(g_cfg.colorMed))));
+					B = GetBValue(g_cfg.colorMed) + (DWORD)(ratio * (int(GetBValue(g_cfg.colorHigh)) - int(GetBValue(g_cfg.colorMed))));
 				}
 
-				if (R != lastR || G != lastG) {
-					
-					lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
-					
-					for (int i = 0; i < g_totalLeds; i++) {
-						if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
-					}
+				// --- ACTUALIZACIÓN DE HARDWARE (Solo si el color cambia) ---
 
-					lastR = R; lastG = G;
+				if (R != lastR || G != lastG || B != lastB) {
+					if (lpMLAPI_SetLedStyle && g_deviceName) {
+						// Forzamos modo estático antes de cambiar el color
+						lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+
+						for (int i = 0; i < g_totalLeds; i++) {
+							if (lpMLAPI_SetLedColor)
+								lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
+						}
+					}
+					// Guardamos el estado actual para la siguiente comparación
+					lastR = R; lastG = G; lastB = B;
 				}
 			}
 		}
