@@ -21,7 +21,7 @@
 #define ID_TRAY_CONFIG 2001
 #define ID_TRAY_LOG 3001
 
-const wchar_t* APP_VERSION = L"v2.3";
+const wchar_t* APP_VERSION = L"v2.4";
 const wchar_t* LOG_FILENAME = L"debug.log";
 
 struct Config {
@@ -653,11 +653,6 @@ static void FinalCleanup(HWND hWnd) {
 	// 2. APAGADO DE HARDWARE (Prioridad Máxima)
 	// Se hace mientras la DLL y los BSTRs siguen siendo válidos en memoria.
 	if (g_hLibrary && g_deviceName) {
-		// Volver al estilo estático y apagar todos los LEDs
-		
-		_bstr_t bstrSteady(L"Steady");
-
-		lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
 		
 		for (int i = 0; i < g_totalLeds; i++) {
 			lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
@@ -1024,8 +1019,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				
 				char devInfo[256];
 				
-				snprintf(devInfo, sizeof(devInfo), "[MysticFight] Device: %ls | LEDs: %d",
-					g_deviceName, g_totalLeds);
+				snprintf(devInfo, sizeof(devInfo), "[MysticFight] Device: %ls | LEDs: %d", g_deviceName, g_totalLeds);
 				
 				Log(devInfo);
 			}
@@ -1035,6 +1029,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		}
 		SafeArrayDestroy(pDevType);
 		SafeArrayDestroy(pLedCount);
+	}
+	
+	_bstr_t bstrSteady(L"Steady");
+
+	lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+
+	for (int i = 0; i < g_totalLeds; i++) {
+		lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
 	}
 
 	Log("[MysticFight] Connecting to LibreHardwareMonitor...");
@@ -1070,8 +1072,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	ShowNotification(hWnd, hInstance, windowTitle, L"Let's dance baby");
 
-	_bstr_t bstrSteady(L"Steady");
-
 	DWORD R = 0, G = 0, B = 0;
 	lastR = 999, lastG = 999, lastB=999;
 	
@@ -1088,20 +1088,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			if (msg.message == WM_HOTKEY) {
 				g_LedsEnabled = !g_LedsEnabled;
 
-				lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
-				
 				if (g_LedsEnabled) {
-					
 					MessageBeep(MB_OK);
-
-					for (int i = 0; i < g_totalLeds; i++)
-						if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
+					lastR = 999;
 				}
 				else {
 					MessageBeep(MB_ICONHAND);
-					
-					for (int i = 0; i < g_totalLeds; i++)
-						if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
+
+					for (int i = 0; i < g_totalLeds; i++) {
+						lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
+					}
 				}
 			}
 
@@ -1150,12 +1146,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				// --- ACTUALIZACIÓN DE HARDWARE (Solo si el color cambia) ---
 				if (R != lastR || G != lastG || B != lastB) {
 					
-					lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
 					for (int i = 0; i < g_totalLeds; i++) {
-						if (lpMLAPI_SetLedColor)
-							lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
+						lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
 					}
-					
+
 					// Guardamos el estado actual para la siguiente comparación
 					lastR = R; lastG = G; lastB = B;
 				}
