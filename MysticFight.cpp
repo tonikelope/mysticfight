@@ -21,7 +21,7 @@
 #define ID_TRAY_CONFIG 2001
 #define ID_TRAY_LOG 3001
 
-const wchar_t* APP_VERSION = L"v2.2";
+const wchar_t* APP_VERSION = L"v2.3";
 const wchar_t* LOG_FILENAME = L"debug.log";
 
 struct Config {
@@ -549,11 +549,11 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 			SetDlgItemTextW(hDlg, IDC_HEX_MED, L"#FFFF00"); // Yellow
 			SetDlgItemTextW(hDlg, IDC_HEX_HIGH, L"#FF0000"); // Red
 
-			Log("[UI] UI restored to factory defaults.");
+			Log("[MysticFight] UI restored to factory defaults.");
 			return TRUE;
 		}
 
-						  // --- 3. BOTÓN SAVE (IDOK) ---
+		// --- 3. BOTÓN SAVE (IDOK) ---
 		case IDOK: {
 			// A. Validar Sensor
 			HWND hCombo = GetDlgItem(hDlg, IDC_SENSOR_ID);
@@ -595,11 +595,25 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 			g_cfg.colorMed = HexToColor(hM);
 			g_cfg.colorHigh = HexToColor(hH);
 
-			// Forzamos actualización de hardware
-			lastR = 999; lastG = 999; lastB = 999;
+			char config_new[512];
+			snprintf(config_new, sizeof(config_new),
+				"[MysticFight] Config Updated - Sensor: %ls | Low: %dºC (%ls) | Med: %dºC (%ls) | High: %dºC (%ls)",
+				g_cfg.sensorID,
+				g_cfg.tempLow, hL,
+				g_cfg.tempMed, hM,
+				g_cfg.tempHigh, hH
+			);
+
+			Log(config_new);
+
+			PrepareLHMSensorWMIQuery();
+
+			lastR = 999;
 
 			SaveSettings();
+
 			EndDialog(hDlg, IDOK);
+
 			return TRUE;
 		}
 
@@ -718,32 +732,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 		if (LOWORD(wParam) == ID_TRAY_LOG) { // 👈 Acción para el Log
 			ShellExecuteW(NULL, L"open", LOG_FILENAME, NULL, NULL, SW_SHOW);
 		}
+		
 		// DENTRO DE WndProc -> switch (message) -> case WM_COMMAND
 		if (LOWORD(wParam) == ID_TRAY_CONFIG) {
-			if (DialogBoxW(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_SETTINGS), hWnd, SettingsDlgProc) == IDOK) {
-				
-				// 1. Creamos buffers temporales para los textos de los colores
-				wchar_t hL[10], hM[10], hH[10];
-				ColorToHex(g_cfg.colorLow, hL, 10);
-				ColorToHex(g_cfg.colorMed, hM, 10);
-				ColorToHex(g_cfg.colorHigh, hH, 10);
-
-				// 2. Ahora sí, el snprintf con los buffers de texto (hL, hH, hA)
-				char config_new[512];
-				snprintf(config_new, sizeof(config_new),
-					"[MysticFight] Config Updated - Sensor: %ls | Low: %dºC (%ls) | Med: %dºC (%ls) | High: %dºC (%ls)",
-					g_cfg.sensorID,
-					g_cfg.tempLow, hL,
-					g_cfg.tempMed, hM,
-					g_cfg.tempHigh, hH
-				);
-
-				Log(config_new);
-
-				PrepareLHMSensorWMIQuery();
-
-				lastR = 999;
-			}
+			DialogBoxW(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_SETTINGS), hWnd, SettingsDlgProc);
 		}
 		break;
 	case WM_QUERYENDSESSION:
@@ -1082,31 +1074,37 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	DWORD R = 0, G = 0, B = 0;
 	lastR = 999, lastG = 999, lastB=999;
-	int wmiRetryCounter = 0;
+	
 	const int WMI_RETRY_DELAY = 10;
 	MSG msg = { 0 };
+	
 	PrepareLHMSensorWMIQuery();
 
 	while (g_Running) {
 		// 1. PROCESAR MENSAJES
 		while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
 			if (msg.message == WM_QUIT) { g_Running = false; break; }
+			
 			if (msg.message == WM_HOTKEY) {
 				g_LedsEnabled = !g_LedsEnabled;
-				lastR = 999; lastG = 999; lastB = 999;
-				if (g_LedsEnabled) MessageBeep(MB_OK);
+
+				lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+				
+				if (g_LedsEnabled) {
+					
+					MessageBeep(MB_OK);
+
+					for (int i = 0; i < g_totalLeds; i++)
+						if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
+				}
 				else {
 					MessageBeep(MB_ICONHAND);
 					
-					if (lpMLAPI_SetLedStyle && g_deviceName) {
-
-						lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
-
-						for (int i = 0; i < g_totalLeds; i++)
-							if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
-					}
+					for (int i = 0; i < g_totalLeds; i++)
+						if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
 				}
 			}
+
 			TranslateMessage(&msg);
 			DispatchMessage(&msg);
 		}
@@ -1132,7 +1130,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 					B = GetBValue(g_cfg.colorLow);
 				}
 				else if (temp <= (float)g_cfg.tempMed) {
-					// TRAMO 1: Entre Low y High
+					// TRAMO 1: Entre Low y Med
 					ratio = (temp - (float)g_cfg.tempLow) / ((float)g_cfg.tempMed - (float)g_cfg.tempLow);
 
 					R = GetRValue(g_cfg.colorLow) + (DWORD)(ratio * (int(GetRValue(g_cfg.colorMed)) - int(GetRValue(g_cfg.colorLow))));
@@ -1140,7 +1138,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 					B = GetBValue(g_cfg.colorLow) + (DWORD)(ratio * (int(GetBValue(g_cfg.colorMed)) - int(GetBValue(g_cfg.colorLow))));
 				}
 				else {
-					// TRAMO 2: Entre High y Alert
+					// TRAMO 2: Entre Med y High
 					ratio = (temp - (float)g_cfg.tempMed) / ((float)g_cfg.tempHigh - (float)g_cfg.tempMed);
 					if (ratio > 1.0f) ratio = 1.0f; // Clamping de seguridad
 
@@ -1150,17 +1148,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				}
 
 				// --- ACTUALIZACIÓN DE HARDWARE (Solo si el color cambia) ---
-
 				if (R != lastR || G != lastG || B != lastB) {
-					if (lpMLAPI_SetLedStyle && g_deviceName) {
-						// Forzamos modo estático antes de cambiar el color
-						lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
-
-						for (int i = 0; i < g_totalLeds; i++) {
-							if (lpMLAPI_SetLedColor)
-								lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
-						}
+					
+					lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+					for (int i = 0; i < g_totalLeds; i++) {
+						if (lpMLAPI_SetLedColor)
+							lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
 					}
+					
 					// Guardamos el estado actual para la siguiente comparación
 					lastR = R; lastG = G; lastB = B;
 				}
