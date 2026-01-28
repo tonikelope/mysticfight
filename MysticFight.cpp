@@ -21,7 +21,8 @@
 #define ID_TRAY_CONFIG 2001
 #define ID_TRAY_LOG 3001
 
-const wchar_t* APP_VERSION = L"v2.0";
+const wchar_t* APP_VERSION = L"v2.1";
+const wchar_t* LOG_FILENAME = L"debug.log";
 
 struct Config {
 	wchar_t sensorID[256];
@@ -124,15 +125,14 @@ static bool InitWMI() {
 
 // --- LOGGING OPTIMIZADO ---
 static void Log(const char* text) {
-	const char* filename = "debug_log.txt";
-
+	
 	time_t now = time(0);
 	char dt[26];
 	ctime_s(dt, sizeof(dt), &now);
 	dt[24] = '\0';
 
 	// Abrir en modo append (ios::app) es O(1), no depende del tamaño del archivo
-	std::ofstream out(filename, std::ios::app);
+	std::ofstream out(LOG_FILENAME, std::ios::app);
 	if (out) {
 		out << "[" << dt << "] " << text << "\n";
 	}
@@ -140,19 +140,33 @@ static void Log(const char* text) {
 
 // Llama a esto SOLO UNA VEZ en WinMain al iniciar
 static void TrimLogFile() {
-	const char* filename = "debug_log.txt";
+	
+	// 1. Verificación rápida: ¿Existe el archivo?
+	DWORD dwAttrib = GetFileAttributesW(LOG_FILENAME);
+	if (dwAttrib == INVALID_FILE_ATTRIBUTES || (dwAttrib & FILE_ATTRIBUTE_DIRECTORY)) {
+		return; // No existe o es una carpeta, salimos sin error
+	}
+
 	std::vector<std::string> lines;
 	std::string line;
 
 	{
-		std::ifstream in(filename);
-		while (std::getline(in, line)) lines.push_back(line);
+		std::ifstream in(LOG_FILENAME);
+		if (!in.is_open()) return; // Doble seguridad
+
+		while (std::getline(in, line)) {
+			lines.push_back(line);
+		}
 	}
 
+	// 2. Solo actuamos si realmente excedemos el límite
 	if (lines.size() > 500) {
-		std::ofstream out(filename, std::ios::trunc);
-		for (size_t i = lines.size() - 500; i < lines.size(); ++i) {
-			out << lines[i] << "\n";
+		std::ofstream out(LOG_FILENAME, std::ios::trunc);
+		if (out.is_open()) {
+			// Guardamos solo las últimas 500 líneas
+			for (size_t i = lines.size() - 500; i < lines.size(); ++i) {
+				out << lines[i] << "\n";
+			}
 		}
 	}
 }
@@ -519,7 +533,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 	case WM_COMMAND:
 		if (LOWORD(wParam) == ID_TRAY_EXIT) g_Running = false;
 		if (LOWORD(wParam) == ID_TRAY_LOG) { // 👈 Acción para el Log
-			ShellExecuteW(NULL, L"open", L"debug_log.txt", NULL, NULL, SW_SHOW);
+			ShellExecuteW(NULL, L"open", LOG_FILENAME, NULL, NULL, SW_SHOW);
 		}
 		// DENTRO DE WndProc -> switch (message) -> case WM_COMMAND
 		if (LOWORD(wParam) == ID_TRAY_CONFIG) {
@@ -626,48 +640,85 @@ static int GetIntFromSafeArray(void* pRawData, VARTYPE vt, int index) {
 	}
 }
 
+static bool ExtractMSIDLL() {
+	wchar_t szPath[MAX_PATH];
+	GetModuleFileNameW(NULL, szPath, MAX_PATH);
+	wchar_t* lastSlash = wcsrchr(szPath, L'\\');
+	if (lastSlash) *(lastSlash + 1) = L'\0';
+
+	std::wstring dllPath = std::wstring(szPath) + L"MysticLight_SDK.dll";
+
+	// Si ya existe, no hacemos nada para ahorrar tiempo y escrituras
+	if (GetFileAttributesW(dllPath.c_str()) != INVALID_FILE_ATTRIBUTES) return true;
+
+	HMODULE hModule = GetModuleHandle(NULL);
+	HRSRC hRes = FindResourceW(hModule, MAKEINTRESOURCE(IDR_MSI_DLL), L"BINARY");
+	if (!hRes) return false;
+
+	HGLOBAL hData = LoadResource(hModule, hRes);
+	DWORD size = SizeofResource(hModule, hRes);
+	void* pData = LockResource(hData);
+
+	HANDLE hFile = CreateFileW(dllPath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (hFile == INVALID_HANDLE_VALUE) return false;
+
+	DWORD written;
+	bool success = WriteFile(hFile, pData, size, &written, NULL);
+	CloseHandle(hFile);
+
+	return success;
+}
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+
+	// A. Prioridad del sistema
 	SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
 	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-	
+
+	// B. Inicializar COM (Escalón 1)
 	HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-
-	TrimLogFile();
-	
 	if (FAILED(hr)) {
-		// Critical error: cannot use WMI or Task Scheduler without COM
-		char errorMsg[256];
-		snprintf(errorMsg, sizeof(errorMsg), "[MysticFight] Failed to initialize COM: HRESULT 0x%08X", hr);
-		Log(errorMsg);
-
-		MessageBoxW(NULL, L"Critical Error: Could not initialize Windows COM system.", L"MysticFight - Error", MB_OK | MB_ICONERROR);
+		Log("[MysticFight] Critical: COM Initialization failed.");
 		return 1;
 	}
 
+	// C. Control de instancia única (Escalón 2)
+	g_hMutex = CreateMutex(NULL, TRUE, L"Global\\MysticFight_Unique_Mutex");
+	if (g_hMutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS) {
+		if (g_hMutex) {
+			MessageBoxW(NULL, L"MysticFight is already running.", L"Information", MB_OK | MB_ICONINFORMATION);
+			CloseHandle(g_hMutex);
+		}
+		CoUninitialize(); // Bajamos escalón 1
+		return 0;
+	}
+
+	// D. Preparar componentes (DLL) (Escalón 3)
+	if (!ExtractMSIDLL() || !(g_hLibrary = LoadLibrary(L"MysticLight_SDK.dll"))) {
+		Log("[MysticFight] FATAL: Component preparation failed.");
+		MessageBoxW(NULL, L"Critical Error: Required components (DLL) could not be prepared.", L"MysticFight - Error", MB_OK | MB_ICONERROR);
+
+		// Limpieza de emergencia antes de salir
+		ReleaseMutex(g_hMutex);
+		CloseHandle(g_hMutex);
+		CoUninitialize();
+		return 1;
+	}
+
+	// E. Inicialización de la aplicación (Ahora es seguro continuar)
+	TrimLogFile();
+	
 	char versionMsg[128];
-	snprintf(versionMsg, sizeof(versionMsg), "[MysticFight] Starting MysticFight %ls application...", APP_VERSION);
+	snprintf(versionMsg, sizeof(versionMsg), "[MysticFight] MysticFight %ls started", APP_VERSION);
 	Log(versionMsg);
 
 	LoadSettings();
 
 	char startupCfg[512];
-	snprintf(startupCfg, sizeof(startupCfg),
-		"[MysticFight] Config Loaded - Sensor: %ls | Low: %d | High: %d | Alert: %d",
-		g_cfg.sensorID, g_cfg.tempLow, g_cfg.tempHigh, g_cfg.tempAlert);
+	snprintf(startupCfg, sizeof(startupCfg),"[MysticFight] Config Loaded - Sensor: %ls | Low: %d | High: %d | Alert: %d", g_cfg.sensorID, g_cfg.tempLow, g_cfg.tempHigh, g_cfg.tempAlert);
 	Log(startupCfg);
 
 	PrepareLHMSensorWMIQuery();
-
-	g_hMutex = CreateMutex(NULL, TRUE, L"Global\\MysticFight_Unique_Mutex");
-	if (g_hMutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS) {
-		if (g_hMutex) {
-			MessageBox(NULL, L"Error: An instance of MysticFight is already running.", L"Error", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
-			CloseHandle(g_hMutex);
-		}
-		CoUninitialize();
-		return 0;
-	}
 
 	// --- 2. VERIFICACIÓN DE AUTO-INICIO (Task Scheduler) ---
 	// Comprobamos si la tarea existe y si la ruta coincide
@@ -698,16 +749,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	wc.hInstance = hInstance;
 	wc.lpszClassName = L"MysticFight_Class";
 	wc.hIcon = (HICON)LoadImage(hInstance, MAKEINTRESOURCE(101), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
+	
 	RegisterClass(&wc);
+	
 	HWND hWnd = CreateWindowEx(0, wc.lpszClassName, windowTitle, 0, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
-
-	g_hLibrary = LoadLibrary(L"MysticLight_SDK.dll");
-	if (!g_hLibrary) {
-		Log("[MysticFight] FATAL: Could not find 'MysticLight_SDK.dll'.");
-		MessageBox(NULL, L"Could not find 'MysticLight_SDK.dll'.", L"Error", MB_OK | MB_ICONERROR);
-		FinalCleanup(hWnd);
-		return 1;
-	}
 
 	auto fnMLAPI_Initialize = (LPMLAPI_Initialize)GetProcAddress(g_hLibrary, "MLAPI_Initialize");
 	auto fnMLAPI_GetDeviceInfo = (LPMLAPI_GetDeviceInfo)GetProcAddress(g_hLibrary, "MLAPI_GetDeviceInfo");
