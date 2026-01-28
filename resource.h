@@ -9,3 +9,4 @@
 #define IDC_HEX_MED                    4002
 #define IDC_HEX_HIGH                   4003
 #define IDC_BTN_RESET                   4004
+#define IDC_CHK_STARTUP                 4005

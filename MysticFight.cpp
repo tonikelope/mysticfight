@@ -21,7 +21,7 @@
 #define ID_TRAY_CONFIG 2001
 #define ID_TRAY_LOG 3001
 
-const wchar_t* APP_VERSION = L"v2.4";
+const wchar_t* APP_VERSION = L"v2.5";
 const wchar_t* LOG_FILENAME = L"debug.log";
 
 struct Config {
@@ -468,6 +468,13 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 			SendMessage(hDlg, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
 		}
 
+		if (IsTaskValid()) {
+			CheckDlgButton(hDlg, IDC_CHK_STARTUP, BST_CHECKED);
+		}
+		else {
+			CheckDlgButton(hDlg, IDC_CHK_STARTUP, BST_UNCHECKED);
+		}
+
 		hBrushLow = CreateSolidBrush(g_cfg.colorLow);
 		hBrushMed = CreateSolidBrush(g_cfg.colorMed);
 		hBrushHigh = CreateSolidBrush(g_cfg.colorHigh);
@@ -609,6 +616,12 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 			PrepareLHMSensorWMIQuery();
 
 			lastR = 999;
+
+			bool wantStartup = (IsDlgButtonChecked(hDlg, IDC_CHK_STARTUP) == BST_CHECKED);
+
+			SetRunAtStartup(wantStartup);
+
+			WritePrivateProfileStringW(L"Settings", L"TaskAsked", L"1", INI_FILE);
 
 			SaveSettings();
 
@@ -925,7 +938,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	// --- 2. VERIFICACIÓN DE AUTO-INICIO (Task Scheduler) ---
 	// Comprobamos si la tarea existe y si la ruta coincide
 	// --- STARTUP TASK CHECK ---
-	if (!IsTaskValid()) {
+	int taskAlreadyAsked = GetPrivateProfileIntW(L"Settings", L"BootTaskAsked", 0, INI_FILE);
+
+	if (taskAlreadyAsked == 0 && !IsTaskValid()) {
+		
 		int msgBoxID = MessageBoxW(NULL,
 			L"MysticFight is not configured to run at startup (or the executable path has changed).\n\n"
 			L"Would you like to create a scheduled task to start automatically?",
@@ -935,6 +951,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		if (msgBoxID == IDYES) {
 			SetRunAtStartup(true); // Your COM-based function
 		}
+
+		WritePrivateProfileStringW(L"Settings", L"BootTaskAsked", L"1", INI_FILE);
 	}
 
 	if (wcslen(g_cfg.sensorID) == 0) {
