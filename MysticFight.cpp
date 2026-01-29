@@ -24,7 +24,7 @@
 #define ID_TRAY_LOG 3001
 #define ID_TRAY_ABOUT 4001
 
-const wchar_t* APP_VERSION = L"v2.10";
+const wchar_t* APP_VERSION = L"v2.11";
 const wchar_t* LOG_FILENAME = L"debug.log";
 
 struct Config {
@@ -313,6 +313,82 @@ static void SetRunAtStartup(bool run) {
 		char buffer[256];
 		snprintf(buffer, sizeof(buffer), "[MysticFight] TaskScheduler ERROR: HRESULT 0x%08X", e.Error());
 		Log(buffer);
+	}
+}
+
+static void HardResetSDK() {
+	Log("[MysticFight] Watchdog: Initiating NUCLEAR RESET (DLL Reload)...");
+
+	// 1. INTENTAR LIBERACIÓN LIMPIA (Si el SDK no está totalmente colgado)
+	if (lpMLAPI_Release) {
+		try { lpMLAPI_Release(); }
+		catch (...) {}
+	}
+
+	// 2. DESCARGAR DLL DE LA MEMORIA
+	if (g_hLibrary) {
+		FreeLibrary(g_hLibrary);
+		g_hLibrary = NULL;
+
+		// Ponemos todos los punteros a NULL para evitar llamadas a memoria basura
+		lpMLAPI_Initialize = nullptr;
+		lpMLAPI_GetDeviceInfo = nullptr;
+		lpMLAPI_GetDeviceNameEx = nullptr;
+		lpMLAPI_GetLedInfo = nullptr;
+		lpMLAPI_SetLedColor = nullptr;
+		lpMLAPI_SetLedStyle = nullptr;
+		lpMLAPI_SetLedSpeed = nullptr;
+		lpMLAPI_Release = nullptr;
+	}
+
+	// 3. ESPERA DE SEGURIDAD (Permitir que el bus I2C/SMBus se libere)
+	Sleep(1000);
+
+	// 4. RECARGAR DLL Y RE-MAPEAR FUNCIONES
+	g_hLibrary = LoadLibrary(L"MysticLight_SDK.dll");
+	if (g_hLibrary) {
+		lpMLAPI_Initialize = (LPMLAPI_Initialize)GetProcAddress(g_hLibrary, "MLAPI_Initialize");
+		lpMLAPI_GetDeviceInfo = (LPMLAPI_GetDeviceInfo)GetProcAddress(g_hLibrary, "MLAPI_GetDeviceInfo");
+		lpMLAPI_GetDeviceNameEx = (LPMLAPI_GetDeviceNameEx)GetProcAddress(g_hLibrary, "MLAPI_GetDeviceNameEx");
+		lpMLAPI_GetLedInfo = (LPMLAPI_GetLedInfo)GetProcAddress(g_hLibrary, "MLAPI_GetLedInfo");
+		lpMLAPI_SetLedColor = (LPMLAPI_SetLedColor)GetProcAddress(g_hLibrary, "MLAPI_SetLedColor");
+		lpMLAPI_SetLedStyle = (LPMLAPI_SetLedStyle)GetProcAddress(g_hLibrary, "MLAPI_SetLedStyle");
+		lpMLAPI_SetLedSpeed = (LPMLAPI_SetLedSpeed)GetProcAddress(g_hLibrary, "MLAPI_SetLedSpeed");
+		lpMLAPI_Release = (LPMLAPI_Release)GetProcAddress(g_hLibrary, "MLAPI_Release");
+
+		// 5. INICIALIZACIÓN FRESCA
+		if (lpMLAPI_Initialize && lpMLAPI_Initialize() == 0) {
+			Log("[MysticFight] SDK Resurrected. Restoring state...");
+
+			// 6. RESTAURAR MODO SEGÚN EL ESTADO DE LA APP
+			if (g_LedsEnabled) {
+				_bstr_t bstrSteady(L"Steady");
+				lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+
+				// Restauramos el último color conocido o el por defecto
+				DWORD r = (lastR == 999) ? GetRValue(g_cfg.colorLow) : lastR;
+				DWORD g = (lastG == 999) ? GetGValue(g_cfg.colorLow) : lastG;
+				DWORD b = (lastB == 999) ? GetBValue(g_cfg.colorLow) : lastB;
+
+				for (int i = 0; i < g_totalLeds; i++) {
+					lpMLAPI_SetLedColor(g_deviceName, i, r, g, b);
+				}
+				Log("[MysticFight] Hardware Restored: ON (Steady)");
+			}
+			else {
+				_bstr_t bstrOff(L"Off");
+				lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
+				Log("[MysticFight] Hardware Restored: OFF");
+			}
+
+			lastR = 999; // Forzamos que el loop principal detecte un "cambio" y actualice
+		}
+		else {
+			Log("[MysticFight] FATAL: SDK Initialize failed after reload.");
+		}
+	}
+	else {
+		Log("[MysticFight] ERROR: Could not LoadLibrary MysticLight_SDK.dll");
 	}
 }
 
@@ -764,7 +840,7 @@ static void FinalCleanup(HWND hWnd) {
 			Log("[MysticFight] LEDs power off");
 		}
 
-		// --- NOVEDAD: Liberar el SDK antes de cerrar la DLL ---
+		
 		if (lpMLAPI_Release) {
 			lpMLAPI_Release();
 			Log("[MysticFight] MSI SDK Released");
@@ -1245,6 +1321,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	
 	PrepareLHMSensorWMIQuery();
 
+	_bstr_t bstrBreath(L"Breath");
+
 	_bstr_t bstrSteady(L"Steady");
 
 	lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
@@ -1252,8 +1330,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	bool lhmAlive = true;
 	DWORD lastRetry = 0;
 
+	const DWORD REFRESH_INTERVAL = 60000;
+	static DWORD lastForceRefresh = 0;
 
 	while (g_Running) {
+		DWORD currentTime = GetTickCount64();
+
 		// 1. PROCESAR MENSAJES
 		while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
 			if (msg.message == WM_QUIT) { g_Running = false; break; }
@@ -1263,13 +1345,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 				if (g_LedsEnabled) {
 					MessageBeep(MB_OK);
-					_bstr_t bstrSteady(L"Steady");
 					lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
 					lastR = 999;
 				}
 				else {
 					MessageBeep(MB_ICONHAND);
-					_bstr_t bstrOff(L"Off");
 					lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
 				}
 			}
@@ -1292,8 +1372,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 					ShowNotification(hWnd, hInstance, L"MysticFight - Connection Lost", L"LibreHardwareMonitor is not responding.");
 
-					_bstr_t bstrBreath(L"Breath");
-
 					lpMLAPI_SetLedStyle(g_deviceName, 0, bstrBreath);
 
 					for (int i = 0; i < g_totalLeds; i++)
@@ -1302,8 +1380,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 					lhmAlive = false;
 				}
 			
-				if (GetTickCount() - lastRetry > 3000) {
-					lastRetry = GetTickCount();
+				if (GetTickCount64() - lastRetry > 3000) {
+					lastRetry = GetTickCount64();
 					InitWMI();
 				}
 
@@ -1315,9 +1393,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 					lhmAlive = true;
 					PrepareLHMSensorWMIQuery();
 
-					_bstr_t bstrSteady(L"Steady");
 					lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
-
+					lastForceRefresh = currentTime;
 					lastR = 999; // Forzar actualización de color
 				}
 
@@ -1353,16 +1430,41 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				}
 
 				// --- ACTUALIZACIÓN DE HARDWARE (Solo si el color cambia) ---
-				if (R != lastR || G != lastG || B != lastB) {
+				if (R != lastR || G != lastG || B != lastB || (currentTime - lastForceRefresh > REFRESH_INTERVAL)) {
 					
-					for (int i = 0; i < g_totalLeds; i++) {
-						lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
+					int status = 0;
+
+					// Si toca refresco de estilo
+					if (currentTime - lastForceRefresh > REFRESH_INTERVAL) {
+						_bstr_t bstrSteady(L"Steady");
+						status = lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
 					}
 
-					// Guardamos el estado actual para la siguiente comparación
-					lastR = R; lastG = G; lastB = B;
+					// Actualizar colores
+					if (status == 0) {
+						for (int i = 0; i < g_totalLeds; i++) {
+							status = lpMLAPI_SetLedColor(g_deviceName, i, R, G, B);
+							if (status != 0) break; // Error detectado
+						}
+					}
+
+					if (status != 0) {
+						HardResetSDK(); // ¡ALERTA! El hardware no responde, reseteamos.
+						lastForceRefresh = currentTime;
+					}
+					else {
+						lastR = R; lastG = G; lastB = B;
+						lastForceRefresh = currentTime;
+					}
 				}
 			}
+		}
+		else if (currentTime - lastForceRefresh > REFRESH_INTERVAL)
+		{
+			if (lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff) != 0) {
+				HardResetSDK();
+			}
+			lastForceRefresh = currentTime;
 		}
 
 		MsgWaitForMultipleObjects(0, NULL, FALSE, 500, QS_ALLINPUT);
