@@ -24,7 +24,7 @@
 #define ID_TRAY_LOG 3001
 #define ID_TRAY_ABOUT 4001
 
-const wchar_t* APP_VERSION = L"v2.11";
+const wchar_t* APP_VERSION = L"v2.12";
 const wchar_t* LOG_FILENAME = L"debug.log";
 
 struct Config {
@@ -945,8 +945,7 @@ static float GetCPUTempFast() {
 		IWbemClassObjectPtr pObj = nullptr;
 		ULONG uRet = 0;
 
-		// CORRECCIÓN: Timeout de 1000ms en lugar de INFINITE
-		if (pEnum->Next(1000, 1, &pObj, &uRet) == S_OK && uRet > 0) {
+		if (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uRet) == S_OK && uRet > 0) {
 			_variant_t vtVal;
 			if (SUCCEEDED(pObj->Get(L"Value", 0, &vtVal, 0, 0))) {
 				if (vtVal.vt == VT_R4) return vtVal.fltVal;
