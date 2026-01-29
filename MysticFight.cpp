@@ -20,6 +20,7 @@
 #define ID_TRAY_EXIT 1001
 #define ID_TRAY_CONFIG 2001
 #define ID_TRAY_LOG 3001
+#define ID_TRAY_ABOUT 4001
 
 const wchar_t* APP_VERSION = L"v2.8";
 const wchar_t* LOG_FILENAME = L"debug.log";
@@ -494,7 +495,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 		GetWindowRect(hDlg, &rcDlg);
 		int x = ((rcOwner.right - rcOwner.left) - (rcDlg.right - rcDlg.left)) / 2;
 		int y = ((rcOwner.bottom - rcOwner.top) - (rcDlg.bottom - rcDlg.top)) / 2;
-		SetWindowPos(hDlg, HWND_TOP, x, y, 0, 0, SWP_NOSIZE);
+		SetWindowPos(hDlg, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE);
 
 		// 2. Rellenar lista y cargar valores actuales de temperatura
 		PopulateSensorList(hDlg);
@@ -664,7 +665,72 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 	}
 	return (INT_PTR)FALSE;
 }
+INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
+	static HFONT hFontLink = NULL;
 
+	switch (message) {
+	case WM_INITDIALOG: {
+		// --- LÓGICA DE CENTRADO ---
+		RECT rcDlg;
+		GetWindowRect(hDlg, &rcDlg); // Obtenemos el tamaño del diálogo
+
+		int dwWidth = rcDlg.right - rcDlg.left;
+		int dwHeight = rcDlg.bottom - rcDlg.top;
+
+		// Centrar respecto a la pantalla completa
+		int x = (GetSystemMetrics(SM_CXSCREEN) - dwWidth) / 2;
+		int y = (GetSystemMetrics(SM_CYSCREEN) - dwHeight) / 2;
+
+		SetWindowPos(hDlg, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE);
+		// Cargar icono estándar de 48x48
+		HICON hIcon = (HICON)LoadImage(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_ICON1), IMAGE_ICON, 48, 48, LR_SHARED);
+		SendMessage(GetDlgItem(hDlg, IDC_ABOUT_ICON), STM_SETIMAGE, IMAGE_ICON, (LPARAM)hIcon);
+
+		std::wstring versionStr = L"MysticFight " + std::wstring(APP_VERSION);
+		SetDlgItemTextW(hDlg, IDC_ABOUT_VERSION, versionStr.c_str());
+
+		// Crear fuente subrayada para el link
+		HFONT hFont = (HFONT)SendMessage(GetDlgItem(hDlg, IDC_GITHUB_LINK), WM_GETFONT, 0, 0);
+		LOGFONT lf;
+		GetObject(hFont, sizeof(LOGFONT), &lf);
+		lf.lfUnderline = TRUE;
+		hFontLink = CreateFontIndirect(&lf);
+		SendMessage(GetDlgItem(hDlg, IDC_GITHUB_LINK), WM_SETFONT, (WPARAM)hFontLink, TRUE);
+		return (INT_PTR)TRUE;
+	}
+
+	case WM_CTLCOLORSTATIC: {
+		// Pintar el link de azul
+		if ((HWND)lParam == GetDlgItem(hDlg, IDC_GITHUB_LINK)) {
+			SetTextColor((HDC)wParam, RGB(0, 102, 204));
+			SetBkMode((HDC)wParam, TRANSPARENT);
+			return (INT_PTR)GetStockObject(NULL_BRUSH);
+		}
+		break;
+	}
+
+	case WM_SETCURSOR: {
+		// Cambiar cursor a mano en el link
+		if ((HWND)wParam == GetDlgItem(hDlg, IDC_GITHUB_LINK)) {
+			SetCursor(LoadCursor(NULL, IDC_HAND));
+			return TRUE;
+		}
+		break;
+	}
+
+	case WM_COMMAND:
+		if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
+			if (hFontLink) DeleteObject(hFontLink);
+			EndDialog(hDlg, LOWORD(wParam));
+			return (INT_PTR)TRUE;
+		}
+		if (LOWORD(wParam) == IDC_GITHUB_LINK) {
+			ShellExecuteW(NULL, L"open", L"https://github.com/tonikelope/MysticFight", NULL, NULL, SW_SHOWNORMAL);
+		}
+		break;
+	}
+	return (INT_PTR)FALSE;
+}
 
 static void FinalCleanup(HWND hWnd) {
 	static bool cleaned = false;
@@ -732,6 +798,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 			HMENU hMenu = CreatePopupMenu();
 			if (hMenu) {
 				InsertMenu(hMenu, -1, MF_BYPOSITION | MF_STRING, ID_TRAY_CONFIG, L"Settings");
+				InsertMenu(hMenu, -1, MF_BYPOSITION | MF_STRING, ID_TRAY_ABOUT, L"About MysticFight");
 				InsertMenu(hMenu, -1, MF_BYPOSITION | MF_STRING, ID_TRAY_LOG, L"View Debug Log");
 				InsertMenu(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
 				InsertMenu(hMenu, -1, MF_BYPOSITION | MF_STRING, ID_TRAY_EXIT, L"Exit MysticFight");
@@ -743,13 +810,18 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 		break;
 	case WM_COMMAND:
 		if (LOWORD(wParam) == ID_TRAY_EXIT) g_Running = false;
-		if (LOWORD(wParam) == ID_TRAY_LOG) { // 👈 Acción para el Log
+		
+		if (LOWORD(wParam) == ID_TRAY_LOG) {
 			ShellExecuteW(NULL, L"open", LOG_FILENAME, NULL, NULL, SW_SHOW);
 		}
 		
-		// DENTRO DE WndProc -> switch (message) -> case WM_COMMAND
+		
 		if (LOWORD(wParam) == ID_TRAY_CONFIG) {
 			DialogBoxW(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_SETTINGS), hWnd, SettingsDlgProc);
+		}
+
+		if (LOWORD(wParam) == ID_TRAY_ABOUT) { 
+			DialogBoxW(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_ABOUT), hWnd, AboutDlgProc);
 		}
 		break;
 	case WM_QUERYENDSESSION:
@@ -881,6 +953,8 @@ static bool ExtractMSIDLL() {
 
 	return success;
 }
+
+
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
 
