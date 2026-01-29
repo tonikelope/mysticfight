@@ -10,6 +10,8 @@
 #include <math.h>
 #include <comip.h>
 #include <taskschd.h>
+#include <shlobj.h>
+#include <exdisp.h>
 #include "resource.h"
 
 #pragma comment(lib, "wbemuuid.lib")
@@ -22,7 +24,7 @@
 #define ID_TRAY_LOG 3001
 #define ID_TRAY_ABOUT 4001
 
-const wchar_t* APP_VERSION = L"v2.9";
+const wchar_t* APP_VERSION = L"v2.10";
 const wchar_t* LOG_FILENAME = L"debug.log";
 
 struct Config {
@@ -84,6 +86,14 @@ LPMLAPI_Release lpMLAPI_Release = nullptr;
 LPMLAPI_GetDeviceNameEx lpMLAPI_GetDeviceNameEx = nullptr;
 LPMLAPI_GetLedInfo lpMLAPI_GetLedInfo = nullptr;
 HANDLE g_hMutex = NULL;
+
+
+static void RunShellNonAdmin(const wchar_t* path) {
+	// Usamos explorer.exe como "escudo". 
+	// Al ser un proceso que ya corre como usuario estándar, 
+	// cualquier cosa que abra perderá nuestros privilegios de Admin.
+	ShellExecuteW(NULL, L"open", L"explorer.exe", path, NULL, SW_SHOWNORMAL);
+}
 
 static bool IsValidHex(const wchar_t* hex) {
 	if (!hex || wcslen(hex) != 7 || hex[0] != L'#') return false;
@@ -724,7 +734,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
 			return (INT_PTR)TRUE;
 		}
 		if (LOWORD(wParam) == IDC_GITHUB_LINK) {
-			ShellExecuteW(NULL, L"open", L"https://github.com/tonikelope/MysticFight", NULL, NULL, SW_SHOWNORMAL);
+			RunShellNonAdmin(L"https://github.com/tonikelope/MysticFight");
 		}
 		break;
 	case WM_DESTROY: // CORRECCIÓN: Borrado garantizado al destruir la ventana
@@ -817,7 +827,9 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 		if (LOWORD(wParam) == ID_TRAY_EXIT) g_Running = false;
 		
 		if (LOWORD(wParam) == ID_TRAY_LOG) {
-			ShellExecuteW(NULL, L"open", LOG_FILENAME, NULL, NULL, SW_SHOW);
+			wchar_t fullLogPath[MAX_PATH];
+			GetFullPathNameW(LOG_FILENAME, MAX_PATH, fullLogPath, NULL);
+			RunShellNonAdmin(fullLogPath);
 		}
 		
 		
