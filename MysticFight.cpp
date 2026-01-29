@@ -22,7 +22,7 @@
 #define ID_TRAY_LOG 3001
 #define ID_TRAY_ABOUT 4001
 
-const wchar_t* APP_VERSION = L"v2.8";
+const wchar_t* APP_VERSION = L"v2.9";
 const wchar_t* LOG_FILENAME = L"debug.log";
 
 struct Config {
@@ -178,26 +178,25 @@ static void Log(const char* text) {
 
 // Llama a esto SOLO UNA VEZ en WinMain al iniciar
 static void TrimLogFile() {
-	
-	// 1. Verificación rápida: ¿Existe el archivo?
-	DWORD dwAttrib = GetFileAttributesW(LOG_FILENAME);
-	if (dwAttrib == INVALID_FILE_ATTRIBUTES || (dwAttrib & FILE_ATTRIBUTE_DIRECTORY)) {
-		return; // No existe o es una carpeta, salimos sin error
-	}
+	WIN32_FILE_ATTRIBUTE_DATA fad;
+	if (!GetFileAttributesExW(LOG_FILENAME, GetFileExInfoStandard, &fad)) return;
+
+	// Si el log pesa menos de 1MB, no nos molestamos en recortar
+	LARGE_INTEGER size;
+	size.LowPart = fad.nFileSizeLow;
+	size.HighPart = fad.nFileSizeHigh;
+	if (size.QuadPart < 1024 * 1024) return;
 
 	std::vector<std::string> lines;
 	std::string line;
-
 	{
 		std::ifstream in(LOG_FILENAME);
-		if (!in.is_open()) return; // Doble seguridad
-
+		if (!in.is_open()) return;
 		while (std::getline(in, line)) {
 			lines.push_back(line);
 		}
 	}
 
-	// 2. Solo actuamos si realmente excedemos el límite
 	if (lines.size() > 500) {
 		std::ofstream out(LOG_FILENAME, std::ios::trunc);
 		if (out.is_open()) {
@@ -728,6 +727,12 @@ INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
 			ShellExecuteW(NULL, L"open", L"https://github.com/tonikelope/MysticFight", NULL, NULL, SW_SHOWNORMAL);
 		}
 		break;
+	case WM_DESTROY: // CORRECCIÓN: Borrado garantizado al destruir la ventana
+		if (hFontLink) {
+			DeleteObject(hFontLink);
+			hFontLink = NULL;
+		}
+		break;
 	}
 	return (INT_PTR)FALSE;
 }
@@ -742,7 +747,7 @@ static void FinalCleanup(HWND hWnd) {
 	// 1. APAGADO DE HARDWARE
 	if (g_hLibrary) {
 		// Apagar LEDs si el dispositivo es válido
-		if (g_deviceName && lpMLAPI_SetLedColor) {
+		if (g_deviceName && lpMLAPI_SetLedStyle) {
 			_bstr_t bstrOff(L"Off");
 			lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
 
@@ -842,7 +847,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 }
 
 static float GetCPUTempFast() {
-	if (!g_pSvc || g_bstrQuery.length() == 0) return -1.0f; // Error: No inicializado
+	if (!g_pSvc || g_bstrQuery.length() == 0) return -1.0f;
 
 	IEnumWbemClassObjectPtr pEnum = nullptr;
 	HRESULT hr = g_pSvc->ExecQuery(_bstr_t(L"WQL"), g_bstrQuery,
@@ -851,8 +856,9 @@ static float GetCPUTempFast() {
 	if (SUCCEEDED(hr) && pEnum) {
 		IWbemClassObjectPtr pObj = nullptr;
 		ULONG uRet = 0;
-		// Si Next no devuelve nada (uRet == 0), LHM probablemente se cerró
-		if (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uRet) == S_OK && uRet > 0) {
+
+		// CORRECCIÓN: Timeout de 1000ms en lugar de INFINITE
+		if (pEnum->Next(1000, 1, &pObj, &uRet) == S_OK && uRet > 0) {
 			_variant_t vtVal;
 			if (SUCCEEDED(pObj->Get(L"Value", 0, &vtVal, 0, 0))) {
 				if (vtVal.vt == VT_R4) return vtVal.fltVal;
@@ -860,7 +866,7 @@ static float GetCPUTempFast() {
 			}
 		}
 	}
-	return -1.0f; // Error: LHM no responde o sensor desaparecido
+	return -1.0f;
 }
 
 static void DebugListAllSensors() {
@@ -1113,7 +1119,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			SafeArrayGetUBound(pDevType, 1, &uBound);
 			long count = uBound - lBound + 1;
 
-			if (count > 0) {
+			if (count > 0 && pTypes != nullptr && pTypes[0] != nullptr) {
 				// 1. Store technical type (e.g., MSI_MB)
 				if (g_deviceName) SysFreeString(g_deviceName);
 				g_deviceName = SysAllocString(pTypes[0]);
@@ -1151,7 +1157,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 						if (pStyles) {
 							long sLB, sUB;
 							SafeArrayGetLBound(pStyles, 1, &sLB);
-							SafeArrayGetUBound(pStyles, 1, &uBound); // Correcting to sUB for consistency
 							SafeArrayGetUBound(pStyles, 1, &sUB);
 
 							for (long k = sLB; k <= sUB; k++) {
