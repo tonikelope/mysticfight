@@ -21,7 +21,7 @@
 #define ID_TRAY_CONFIG 2001
 #define ID_TRAY_LOG 3001
 
-const wchar_t* APP_VERSION = L"v2.7";
+const wchar_t* APP_VERSION = L"v2.8";
 const wchar_t* LOG_FILENAME = L"debug.log";
 
 struct Config {
@@ -37,6 +37,7 @@ const wchar_t* INI_FILE = L".\\config.ini";
 typedef int (*LPMLAPI_Initialize)();
 typedef int (*LPMLAPI_GetDeviceInfo)(SAFEARRAY** pDevType, SAFEARRAY** pLedCount);
 typedef int (*LPMLAPI_GetDeviceNameEx)(BSTR type, DWORD index, BSTR* pDevName);
+typedef int (*LPMLAPI_GetLedInfo)(BSTR, DWORD, BSTR*, SAFEARRAY**);
 typedef int (*LPMLAPI_SetLedColor)(BSTR type, DWORD index, DWORD R, DWORD G, DWORD B);
 typedef int (*LPMLAPI_SetLedStyle)(BSTR type, DWORD index, BSTR style);
 typedef int (*LPMLAPI_SetLedSpeed)(BSTR type, DWORD index, DWORD level);
@@ -80,6 +81,7 @@ LPMLAPI_SetLedStyle lpMLAPI_SetLedStyle = nullptr;
 LPMLAPI_SetLedSpeed lpMLAPI_SetLedSpeed = nullptr;
 LPMLAPI_Release lpMLAPI_Release = nullptr;
 LPMLAPI_GetDeviceNameEx lpMLAPI_GetDeviceNameEx = nullptr;
+LPMLAPI_GetLedInfo lpMLAPI_GetLedInfo = nullptr;
 HANDLE g_hMutex = NULL;
 
 static bool IsValidHex(const wchar_t* hex) {
@@ -675,9 +677,9 @@ static void FinalCleanup(HWND hWnd) {
 	if (g_hLibrary) {
 		// Apagar LEDs si el dispositivo es válido
 		if (g_deviceName && lpMLAPI_SetLedColor) {
-			for (int i = 0; i < g_totalLeds; i++) {
-				lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
-			}
+			_bstr_t bstrOff(L"Off");
+			lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
+
 			Log("[MysticFight] LEDs power off");
 		}
 
@@ -768,18 +770,16 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 }
 
 static float GetCPUTempFast() {
-	// Si no hay query preparada o no hay WMI, no hacemos nada
-	if (!g_pSvc || g_bstrQuery.length() == 0) return 0.0f;
+	if (!g_pSvc || g_bstrQuery.length() == 0) return -1.0f; // Error: No inicializado
 
 	IEnumWbemClassObjectPtr pEnum = nullptr;
-
-	// USAMOS g_bstrQuery (YA CACHEADA)
 	HRESULT hr = g_pSvc->ExecQuery(_bstr_t(L"WQL"), g_bstrQuery,
 		WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnum);
 
 	if (SUCCEEDED(hr) && pEnum) {
 		IWbemClassObjectPtr pObj = nullptr;
 		ULONG uRet = 0;
+		// Si Next no devuelve nada (uRet == 0), LHM probablemente se cerró
 		if (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uRet) == S_OK && uRet > 0) {
 			_variant_t vtVal;
 			if (SUCCEEDED(pObj->Get(L"Value", 0, &vtVal, 0, 0))) {
@@ -788,27 +788,33 @@ static float GetCPUTempFast() {
 			}
 		}
 	}
-	return 0.0f;
+	return -1.0f; // Error: LHM no responde o sensor desaparecido
 }
 
-void DebugListAllSensors() {
+static void DebugListAllSensors() {
 	if (!g_pSvc) return;
 	IEnumWbemClassObjectPtr pEnum = nullptr;
-	HRESULT hr = g_pSvc->ExecQuery(_bstr_t(L"WQL"), _bstr_t(L"SELECT Identifier, Name FROM Sensor WHERE SensorType='Temperature'"),
+
+	// Quitamos el WHERE para ver TODO lo que LHM está publicando
+	HRESULT hr = g_pSvc->ExecQuery(_bstr_t(L"WQL"), _bstr_t(L"SELECT * FROM Sensor"),
 		WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnum);
 
 	if (SUCCEEDED(hr)) {
 		IWbemClassObjectPtr pObj = nullptr;
 		ULONG uRet = 0;
-		Log("AVAILABLE SENSORS FROM LHM:");
+		Log("--- DUMPING ALL LHM SENSORS ---");
 		while (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uRet) == S_OK) {
-			_variant_t vtID, vtName;
+			_variant_t vtID, vtName, vtType;
 			pObj->Get(L"Identifier", 0, &vtID, 0, 0);
 			pObj->Get(L"Name", 0, &vtName, 0, 0);
+			pObj->Get(L"SensorType", 0, &vtType, 0, 0); // Queremos ver qué tipo dice ser
+
 			char buf[512];
-			snprintf(buf, sizeof(buf), "ID: %ls | Nombre: %ls", vtID.bstrVal, vtName.bstrVal);
+			snprintf(buf, sizeof(buf), "ID: %ls | Name: %ls | Type: %ls",
+				vtID.bstrVal, vtName.bstrVal, vtType.bstrVal);
 			Log(buf);
 		}
+		Log("--- END OF DUMP ---");
 	}
 }
 
@@ -986,6 +992,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	lpMLAPI_SetLedSpeed = (LPMLAPI_SetLedSpeed)GetProcAddress(g_hLibrary, "MLAPI_SetLedSpeed");
 	lpMLAPI_Release = (LPMLAPI_Release)GetProcAddress(g_hLibrary, "MLAPI_Release");
 	lpMLAPI_GetDeviceNameEx = (LPMLAPI_GetDeviceNameEx)GetProcAddress(g_hLibrary, "MLAPI_GetDeviceNameEx");
+	LPMLAPI_GetLedInfo lpMLAPI_GetLedInfo = (LPMLAPI_GetLedInfo)GetProcAddress(g_hLibrary, "MLAPI_GetLedInfo");
 
 	Log("[MysticFight] Attempting to initialize SDK...");
 	if (!lpMLAPI_Initialize || lpMLAPI_Initialize() != 0) {
@@ -1014,7 +1021,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		Log("[MysticFight] SDK Initialized successfully at first attempt.");
 	}
 
-	// --- BLOQUE DE DETECCIÓN CON NOMBRE FRIENDLY ---
+	// --- DETECTION BLOCK WITH FRIENDLY NAME AND STYLES ---
 	SAFEARRAY* pDevType = nullptr;
 	SAFEARRAY* pLedCount = nullptr;
 
@@ -1033,29 +1040,66 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			long count = uBound - lBound + 1;
 
 			if (count > 0) {
-				// 1. Guardamos el tipo técnico (MSI_MB)
+				// 1. Store technical type (e.g., MSI_MB)
 				if (g_deviceName) SysFreeString(g_deviceName);
 				g_deviceName = SysAllocString(pTypes[0]);
 				g_totalLeds = GetIntFromSafeArray(pCountsRaw, vtCount, 0);
 
-				// 2. OBTENEMOS EL NOMBRE FRIENDLY
+				// 2. OBTAIN FRIENDLY NAME
 				BSTR friendlyName = NULL;
 				if (lpMLAPI_GetDeviceNameEx) {
-					// Pedimos el nombre extendido del dispositivo 0 de este tipo
+					// Requesting the friendly name for device 0 of this type
 					lpMLAPI_GetDeviceNameEx(g_deviceName, 0, &friendlyName);
 				}
 
-				// 3. LOG FORMATEADO
+				// 3. FORMATTED LOG
 				char devInfo[512];
-				snprintf(devInfo, sizeof(devInfo), "[MysticFight] %ls (Type: %ls) | Total LEDs: %d",
+				snprintf(devInfo, sizeof(devInfo), "[MysticFight] %ls (Type: %ls) | Logical Areas: %d",
 					(friendlyName ? friendlyName : L"Unknown Device"),
-					g_deviceName,
-					g_totalLeds);
-
+					g_deviceName, g_totalLeds);
 				Log(devInfo);
-
-				// Limpieza del nombre temporal
 				if (friendlyName) SysFreeString(friendlyName);
+
+				// --- LIST LEDS AND STYLES FOR THIS DEVICE --- (SDK SEEMS LIMITED OR OUTDATED AND ONLY RETURNS "SELECT ALL" AREA
+				Log("[MysticFight] Listing styles per area...");
+				for (DWORD i = 0; i < (DWORD)g_totalLeds; i++) {
+					BSTR ledName = nullptr;
+					SAFEARRAY* pStyles = nullptr;
+
+					// Call to GetLedInfo (Page 4 of the PDF) 
+					int resInfo = lpMLAPI_GetLedInfo(g_deviceName, i, &ledName, &pStyles);
+
+					if (resInfo == 0) {
+						char ledLine[512];
+						snprintf(ledLine, sizeof(ledLine), "   [INDEX %lu] LED: %ls", i, (ledName ? ledName : L"Unknown"));
+						Log(ledLine);
+
+						if (pStyles) {
+							long sLB, sUB;
+							SafeArrayGetLBound(pStyles, 1, &sLB);
+							SafeArrayGetUBound(pStyles, 1, &uBound); // Correcting to sUB for consistency
+							SafeArrayGetUBound(pStyles, 1, &sUB);
+
+							for (long k = sLB; k <= sUB; k++) {
+								BSTR sName = nullptr;
+								SafeArrayGetElement(pStyles, &k, &sName);
+								if (sName) {
+									char styleLine[256];
+									snprintf(styleLine, sizeof(styleLine), "      |-- Style %ld: %ls", k, sName);
+									Log(styleLine);
+									SysFreeString(sName);
+								}
+							}
+							SafeArrayDestroy(pStyles);
+						}
+						if (ledName) SysFreeString(ledName);
+					}
+					else {
+						char errLine[128];
+						snprintf(errLine, sizeof(errLine), "   [INDEX %lu] Error retrieving info (res: %d)", i, resInfo);
+						Log(errLine);
+					}
+				}
 			}
 
 			SafeArrayUnaccessData(pDevType);
@@ -1064,14 +1108,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		SafeArrayDestroy(pDevType);
 		SafeArrayDestroy(pLedCount);
 	}
-	
-	_bstr_t bstrSteady(L"Steady");
 
-	lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+	_bstr_t bstrOff(L"Off");
 
-	for (int i = 0; i < g_totalLeds; i++) {
-		lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
-	}
+	lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
 
 	Log("[MysticFight] Connecting to LibreHardwareMonitor...");
 
@@ -1114,6 +1154,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	
 	PrepareLHMSensorWMIQuery();
 
+	_bstr_t bstrSteady(L"Steady");
+
+	lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+
+	bool lhmAlive = true;
+	DWORD lastRetry = 0;
+
+
 	while (g_Running) {
 		// 1. PROCESAR MENSAJES
 		while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
@@ -1124,14 +1172,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 				if (g_LedsEnabled) {
 					MessageBeep(MB_OK);
+					_bstr_t bstrSteady(L"Steady");
+					lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
 					lastR = 999;
 				}
 				else {
 					MessageBeep(MB_ICONHAND);
-
-					for (int i = 0; i < g_totalLeds; i++) {
-						lpMLAPI_SetLedColor(g_deviceName, i, 0, 0, 0);
-					}
+					_bstr_t bstrOff(L"Off");
+					lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
 				}
 			}
 
@@ -1145,7 +1193,43 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		if (g_LedsEnabled) {
 			float rawTemp = GetCPUTempFast();
 
-			if (rawTemp > 0.0f) {
+			if (rawTemp < 0.0f) {
+				// LHM SE HA CERRADO O HA FALLADO
+
+				if (lhmAlive) {
+					Log("[MysticFight] ALERT: LibreHardwareMonitor disconnected!");
+
+					ShowNotification(hWnd, hInstance, L"MysticFight - Connection Lost", L"LibreHardwareMonitor is not responding.");
+
+					_bstr_t bstrBreath(L"Breath");
+
+					lpMLAPI_SetLedStyle(g_deviceName, 0, bstrBreath);
+
+					for (int i = 0; i < g_totalLeds; i++)
+						lpMLAPI_SetLedColor(g_deviceName, i, 255, 255, 255);
+
+					lhmAlive = false;
+				}
+			
+				if (GetTickCount() - lastRetry > 3000) {
+					lastRetry = GetTickCount();
+					InitWMI();
+				}
+
+			} else {
+				
+				if (!lhmAlive) {
+					Log("[MysticFight] LHM Connection restored.");
+					ShowNotification(hWnd, hInstance, L"MysticFight - Connected", L"LHM monitoring resumed successfully.");
+					lhmAlive = true;
+					PrepareLHMSensorWMIQuery();
+
+					_bstr_t bstrSteady(L"Steady");
+					lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+
+					lastR = 999; // Forzar actualización de color
+				}
+
 				// Redondeo para evitar parpadeos por micro-variaciones
 				float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f;
 				float ratio = 0.0f;
