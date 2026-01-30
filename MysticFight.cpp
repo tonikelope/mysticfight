@@ -24,7 +24,7 @@
 #define ID_TRAY_LOG 3001
 #define ID_TRAY_ABOUT 4001
 
-const wchar_t* APP_VERSION = L"v2.12";
+const wchar_t* APP_VERSION = L"v2.13";
 const wchar_t* LOG_FILENAME = L"debug.log";
 
 struct Config {
@@ -313,82 +313,6 @@ static void SetRunAtStartup(bool run) {
 		char buffer[256];
 		snprintf(buffer, sizeof(buffer), "[MysticFight] TaskScheduler ERROR: HRESULT 0x%08X", e.Error());
 		Log(buffer);
-	}
-}
-
-static void HardResetSDK() {
-	Log("[MysticFight] Watchdog: Initiating NUCLEAR RESET (DLL Reload)...");
-
-	// 1. INTENTAR LIBERACIÓN LIMPIA (Si el SDK no está totalmente colgado)
-	if (lpMLAPI_Release) {
-		try { lpMLAPI_Release(); }
-		catch (...) {}
-	}
-
-	// 2. DESCARGAR DLL DE LA MEMORIA
-	if (g_hLibrary) {
-		FreeLibrary(g_hLibrary);
-		g_hLibrary = NULL;
-
-		// Ponemos todos los punteros a NULL para evitar llamadas a memoria basura
-		lpMLAPI_Initialize = nullptr;
-		lpMLAPI_GetDeviceInfo = nullptr;
-		lpMLAPI_GetDeviceNameEx = nullptr;
-		lpMLAPI_GetLedInfo = nullptr;
-		lpMLAPI_SetLedColor = nullptr;
-		lpMLAPI_SetLedStyle = nullptr;
-		lpMLAPI_SetLedSpeed = nullptr;
-		lpMLAPI_Release = nullptr;
-	}
-
-	// 3. ESPERA DE SEGURIDAD (Permitir que el bus I2C/SMBus se libere)
-	Sleep(1000);
-
-	// 4. RECARGAR DLL Y RE-MAPEAR FUNCIONES
-	g_hLibrary = LoadLibrary(L"MysticLight_SDK.dll");
-	if (g_hLibrary) {
-		lpMLAPI_Initialize = (LPMLAPI_Initialize)GetProcAddress(g_hLibrary, "MLAPI_Initialize");
-		lpMLAPI_GetDeviceInfo = (LPMLAPI_GetDeviceInfo)GetProcAddress(g_hLibrary, "MLAPI_GetDeviceInfo");
-		lpMLAPI_GetDeviceNameEx = (LPMLAPI_GetDeviceNameEx)GetProcAddress(g_hLibrary, "MLAPI_GetDeviceNameEx");
-		lpMLAPI_GetLedInfo = (LPMLAPI_GetLedInfo)GetProcAddress(g_hLibrary, "MLAPI_GetLedInfo");
-		lpMLAPI_SetLedColor = (LPMLAPI_SetLedColor)GetProcAddress(g_hLibrary, "MLAPI_SetLedColor");
-		lpMLAPI_SetLedStyle = (LPMLAPI_SetLedStyle)GetProcAddress(g_hLibrary, "MLAPI_SetLedStyle");
-		lpMLAPI_SetLedSpeed = (LPMLAPI_SetLedSpeed)GetProcAddress(g_hLibrary, "MLAPI_SetLedSpeed");
-		lpMLAPI_Release = (LPMLAPI_Release)GetProcAddress(g_hLibrary, "MLAPI_Release");
-
-		// 5. INICIALIZACIÓN FRESCA
-		if (lpMLAPI_Initialize && lpMLAPI_Initialize() == 0) {
-			Log("[MysticFight] SDK Resurrected. Restoring state...");
-
-			// 6. RESTAURAR MODO SEGÚN EL ESTADO DE LA APP
-			if (g_LedsEnabled) {
-				_bstr_t bstrSteady(L"Steady");
-				lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
-
-				// Restauramos el último color conocido o el por defecto
-				DWORD r = (lastR == 999) ? GetRValue(g_cfg.colorLow) : lastR;
-				DWORD g = (lastG == 999) ? GetGValue(g_cfg.colorLow) : lastG;
-				DWORD b = (lastB == 999) ? GetBValue(g_cfg.colorLow) : lastB;
-
-				for (int i = 0; i < g_totalLeds; i++) {
-					lpMLAPI_SetLedColor(g_deviceName, i, r, g, b);
-				}
-				Log("[MysticFight] Hardware Restored: ON (Steady)");
-			}
-			else {
-				_bstr_t bstrOff(L"Off");
-				lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
-				Log("[MysticFight] Hardware Restored: OFF");
-			}
-
-			lastR = 999; // Forzamos que el loop principal detecte un "cambio" y actualice
-		}
-		else {
-			Log("[MysticFight] FATAL: SDK Initialize failed after reload.");
-		}
-	}
-	else {
-		Log("[MysticFight] ERROR: Could not LoadLibrary MysticLight_SDK.dll");
 	}
 }
 
@@ -805,7 +729,11 @@ INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
 
 	case WM_COMMAND:
 		if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
-			if (hFontLink) DeleteObject(hFontLink);
+			if (hFontLink) {
+				DeleteObject(hFontLink);
+				hFontLink = NULL;
+			}
+			
 			EndDialog(hDlg, LOWORD(wParam));
 			return (INT_PTR)TRUE;
 		}
@@ -1448,7 +1376,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 					}
 
 					if (status != 0) {
-						HardResetSDK(); // ¡ALERTA! El hardware no responde, reseteamos.
+						Log("[MysticFight] Hardware communication error (status != 0)");
 						lastForceRefresh = currentTime;
 					}
 					else {
@@ -1460,9 +1388,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		}
 		else if (currentTime - lastForceRefresh > REFRESH_INTERVAL)
 		{
-			if (lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff) != 0) {
-				HardResetSDK();
-			}
+			lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
 			lastForceRefresh = currentTime;
 		}
 
