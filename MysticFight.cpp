@@ -24,7 +24,7 @@
 #define ID_TRAY_LOG 3001
 #define ID_TRAY_ABOUT 4001
 
-const wchar_t* APP_VERSION = L"v2.15";
+const wchar_t* APP_VERSION = L"v2.16";
 const wchar_t* LOG_FILENAME = L"debug.log";
 
 struct Config {
@@ -1049,341 +1049,225 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	if (!ExtractMSIDLL() || !(g_hLibrary = LoadLibrary(L"MysticLight_SDK.dll"))) {
 		Log("[MysticFight] FATAL: Component preparation failed.");
 		MessageBoxW(NULL, L"Critical Error: Required components (DLL) could not be prepared.", L"MysticFight - Error", MB_OK | MB_ICONERROR);
-
-		if (g_hMutex) {
-			ReleaseMutex(g_hMutex);
-			CloseHandle(g_hMutex);
-		}
+		if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); }
 		CoUninitialize();
 		return 1;
 	}
 
 	// --- D. INICIALIZACIÓN DE LOGS Y CONFIGURACIÓN ---
 	TrimLogFile();
-
-	char versionMsg[128];
-	snprintf(versionMsg, sizeof(versionMsg), "[MysticFight] MysticFight %ls started", APP_VERSION);
-	Log(versionMsg);
-
+	Log("[MysticFight] Application starting...");
 	LoadSettings();
 
-	wchar_t hL[10], hH[10], hA[10];
-	ColorToHex(g_cfg.colorLow, hL, 10);
-	ColorToHex(g_cfg.colorMed, hH, 10);
-	ColorToHex(g_cfg.colorHigh, hA, 10);
-
-	char startupCfg[512];
-	snprintf(startupCfg, sizeof(startupCfg),
-		"[MysticFight] Config Loaded - Sensor: %ls | Low: %dºC (%ls) | Med: %dºC (%ls) | High: %dºC (%ls)",
-		g_cfg.sensorID,
-		g_cfg.tempLow, hL,
-		g_cfg.tempMed, hH,
-		g_cfg.tempHigh, hA
-	);
-	Log(startupCfg);
-
-	// --- E. REGISTRO DE VENTANA E ICONO (¡ESTO DEBE IR ANTES DEL SDK!) ---
+	// --- E. REGISTRO DE VENTANA E ICONO ---
 	wchar_t windowTitle[100];
-	swprintf_s(windowTitle, L"MysticFight %s (by tonikelope)", APP_VERSION);
+	swprintf_s(windowTitle, L"MysticFight %s", APP_VERSION);
 
 	WNDCLASS wc = { 0 };
 	wc.lpfnWndProc = WndProc;
 	wc.hInstance = hInstance;
 	wc.lpszClassName = L"MysticFight_Class";
 	wc.hIcon = (HICON)LoadImage(hInstance, MAKEINTRESOURCE(101), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
-
 	RegisterClass(&wc);
 
 	HWND hWnd = CreateWindowEx(0, wc.lpszClassName, windowTitle, 0, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
 
-	// Registramos el icono del tray inmediatamente para que sea visible si el SDK tarda
 	NOTIFYICONDATA nid = { sizeof(NOTIFYICONDATA), hWnd, 1, NIF_ICON | NIF_MESSAGE | NIF_TIP, WM_TRAYICON };
 	nid.hIcon = (HICON)LoadImage(hInstance, MAKEINTRESOURCE(101), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
-	swprintf_s(nid.szTip, L"MysticFight %s (by tonikelope)", APP_VERSION);
+	swprintf_s(nid.szTip, L"MysticFight %s", APP_VERSION);
 	Shell_NotifyIcon(NIM_ADD, &nid);
 
-	RegisterHotKey(hWnd, 1, MOD_CONTROL | MOD_SHIFT | MOD_ALT, 0x4C);
-	ShowNotification(hWnd, hInstance, windowTitle, L"Let's dance baby");
+	RegisterHotKey(hWnd, 1, MOD_CONTROL | MOD_SHIFT | MOD_ALT, 0x4C); // CTRL+SHIFT+ALT+L
+	ShowNotification(hWnd, hInstance, L"MysticFight", L"Let's dance baby");
 
 	// --- F. VINCULAR FUNCIONES DE LA DLL ---
 	lpMLAPI_Initialize = (LPMLAPI_Initialize)GetProcAddress(g_hLibrary, "MLAPI_Initialize");
 	lpMLAPI_GetDeviceInfo = (LPMLAPI_GetDeviceInfo)GetProcAddress(g_hLibrary, "MLAPI_GetDeviceInfo");
 	lpMLAPI_SetLedColor = (LPMLAPI_SetLedColor)GetProcAddress(g_hLibrary, "MLAPI_SetLedColor");
 	lpMLAPI_SetLedStyle = (LPMLAPI_SetLedStyle)GetProcAddress(g_hLibrary, "MLAPI_SetLedStyle");
-	lpMLAPI_SetLedSpeed = (LPMLAPI_SetLedSpeed)GetProcAddress(g_hLibrary, "MLAPI_SetLedSpeed");
 	lpMLAPI_Release = (LPMLAPI_Release)GetProcAddress(g_hLibrary, "MLAPI_Release");
 	lpMLAPI_GetDeviceNameEx = (LPMLAPI_GetDeviceNameEx)GetProcAddress(g_hLibrary, "MLAPI_GetDeviceNameEx");
 	lpMLAPI_GetLedInfo = (LPMLAPI_GetLedInfo)GetProcAddress(g_hLibrary, "MLAPI_GetLedInfo");
 
-	// --- G. INICIALIZACIÓN DEL SDK (v2.18 - SILENT STARTUP) ---
-	Log("[MysticFight] Attempting to initialize SDK...");
-	bool sdkReady = false;
-
-	// Si el SDK no arranca, no lanzamos MessageBox ni salimos. 
-	// Simplemente activamos el modo recuperación para que el bucle lo intente más tarde.
-	if (!lpMLAPI_Initialize || lpMLAPI_Initialize() != 0) {
-		Log("[MysticFight] SDK not available at startup. Entering background recovery mode...");
-		g_Resetting_sdk = true;
-		g_ResetStage = 0;
-		g_ResetTimer = 0;
+	// --- G. INICIALIZACIÓN DEL SDK (SILENT STARTUP) ---
+	bool sdkReady = (lpMLAPI_Initialize && lpMLAPI_Initialize() == 0);
+	if (!sdkReady) {
+		Log("[MysticFight] SDK not available at startup. Recovery mode active.");
+		g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0;
 		g_LastResetAttempt = GetTickCount64();
-		// Avisamos con notificación, no con ventana bloqueante
-		ShowNotification(hWnd, hInstance, L"MysticFight - Standby", L"MSI Service not found. Recovering in background...");
-	}
-	else {
-		Log("[MysticFight] SDK Initialized successfully at first attempt.");
-		sdkReady = true;
 	}
 
-	// --- H. BLOQUE DE DETECCIÓN DETALLADO DE HARDWARE (TU CÓDIGO ORIGINAL PROTEGIDO) ---
+	// --- H. DETECCIÓN INICIAL DE HARDWARE ---
 	if (sdkReady) {
-		SAFEARRAY* pDevType = nullptr;
-		SAFEARRAY* pLedCount = nullptr;
-
-		if (lpMLAPI_GetDeviceInfo && lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0 && pDevType && pLedCount) {
-			BSTR* pTypes = nullptr;
-			void* pCountsRaw = nullptr;
-			VARTYPE vtCount;
-			SafeArrayGetVartype(pLedCount, &vtCount);
-
-			if (SUCCEEDED(SafeArrayAccessData(pDevType, (void**)&pTypes)) &&
-				SUCCEEDED(SafeArrayAccessData(pLedCount, &pCountsRaw))) {
-
-				long lBound, uBound;
-				SafeArrayGetLBound(pDevType, 1, &lBound);
-				SafeArrayGetUBound(pDevType, 1, &uBound);
-				long count = uBound - lBound + 1;
-
-				if (count > 0 && pTypes != nullptr && pTypes[0] != nullptr) {
-					if (g_deviceName) SysFreeString(g_deviceName);
-					g_deviceName = SysAllocString(pTypes[0]);
-					g_totalLeds = GetIntFromSafeArray(pCountsRaw, vtCount, 0);
-
-					BSTR friendlyName = NULL;
-					if (lpMLAPI_GetDeviceNameEx) {
-						lpMLAPI_GetDeviceNameEx(g_deviceName, 0, &friendlyName);
-					}
-
-					char devInfo[512];
-					snprintf(devInfo, sizeof(devInfo), "[MysticFight] %ls (Type: %ls) | Logical Areas: %d",
-						(friendlyName ? friendlyName : L"Unknown Device"),
-						g_deviceName, g_totalLeds);
-					Log(devInfo);
-					if (friendlyName) SysFreeString(friendlyName);
-
-					Log("[MysticFight] Listing styles per area...");
-					for (DWORD i = 0; i < (DWORD)g_totalLeds; i++) {
-						BSTR ledName = nullptr;
-						SAFEARRAY* pStyles = nullptr;
-						int resInfo = lpMLAPI_GetLedInfo(g_deviceName, i, &ledName, &pStyles);
-
-						if (resInfo == 0) {
-							char ledLine[512];
-							snprintf(ledLine, sizeof(ledLine), "    [INDEX %lu] LED: %ls", i, (ledName ? ledName : L"Unknown"));
-							Log(ledLine);
-
-							if (pStyles) {
-								long sLB, sUB;
-								SafeArrayGetLBound(pStyles, 1, &sLB);
-								SafeArrayGetUBound(pStyles, 1, &sUB);
-								for (long k = sLB; k <= sUB; k++) {
-									BSTR sName = nullptr;
-									SafeArrayGetElement(pStyles, &k, &sName);
-									if (sName) {
-										char styleLine[256];
-										snprintf(styleLine, sizeof(styleLine), "      |-- Style %ld: %ls", k, sName);
-										Log(styleLine);
-										SysFreeString(sName);
-									}
-								}
-								SafeArrayDestroy(pStyles);
-							}
-							if (ledName) SysFreeString(ledName);
-						}
-					}
-				}
-				SafeArrayUnaccessData(pDevType);
-				SafeArrayUnaccessData(pLedCount);
+		SAFEARRAY* pD = nullptr, * pL = nullptr;
+		if (lpMLAPI_GetDeviceInfo && lpMLAPI_GetDeviceInfo(&pD, &pL) == 0 && pD && pL) {
+			BSTR* pT = nullptr; void* pC = nullptr; VARTYPE vt;
+			SafeArrayGetVartype(pL, &vt);
+			if (SUCCEEDED(SafeArrayAccessData(pD, (void**)&pT)) && SUCCEEDED(SafeArrayAccessData(pL, &pC)) && pT[0]) {
+				g_deviceName = SysAllocString(pT[0]);
+				g_totalLeds = GetIntFromSafeArray(pC, vt, 0);
+				Log("[MysticFight] Hardware linked successfully at startup.");
+				SafeArrayUnaccessData(pD); SafeArrayUnaccessData(pL);
 			}
-			SafeArrayDestroy(pDevType);
-			SafeArrayDestroy(pLedCount);
+			SafeArrayDestroy(pD); SafeArrayDestroy(pL);
 		}
 	}
 
-	// --- I. CONEXIÓN A LIBREHARDWAREMONITOR (v2.19 NO BLOQUEANTE) ---
-	Log("[MysticFight] Initial WMI Connection attempt...");
+	// --- I. CONEXIÓN A LIBREHARDWAREMONITOR ---
 	bool lhmAlive = InitWMI();
-
 	if (lhmAlive) {
-		Log("[MysticFight] Connected to WMI successfully.");
-		DebugListAllSensors();
-		PrepareLHMSensorWMIQuery(); // <--- Se queda aquí, donde sabemos que hay conexión
+		PrepareLHMSensorWMIQuery();
 	}
 	else {
-		Log("[MysticFight] WMI not found at startup. LHM is probably closed. Will retry in background...");
+		Log("[MysticFight] LHM not found. Will retry in background...");
 	}
 
 	// --- J. PREPARAR VARIABLES DEL BUCLE ---
-	_bstr_t bstrOff(L"Off");
-	_bstr_t bstrBreath(L"Breath");
-	_bstr_t bstrSteady(L"Steady");
-
-	// Eliminada la repetición de PrepareLHMSensorWMIQuery() que estaba aquí
-
-	// BLINDAJE: Solo aplicamos el estilo inicial si hay hardware detectado
-	if (g_deviceName != NULL && lpMLAPI_SetLedStyle) {
-		lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
-	}
+	_bstr_t bstrOff(L"Off"), bstrBreath(L"Breath"), bstrSteady(L"Steady");
+	if (g_deviceName && lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
 
 	DWORD nR = 0, nG = 0, nB = 0;
 	lastR = 999; lastG = 999; lastB = 999;
 	MSG msg = { 0 };
 
-	// --- BUCLE PRINCIPAL (v2.17 - BLINDADO) ---
+	// --- BUCLE PRINCIPAL ---
 	while (g_Running) {
 		ULONGLONG currentTime = GetTickCount64();
 
-		// 1. PROCESAR MENSAJES
 		while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
 			if (msg.message == WM_QUIT) { g_Running = false; break; }
-			TranslateMessage(&msg);
-			DispatchMessage(&msg);
+			TranslateMessage(&msg); DispatchMessage(&msg);
 		}
-
 		if (!g_Running) break;
 
-		// 2. MÁQUINA DE ESTADOS DEL RESET (WATCHDOG)
+		// 1. WATCHDOG (RECUPERACIÓN DE HARDWARE)
 		if (g_Resetting_sdk) {
 			if (currentTime >= g_ResetTimer) {
 				switch (g_ResetStage) {
 				case 0:
-					Log("[MysticFight] Reset Stage 0: Cleaning MSI...");
+					Log("[MysticFight] Watchdog: Killing MSI tasks...");
 					ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", false);
 					system("taskkill /F /IM LEDKeeper2.exe /T > nul 2>&1");
-					g_ResetTimer = currentTime + 1000; g_ResetStage = 1;
+					g_ResetTimer = currentTime + 1200; g_ResetStage = 1;
 					break;
 				case 1:
-					Log("[MysticFight] Reset Stage 1: Restarting MSI...");
+					Log("[MysticFight] Watchdog: Restarting MSI service...");
 					ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", true);
-					g_ResetTimer = currentTime + 4500; g_ResetStage = 2;
+					g_ResetTimer = currentTime + 5000; g_ResetStage = 2;
 					break;
 				case 2:
-					Log("[MysticFight] Reset Stage 2: Re-initializing SDK...");
+					Log("[MysticFight] Watchdog: Attempting SDK Re-Init...");
 					if (lpMLAPI_Initialize && lpMLAPI_Initialize() == 0) {
-						Log("[MysticFight] SDK RE-INITIALIZED. Mapping hardware...");
-
 						SAFEARRAY* pD = nullptr, * pL = nullptr;
 						if (lpMLAPI_GetDeviceInfo && lpMLAPI_GetDeviceInfo(&pD, &pL) == 0 && pD && pL) {
-							BSTR* pT = nullptr;
-							void* pC = nullptr;
-							VARTYPE vt;
+							BSTR* pT = nullptr; void* pC = nullptr; VARTYPE vt;
 							SafeArrayGetVartype(pL, &vt);
-
-							if (SUCCEEDED(SafeArrayAccessData(pD, (void**)&pT)) &&
-								SUCCEEDED(SafeArrayAccessData(pL, &pC)) && pT[0]) {
-
+							if (SUCCEEDED(SafeArrayAccessData(pD, (void**)&pT)) && pT && pT[0]) {
 								if (g_deviceName) SysFreeString(g_deviceName);
 								g_deviceName = SysAllocString(pT[0]);
 								g_totalLeds = GetIntFromSafeArray(pC, vt, 0);
-
-								Log("[MysticFight] Hardware found and linked after recovery.");
-								if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+								g_Resetting_sdk = false; // ¡SALIMOS DEL RESET!
 								lastR = 999;
-								SafeArrayUnaccessData(pD); SafeArrayUnaccessData(pL);
+								Log("[MysticFight] Watchdog: Hardware linked and recovered!");
+								SafeArrayUnaccessData(pD);
+								ShowNotification(hWnd, hInstance, L"MysticFight", L"MSI Hardware Recovered.");
 							}
 							SafeArrayDestroy(pD); SafeArrayDestroy(pL);
 						}
-						ShowNotification(hWnd, hInstance, L"MysticFight - Recovered", L"Hardware communication restored.");
 					}
-					g_Resetting_sdk = false;
+					if (g_Resetting_sdk) { // Si falló la placa, volvemos a Stage 0 en 10 seg
+						Log("[MysticFight] Watchdog: Device not found yet. Retrying cycle...");
+						g_ResetStage = 0; g_ResetTimer = currentTime + 10000;
+					}
 					break;
 				}
 			}
 		}
-		// 3. LÓGICA DE SENSORES Y HARDWARE
-		else if (g_LedsEnabled && g_deviceName != NULL) {
-			float rawTemp = GetCPUTempFast();
 
-			if (rawTemp < 0.0f) {
-				if (lhmAlive) {
-					Log("[MysticFight] LHM disconnected!");
-					ShowNotification(hWnd, hInstance, L"MysticFight - Connection Lost", L"LHM monitoring is not responding.");
-					if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, bstrBreath);
-					lhmAlive = false;
+		// 2. LÓGICA DE SENSORES Y COLOR
+		else if (g_LedsEnabled) {
+			if (g_deviceName == NULL) {
+				if (currentTime - g_LastResetAttempt > 20000) {
+					Log("[MysticFight] No hardware handle. Forcing recovery...");
+					g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0;
+					g_LastResetAttempt = currentTime;
 				}
-				if (currentTime - lastRetry > 3000) { lastRetry = currentTime; InitWMI(); }
 			}
 			else {
-				if (!lhmAlive) {
-					lhmAlive = true; PrepareLHMSensorWMIQuery();
-					if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
-					lastR = 999;
-				}
-
-				// CÁLCULO DE MEZCLA DE COLORES
-				float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f;
-				float ratio = 0.0f;
-				if (temp <= (float)g_cfg.tempLow) {
-					nR = GetRValue(g_cfg.colorLow); nG = GetGValue(g_cfg.colorLow); nB = GetBValue(g_cfg.colorLow);
-				}
-				else if (temp <= (float)g_cfg.tempMed) {
-					ratio = (temp - (float)g_cfg.tempLow) / ((float)g_cfg.tempMed - (float)g_cfg.tempLow);
-					nR = GetRValue(g_cfg.colorLow) + (DWORD)(ratio * (int(GetRValue(g_cfg.colorMed)) - int(GetRValue(g_cfg.colorLow))));
-					nG = GetGValue(g_cfg.colorLow) + (DWORD)(ratio * (int(GetGValue(g_cfg.colorMed)) - int(GetGValue(g_cfg.colorLow))));
-					nB = GetBValue(g_cfg.colorLow) + (DWORD)(ratio * (int(GetBValue(g_cfg.colorMed)) - int(GetBValue(g_cfg.colorLow))));
+				float rawTemp = GetCPUTempFast();
+				if (rawTemp < 0.0f) {
+					if (lhmAlive) { Log("[MysticFight] LHM Connection lost."); lhmAlive = false; }
+					if (currentTime - lastRetry > 5000) { lastRetry = currentTime; InitWMI(); }
 				}
 				else {
-					ratio = (temp - (float)g_cfg.tempMed) / ((float)g_cfg.tempHigh - (float)g_cfg.tempMed);
-					if (ratio > 1.0f) ratio = 1.0f;
-					nR = GetRValue(g_cfg.colorMed) + (DWORD)(ratio * (int(GetRValue(g_cfg.colorHigh)) - int(GetRValue(g_cfg.colorMed))));
-					nG = GetGValue(g_cfg.colorMed) + (DWORD)(ratio * (int(GetGValue(g_cfg.colorHigh)) - int(GetGValue(g_cfg.colorMed))));
-					nB = GetBValue(g_cfg.colorMed) + (DWORD)(ratio * (int(GetBValue(g_cfg.colorHigh)) - int(GetBValue(g_cfg.colorMed))));
-				}
-
-				// --- ENVÍO AL HARDWARE (CRÍTICO) ---
-				if (nR != lastR || nG != lastG || nB != lastB || (currentTime - lastForceRefresh > REFRESH_INTERVAL)) {
-					int status = 0;
-
-					// Si venimos de estar apagados (lastR == 1000) o forzados (999), ponemos STEADY primero
-					if (lastR >= 999 || (currentTime - lastForceRefresh > REFRESH_INTERVAL)) {
-						if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+					if (!lhmAlive) {
+						lhmAlive = true; PrepareLHMSensorWMIQuery();
+						if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+						lastR = 999;
 					}
 
-					if (status == 0 && lpMLAPI_SetLedColor) {
-						for (int i = 0; i < g_totalLeds; i++) {
-							status = lpMLAPI_SetLedColor(g_deviceName, i, nR, nG, nB);
-							if (status != 0) break;
-						}
+					// Interpolación de colores
+					float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f;
+					if (temp <= (float)g_cfg.tempLow) {
+						nR = GetRValue(g_cfg.colorLow); nG = GetGValue(g_cfg.colorLow); nB = GetBValue(g_cfg.colorLow);
 					}
-
-					if (status != 0) {
-						if (currentTime - g_LastResetAttempt > 15000) {
-							Log("[MysticFight] SDK Call failed. Triggering Reset...");
-							g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0;
-							g_LastResetAttempt = currentTime;
-						}
+					else if (temp <= (float)g_cfg.tempMed) {
+						float ratio = (temp - g_cfg.tempLow) / (float)(g_cfg.tempMed - g_cfg.tempLow);
+						nR = GetRValue(g_cfg.colorLow) + (DWORD)(ratio * (int(GetRValue(g_cfg.colorMed)) - int(GetRValue(g_cfg.colorLow))));
+						nG = GetGValue(g_cfg.colorLow) + (DWORD)(ratio * (int(GetGValue(g_cfg.colorMed)) - int(GetGValue(g_cfg.colorLow))));
+						nB = GetBValue(g_cfg.colorLow) + (DWORD)(ratio * (int(GetBValue(g_cfg.colorMed)) - int(GetBValue(g_cfg.colorLow))));
 					}
 					else {
-						lastR = nR; lastG = nG; lastB = nB; lastForceRefresh = currentTime;
+						float ratio = (temp - g_cfg.tempMed) / (float)(g_cfg.tempHigh - g_cfg.tempMed);
+						if (ratio > 1.0f) ratio = 1.0f;
+						nR = GetRValue(g_cfg.colorMed) + (DWORD)(ratio * (int(GetRValue(g_cfg.colorHigh)) - int(GetRValue(g_cfg.colorMed))));
+						nG = GetGValue(g_cfg.colorMed) + (DWORD)(ratio * (int(GetGValue(g_cfg.colorHigh)) - int(GetGValue(g_cfg.colorMed))));
+						nB = GetBValue(g_cfg.colorMed) + (DWORD)(ratio * (int(GetBValue(g_cfg.colorHigh)) - int(GetBValue(g_cfg.colorMed))));
+					}
+
+					// Actualizar Hardware
+					if (nR != lastR || nG != lastG || nB != lastB || (currentTime - lastForceRefresh > REFRESH_INTERVAL)) {
+						int status = 0;
+						if (lastR >= 999) status = lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+
+						if (status == 0) {
+							for (int i = 0; i < g_totalLeds; i++) {
+								status = lpMLAPI_SetLedColor(g_deviceName, i, nR, nG, nB);
+								if (status != 0) break;
+							}
+						}
+
+						if (status != 0) {
+							Log("[MysticFight] SDK Call failed. Triggering recovery...");
+							g_Resetting_sdk = true; g_ResetStage = 0; g_LastResetAttempt = currentTime;
+						}
+						else {
+							lastR = nR; lastG = nG; lastB = nB; lastForceRefresh = currentTime;
+						}
 					}
 				}
 			}
 		}
 		else {
-			// MODO APAGADO: Solo entramos si no estábamos ya en modo "1000" (Apagado)
-			if (lastR != 1000 || (currentTime - lastForceRefresh > REFRESH_INTERVAL)) {
-				if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
-				lastR = 1000; // Centinela: Indica que el hardware está en modo OFF
-				lastForceRefresh = currentTime;
+			// MODO APAGADO (HOTKEY)
+			if (g_deviceName != NULL) {
+				if (lastR != 1000 || (currentTime - lastForceRefresh > REFRESH_INTERVAL)) {
+					lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
+					lastR = 1000; lastForceRefresh = currentTime;
+				}
+			}
+			else {
+				// Si estamos en OFF pero no hay placa, seguimos buscando en segundo plano
+				if (!g_Resetting_sdk && (currentTime - g_LastResetAttempt > 30000)) {
+					g_Resetting_sdk = true; g_ResetStage = 0; g_LastResetAttempt = currentTime;
+				}
 			}
 		}
 
 		MsgWaitForMultipleObjects(0, NULL, FALSE, 500, QS_ALLINPUT);
 	}
 
-	// --- 4. LIMPIEZA FINAL ---
 	FinalCleanup(hWnd);
-	Log("[MysticFight] BYE BYE");
-
+	Log("[MysticFight] Application terminated cleanly.");
 	return 0;
 }
