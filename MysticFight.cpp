@@ -1115,138 +1115,125 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	lpMLAPI_GetDeviceNameEx = (LPMLAPI_GetDeviceNameEx)GetProcAddress(g_hLibrary, "MLAPI_GetDeviceNameEx");
 	lpMLAPI_GetLedInfo = (LPMLAPI_GetLedInfo)GetProcAddress(g_hLibrary, "MLAPI_GetLedInfo");
 
-	// --- G. INICIALIZACIÓN DEL SDK (Con tus reintentos originales) ---
+	// --- G. INICIALIZACIÓN DEL SDK (v2.18 - SILENT STARTUP) ---
 	Log("[MysticFight] Attempting to initialize SDK...");
+	bool sdkReady = false;
+
+	// Si el SDK no arranca, no lanzamos MessageBox ni salimos. 
+	// Simplemente activamos el modo recuperación para que el bucle lo intente más tarde.
 	if (!lpMLAPI_Initialize || lpMLAPI_Initialize() != 0) {
-		bool initialized = false;
-		for (int i = 1; i <= 10; i++) {
-			char retryMsg[100];
-			snprintf(retryMsg, sizeof(retryMsg), "[MysticFight] Attempt %d/10 failed. Retrying in 5s...", i);
-			Log(retryMsg);
-
-			if (lpMLAPI_Initialize && lpMLAPI_Initialize() == 0) {
-				Log("[MysticFight] SDK Initialized successfully on retry.");
-				initialized = true;
-				break;
-			}
-
-			if (i == 10) {
-				Log("[MysticFight] FATAL: SDK could not be initialized after 10 attempts.");
-				MessageBox(NULL, L"MSI SDK Initialization failed. Ensure MSI Center/Dragon Center is installed.", L"Critical Error", MB_OK | MB_ICONERROR);
-				FinalCleanup(hWnd);
-				return 1;
-			}
-			Sleep(5000);
-		}
+		Log("[MysticFight] SDK not available at startup. Entering background recovery mode...");
+		g_Resetting_sdk = true;
+		g_ResetStage = 0;
+		g_ResetTimer = 0;
+		g_LastResetAttempt = GetTickCount64();
+		// Avisamos con notificación, no con ventana bloqueante
+		ShowNotification(hWnd, hInstance, L"MysticFight - Standby", L"MSI Service not found. Recovering in background...");
 	}
 	else {
 		Log("[MysticFight] SDK Initialized successfully at first attempt.");
+		sdkReady = true;
 	}
 
-	// --- H. BLOQUE DE DETECCIÓN DETALLADO DE HARDWARE ---
-	SAFEARRAY* pDevType = nullptr;
-	SAFEARRAY* pLedCount = nullptr;
+	// --- H. BLOQUE DE DETECCIÓN DETALLADO DE HARDWARE (TU CÓDIGO ORIGINAL PROTEGIDO) ---
+	if (sdkReady) {
+		SAFEARRAY* pDevType = nullptr;
+		SAFEARRAY* pLedCount = nullptr;
 
-	if (lpMLAPI_GetDeviceInfo && lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0 && pDevType && pLedCount) {
-		BSTR* pTypes = nullptr;
-		void* pCountsRaw = nullptr;
-		VARTYPE vtCount;
-		SafeArrayGetVartype(pLedCount, &vtCount);
+		if (lpMLAPI_GetDeviceInfo && lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0 && pDevType && pLedCount) {
+			BSTR* pTypes = nullptr;
+			void* pCountsRaw = nullptr;
+			VARTYPE vtCount;
+			SafeArrayGetVartype(pLedCount, &vtCount);
 
-		if (SUCCEEDED(SafeArrayAccessData(pDevType, (void**)&pTypes)) &&
-			SUCCEEDED(SafeArrayAccessData(pLedCount, &pCountsRaw))) {
+			if (SUCCEEDED(SafeArrayAccessData(pDevType, (void**)&pTypes)) &&
+				SUCCEEDED(SafeArrayAccessData(pLedCount, &pCountsRaw))) {
 
-			long lBound, uBound;
-			SafeArrayGetLBound(pDevType, 1, &lBound);
-			SafeArrayGetUBound(pDevType, 1, &uBound);
-			long count = uBound - lBound + 1;
+				long lBound, uBound;
+				SafeArrayGetLBound(pDevType, 1, &lBound);
+				SafeArrayGetUBound(pDevType, 1, &uBound);
+				long count = uBound - lBound + 1;
 
-			if (count > 0 && pTypes != nullptr && pTypes[0] != nullptr) {
-				if (g_deviceName) SysFreeString(g_deviceName);
-				g_deviceName = SysAllocString(pTypes[0]);
-				g_totalLeds = GetIntFromSafeArray(pCountsRaw, vtCount, 0);
+				if (count > 0 && pTypes != nullptr && pTypes[0] != nullptr) {
+					if (g_deviceName) SysFreeString(g_deviceName);
+					g_deviceName = SysAllocString(pTypes[0]);
+					g_totalLeds = GetIntFromSafeArray(pCountsRaw, vtCount, 0);
 
-				BSTR friendlyName = NULL;
-				if (lpMLAPI_GetDeviceNameEx) {
-					lpMLAPI_GetDeviceNameEx(g_deviceName, 0, &friendlyName);
-				}
+					BSTR friendlyName = NULL;
+					if (lpMLAPI_GetDeviceNameEx) {
+						lpMLAPI_GetDeviceNameEx(g_deviceName, 0, &friendlyName);
+					}
 
-				char devInfo[512];
-				snprintf(devInfo, sizeof(devInfo), "[MysticFight] %ls (Type: %ls) | Logical Areas: %d",
-					(friendlyName ? friendlyName : L"Unknown Device"),
-					g_deviceName, g_totalLeds);
-				Log(devInfo);
-				if (friendlyName) SysFreeString(friendlyName);
+					char devInfo[512];
+					snprintf(devInfo, sizeof(devInfo), "[MysticFight] %ls (Type: %ls) | Logical Areas: %d",
+						(friendlyName ? friendlyName : L"Unknown Device"),
+						g_deviceName, g_totalLeds);
+					Log(devInfo);
+					if (friendlyName) SysFreeString(friendlyName);
 
-				Log("[MysticFight] Listing styles per area...");
-				for (DWORD i = 0; i < (DWORD)g_totalLeds; i++) {
-					BSTR ledName = nullptr;
-					SAFEARRAY* pStyles = nullptr;
-					int resInfo = lpMLAPI_GetLedInfo(g_deviceName, i, &ledName, &pStyles);
+					Log("[MysticFight] Listing styles per area...");
+					for (DWORD i = 0; i < (DWORD)g_totalLeds; i++) {
+						BSTR ledName = nullptr;
+						SAFEARRAY* pStyles = nullptr;
+						int resInfo = lpMLAPI_GetLedInfo(g_deviceName, i, &ledName, &pStyles);
 
-					if (resInfo == 0) {
-						char ledLine[512];
-						snprintf(ledLine, sizeof(ledLine), "    [INDEX %lu] LED: %ls", i, (ledName ? ledName : L"Unknown"));
-						Log(ledLine);
+						if (resInfo == 0) {
+							char ledLine[512];
+							snprintf(ledLine, sizeof(ledLine), "    [INDEX %lu] LED: %ls", i, (ledName ? ledName : L"Unknown"));
+							Log(ledLine);
 
-						if (pStyles) {
-							long sLB, sUB;
-							SafeArrayGetLBound(pStyles, 1, &sLB);
-							SafeArrayGetUBound(pStyles, 1, &sUB);
-							for (long k = sLB; k <= sUB; k++) {
-								BSTR sName = nullptr;
-								SafeArrayGetElement(pStyles, &k, &sName);
-								if (sName) {
-									char styleLine[256];
-									snprintf(styleLine, sizeof(styleLine), "      |-- Style %ld: %ls", k, sName);
-									Log(styleLine);
-									SysFreeString(sName);
+							if (pStyles) {
+								long sLB, sUB;
+								SafeArrayGetLBound(pStyles, 1, &sLB);
+								SafeArrayGetUBound(pStyles, 1, &sUB);
+								for (long k = sLB; k <= sUB; k++) {
+									BSTR sName = nullptr;
+									SafeArrayGetElement(pStyles, &k, &sName);
+									if (sName) {
+										char styleLine[256];
+										snprintf(styleLine, sizeof(styleLine), "      |-- Style %ld: %ls", k, sName);
+										Log(styleLine);
+										SysFreeString(sName);
+									}
 								}
+								SafeArrayDestroy(pStyles);
 							}
-							SafeArrayDestroy(pStyles);
+							if (ledName) SysFreeString(ledName);
 						}
-						if (ledName) SysFreeString(ledName);
 					}
 				}
+				SafeArrayUnaccessData(pDevType);
+				SafeArrayUnaccessData(pLedCount);
 			}
-			SafeArrayUnaccessData(pDevType);
-			SafeArrayUnaccessData(pLedCount);
+			SafeArrayDestroy(pDevType);
+			SafeArrayDestroy(pLedCount);
 		}
-		SafeArrayDestroy(pDevType);
-		SafeArrayDestroy(pLedCount);
 	}
 
-	// --- I. CONEXIÓN A LIBREHARDWAREMONITOR ---
-	Log("[MysticFight] Connecting to LibreHardwareMonitor...");
-	bool lhmAlive = false;
-	for (int j = 1; j <= 10; j++) {
-		if (InitWMI()) {
-			Log("[MysticFight] Connected to WMI namespace successfully.");
-			lhmAlive = true;
-			break;
-		}
-		char wmiRetry[100];
-		snprintf(wmiRetry, sizeof(wmiRetry), "[MysticFight] WMI Connection attempt %d/10 failed.", j);
-		Log(wmiRetry);
+	// --- I. CONEXIÓN A LIBREHARDWAREMONITOR (v2.19 NO BLOQUEANTE) ---
+	Log("[MysticFight] Initial WMI Connection attempt...");
+	bool lhmAlive = InitWMI();
 
-		if (j == 10) {
-			Log("[MysticFight] FATAL: Could not connect to WMI.");
-			MessageBox(NULL, L"Could not connect to LibreHardwareMonitor.\nPlease ensure it is open and 'WMI Server' is enabled.", L"WMI Error", MB_OK | MB_ICONWARNING);
-			FinalCleanup(hWnd);
-			return 1;
-		}
-		Sleep(5000);
+	if (lhmAlive) {
+		Log("[MysticFight] Connected to WMI successfully.");
+		DebugListAllSensors();
+		PrepareLHMSensorWMIQuery(); // <--- Se queda aquí, donde sabemos que hay conexión
 	}
-
-	DebugListAllSensors();
+	else {
+		Log("[MysticFight] WMI not found at startup. LHM is probably closed. Will retry in background...");
+	}
 
 	// --- J. PREPARAR VARIABLES DEL BUCLE ---
 	_bstr_t bstrOff(L"Off");
 	_bstr_t bstrBreath(L"Breath");
 	_bstr_t bstrSteady(L"Steady");
 
-	PrepareLHMSensorWMIQuery();
-	if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+	// Eliminada la repetición de PrepareLHMSensorWMIQuery() que estaba aquí
+
+	// BLINDAJE: Solo aplicamos el estilo inicial si hay hardware detectado
+	if (g_deviceName != NULL && lpMLAPI_SetLedStyle) {
+		lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+	}
 
 	DWORD nR = 0, nG = 0, nB = 0;
 	lastR = 999; lastG = 999; lastB = 999;
@@ -1283,11 +1270,30 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				case 2:
 					Log("[MysticFight] Reset Stage 2: Re-initializing SDK...");
 					if (lpMLAPI_Initialize && lpMLAPI_Initialize() == 0) {
-						Log("[MysticFight] SDK RE-INITIALIZED.");
+						Log("[MysticFight] SDK RE-INITIALIZED. Mapping hardware...");
+
+						SAFEARRAY* pD = nullptr, * pL = nullptr;
+						if (lpMLAPI_GetDeviceInfo && lpMLAPI_GetDeviceInfo(&pD, &pL) == 0 && pD && pL) {
+							BSTR* pT = nullptr;
+							void* pC = nullptr;
+							VARTYPE vt;
+							SafeArrayGetVartype(pL, &vt);
+
+							if (SUCCEEDED(SafeArrayAccessData(pD, (void**)&pT)) &&
+								SUCCEEDED(SafeArrayAccessData(pL, &pC)) && pT[0]) {
+
+								if (g_deviceName) SysFreeString(g_deviceName);
+								g_deviceName = SysAllocString(pT[0]);
+								g_totalLeds = GetIntFromSafeArray(pC, vt, 0);
+
+								Log("[MysticFight] Hardware found and linked after recovery.");
+								if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+								lastR = 999;
+								SafeArrayUnaccessData(pD); SafeArrayUnaccessData(pL);
+							}
+							SafeArrayDestroy(pD); SafeArrayDestroy(pL);
+						}
 						ShowNotification(hWnd, hInstance, L"MysticFight - Recovered", L"Hardware communication restored.");
-						RegisterHotKey(hWnd, 1, MOD_CONTROL | MOD_SHIFT | MOD_ALT, 0x4C);
-						if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
-						lastR = 999;
 					}
 					g_Resetting_sdk = false;
 					break;
@@ -1295,7 +1301,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			}
 		}
 		// 3. LÓGICA DE SENSORES Y HARDWARE
-		else if (g_LedsEnabled) {
+		else if (g_LedsEnabled && g_deviceName != NULL) {
 			float rawTemp = GetCPUTempFast();
 
 			if (rawTemp < 0.0f) {
