@@ -33,10 +33,30 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.23";
+const wchar_t* APP_VERSION = L"v2.24";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
+
+// Gamma LED correction table
+const uint8_t gamma8[256] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2,
+    2, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 5, 5, 5,
+    5, 6, 6, 6, 6, 7, 7, 7, 7, 8, 8, 8, 9, 9, 9, 10,
+    10, 10, 11, 11, 11, 12, 12, 13, 13, 13, 14, 14, 15, 15, 16, 16,
+    17, 17, 18, 18, 19, 19, 20, 20, 21, 21, 22, 22, 23, 24, 24, 25,
+    25, 26, 27, 27, 28, 29, 29, 30, 31, 32, 32, 33, 34, 35, 35, 36,
+    37, 38, 39, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 50,
+    51, 52, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 66, 67, 68,
+    69, 70, 72, 73, 74, 75, 77, 78, 79, 81, 82, 83, 85, 86, 87, 89,
+    90, 92, 93, 95, 96, 98, 99,101,102,104,105,107,109,110,112,114,
+    115,117,119,120,122,124,126,127,129,131,133,135,137,138,140,142,
+    144,146,148,150,152,154,156,158,160,162,164,167,169,171,173,175,
+    177,180,182,184,186,189,191,193,196,198,200,203,205,208,210,213,
+    215,218,220,223,225,228,231,233,236,239,241,244,247,249,252,255
+};
 
 // Sentinel Values for State Machine
 const DWORD RGB_LED_REFRESH = 999;  // Signals a mandatory style refresh (e.g., startup or reset)
@@ -1832,45 +1852,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     lastR = RGB_LED_REFRESH; // Force immediate color update
                 }
                 
-                // --- COLOR CALCULATION (Gamma Corrected / RMS + LED Boost) ---
+                // --- COLOR CALCULATION (RMS + Gamma only in intermediates, pure extremes) ---
 
-                // 1. Normalize temperature
                 float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f; // Round to 0.25 steps
-
                 float ratio = 0.0f;
                 COLORREF c1 = 0, c2 = 0;
 
-                // 2. Determine segments based on your 3 pivot points
                 if (temp <= (float)g_cfg.tempLow) {
-                    // Case: Below minimum -> Solid Low Color
+                    // Solid Low Color: pure, no gamma
                     nR = GetRValue(g_cfg.colorLow);
                     nG = GetGValue(g_cfg.colorLow);
                     nB = GetBValue(g_cfg.colorLow);
                 }
-                else {
-                    // We are in a transition. Identify which segment.
-                    if (temp < (float)g_cfg.tempMed) {
-                        // SEGMENT 1: Low -> Medium
-                        ratio = (temp - (float)g_cfg.tempLow) /
-                            ((float)g_cfg.tempMed - (float)g_cfg.tempLow);
-                        c1 = g_cfg.colorLow;
-                        c2 = g_cfg.colorMed;
-                    }
-                    else {
-                        // SEGMENT 2: Medium -> High
-                        // Note: If temp > tempHigh, ratio becomes > 1.0, clamped below.
-                        ratio = (temp - (float)g_cfg.tempMed) /
-                            ((float)g_cfg.tempHigh - (float)g_cfg.tempMed);
-                        c1 = g_cfg.colorMed;
-                        c2 = g_cfg.colorHigh;
-                    }
-
-                    // 3. Clamp ratio for safety [0.0 - 1.0]
-                    if (ratio < 0.0f) ratio = 0.0f;
-                    if (ratio > 1.0f) ratio = 1.0f;
-
-                    // 4. APPLY RMS INTERPOLATION
-                    // Formula: sqrt( c1^2 * (1-t) + c2^2 * t )
+                else if (temp < (float)g_cfg.tempMed) {
+                    // SEGMENT 1: Low -> Medium
+                    ratio = (temp - (float)g_cfg.tempLow) / ((float)g_cfg.tempMed - (float)g_cfg.tempLow);
+                    c1 = g_cfg.colorLow;
+                    c2 = g_cfg.colorMed;
 
                     double r1 = (double)GetRValue(c1);
                     double g1 = (double)GetGValue(c1);
@@ -1880,23 +1878,43 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     double g2 = (double)GetGValue(c2);
                     double b2 = (double)GetBValue(c2);
 
-                    nR = (DWORD)sqrt((r1 * r1 * (1.0 - ratio)) + (r2 * r2 * ratio));
-                    nG = (DWORD)sqrt((g1 * g1 * (1.0 - ratio)) + (g2 * g2 * ratio));
-                    nB = (DWORD)sqrt((b1 * b1 * (1.0 - ratio)) + (b2 * b2 * ratio));
+                    DWORD rawR = (DWORD)sqrt(r1 * r1 * (1.0 - ratio) + r2 * r2 * ratio);
+                    DWORD rawG = (DWORD)sqrt(g1 * g1 * (1.0 - ratio) + g2 * g2 * ratio);
+                    DWORD rawB = (DWORD)sqrt(b1 * b1 * (1.0 - ratio) + b2 * b2 * ratio);
 
-                    // 5. LED BOOST (maximize brightness without altering hue)
-                    DWORD maxC = max(nR, max(nG, nB));
-                    if (maxC > 0 && maxC < 255) {
-                        double boost = 255.0 / (double)maxC;
-                        nR = (DWORD)(nR * boost);
-                        nG = (DWORD)(nG * boost);
-                        nB = (DWORD)(nB * boost);
-                    }
+                    // Apply gamma only in intermediates
+                    nR = gamma8[rawR];
+                    nG = gamma8[rawG];
+                    nB = gamma8[rawB];
+                }
+                else if (temp < (float)g_cfg.tempHigh) {
+                    // SEGMENT 2: Medium -> High
+                    ratio = (temp - (float)g_cfg.tempMed) / ((float)g_cfg.tempHigh - (float)g_cfg.tempMed);
+                    c1 = g_cfg.colorMed;
+                    c2 = g_cfg.colorHigh;
 
-                    // 6. Final saturation guard
-                    if (nR > 255) nR = 255;
-                    if (nG > 255) nG = 255;
-                    if (nB > 255) nB = 255;
+                    double r1 = (double)GetRValue(c1);
+                    double g1 = (double)GetGValue(c1);
+                    double b1 = (double)GetBValue(c1);
+
+                    double r2 = (double)GetRValue(c2);
+                    double g2 = (double)GetGValue(c2);
+                    double b2 = (double)GetBValue(c2);
+
+                    DWORD rawR = (DWORD)sqrt(r1 * r1 * (1.0 - ratio) + r2 * r2 * ratio);
+                    DWORD rawG = (DWORD)sqrt(g1 * g1 * (1.0 - ratio) + g2 * g2 * ratio);
+                    DWORD rawB = (DWORD)sqrt(b1 * b1 * (1.0 - ratio) + b2 * b2 * ratio);
+
+                    // Apply gamma only in intermediates
+                    nR = gamma8[rawR];
+                    nG = gamma8[rawG];
+                    nB = gamma8[rawB];
+                }
+                else {
+                    // Solid High Color: pure, no gamma
+                    nR = GetRValue(g_cfg.colorHigh);
+                    nG = GetGValue(g_cfg.colorHigh);
+                    nB = GetBValue(g_cfg.colorHigh);
                 }
 
                 // --- HARDWARE UPDATE ---
