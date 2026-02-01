@@ -12,7 +12,7 @@ The main issue with Mystic Light CPU temperature profile: **it fails randomly af
 Fortunately, while Mystic Light "client" is a mess, people who programmed the **SDK** actually did a good job. **MysticFight** bypasses the buggy MysticLight interface and talks directly to the SDK.
 
 ## Features
-* **Real-time Monitoring:** Temperature tracking via WMI.
+* **Real-time Monitoring:** Temperature tracking via WMI or HTTP.
 * **VERY Lightweight:** No heavy dashboards; just a simple tray app that stays out of your way.
 * **Customizable Device and LED area:** Choose the one you prefer (WARNING: The SDK may not recognise all areas available on the device until it is updated).
 * **Customizable Temperature Sensor:** Choose the one you prefer.
@@ -26,6 +26,6 @@ For this tool to work, you MUST have the following installed/running:
 1. **MSI Center:** [Download here](https://www.msi.com/Landing/MSI-Center). (Just installed, its not required to load with Windows. But remember you must install and enable the **Mystic Light** module inside it to provide the underlying drivers for SDK).
    * Disable **both** options in Mystic Light config: overwrite third part RGB and power saving mode. (It is highly recommended to also disable automatic updates for MSI Center and Mystic Light).
 3. **Mystic Light SDK:** MysticLight_SDK.dll is included inside MysticFight.exe
-4. **LibreHardwareMonitor 0.9.4:** [Download here](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/download/v0.9.4/LibreHardwareMonitor-net472.zip). Must be running (minimized on tray) to provide temperature data via WMI or http://localhost:8085. (Yes, i know there is a LibreHardwareMonitorLib available, but I don't have the time or inclination to mess around with CLR DLL wrappers such when WMI works perfectly well for this task and LHM client is lightweight and useful for other monitoring applications such as RainMeter).
+4. **LibreHardwareMonitor 0.9.4:** [Download here](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/download/v0.9.4/LibreHardwareMonitor-net472.zip). Must be running (minimized on tray) to provide temperature data via WMI or Remote Web Server (http://localhost:8085). (Yes, i know there is a LibreHardwareMonitorLib available, but I don't have the time or inclination to mess around with CLR DLL wrappers such when WMI works perfectly well for this task and LHM client is lightweight and useful for other monitoring applications such as RainMeter).
 
 This is practically a proof of concept for everything that the Mystic Light SDK can do with a little imagination. Carpe diem!
