@@ -33,7 +33,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.21";
+const wchar_t* APP_VERSION = L"v2.22";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -1294,31 +1294,95 @@ static float GetCPUTempFast() {
     return -1.0f;
 }
 
-// Helper for dumping all available sensors to log.
+// Dumps all available temperature sensors to the log file
+// Adapts automatically to the active source (WMI or HTTP)
 static void LogAllLHMTemperatureSensors() {
-    if (!g_pSvc) return;
-    IEnumWbemClassObjectPtr pEnum = nullptr;
+    Log("[MysticFight] --- DUMPING ALL LHM TEMPERATURE SENSORS ---");
 
-    HRESULT hr = g_pSvc->ExecQuery(_bstr_t(L"WQL"), 
-        _bstr_t(L"SELECT * FROM Sensor WHERE SensorType = 'Temperature'"),
-        WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnum);
+    // 1. WMI DUMP STRATEGY
+    // We try this if we are locked to WMI or if we are still searching/determining
+    if (g_activeSource == DataSource::WMI || g_activeSource == DataSource::Searching) {
+        if (g_pSvc) {
+            IEnumWbemClassObjectPtr pEnum = nullptr;
+            HRESULT hr = g_pSvc->ExecQuery(
+                bstr_t("WQL"),
+                bstr_t("SELECT Identifier, Name, Value FROM Sensor WHERE SensorType = 'Temperature'"),
+                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                NULL,
+                &pEnum
+            );
 
-    if (SUCCEEDED(hr)) {
-        IWbemClassObjectPtr pObj = nullptr;
-        ULONG uRet = 0;
-        Log("--- DUMPING ALL LHM TEMPERATURE SENSORS ---");
-        while (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uRet) == S_OK) {
-            _variant_t vtID, vtName, vtType;
-            pObj->Get(L"Identifier", 0, &vtID, 0, 0);
-            pObj->Get(L"Name", 0, &vtName, 0, 0);
-            pObj->Get(L"SensorType", 0, &vtType, 0, 0);
+            if (SUCCEEDED(hr) && pEnum) {
+                IWbemClassObjectPtr pObj = nullptr;
+                ULONG uRet = 0;
+                bool foundAny = false;
 
-            char buf[LOG_BUFFER_SIZE];
-            snprintf(buf, sizeof(buf), "ID: %ls | Name: %ls | Type: %ls",
-                vtID.bstrVal, vtName.bstrVal, vtType.bstrVal);
-            Log(buf);
+                while (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uRet) == S_OK) {
+                    _variant_t vtID, vtName, vtVal;
+                    pObj->Get(L"Identifier", 0, &vtID, 0, 0);
+                    pObj->Get(L"Name", 0, &vtName, 0, 0);
+                    pObj->Get(L"Value", 0, &vtVal, 0, 0);
+
+                    float val = 0.0f;
+                    if (vtVal.vt == VT_R4) val = vtVal.fltVal;
+                    else if (vtVal.vt == VT_R8) val = (float)vtVal.dblVal;
+
+                    char buf[LOG_BUFFER_SIZE];
+                    // Corrected format: Starts with [MysticFight]
+                    snprintf(buf, sizeof(buf), "[MysticFight] [WMI] ID: %ls | Name: %ls | Value: %.1f",
+                        (vtID.vt == VT_BSTR ? vtID.bstrVal : L"N/A"),
+                        (vtName.vt == VT_BSTR ? vtName.bstrVal : L"N/A"),
+                        val);
+                    Log(buf);
+                    foundAny = true;
+                }
+                if (foundAny) {
+                    Log("[MysticFight] --- END OF WMI DUMP ---");
+                    return; // If WMI worked, we are done
+                }
+            }
         }
-        Log("--- END OF DUMP ---");
+    }
+
+    // 2. HTTP DUMP STRATEGY
+    // We try this if WMI returned nothing OR if we are locked to HTTP
+    if (g_activeSource == DataSource::HTTP || g_activeSource == DataSource::Searching) {
+        std::string json = FetchLHMJson();
+        if (json.empty()) {
+            Log("[MysticFight] [Dump] HTTP JSON is empty or unreachable.");
+            return;
+        }
+
+        std::string typeKey = "\"Type\":\"Temperature\"";
+        size_t pos = 0;
+        bool foundAny = false;
+
+        while ((pos = json.find(typeKey, pos)) != std::string::npos) {
+            // Find object boundaries
+            size_t blockStart = json.rfind('{', pos);
+            size_t blockEnd = json.find('}', pos);
+
+            if (blockStart != std::string::npos && blockEnd != std::string::npos) {
+                std::string block = json.substr(blockStart, blockEnd - blockStart + 1);
+
+                std::wstring name = ExtractJsonString(block, "Text");
+                std::wstring id = ExtractJsonString(block, "SensorId");
+                std::wstring valStr = ExtractJsonString(block, "Value");
+
+                if (!id.empty()) {
+                    char buf[LOG_BUFFER_SIZE];
+                    // Corrected format: Starts with [MysticFight]
+                    snprintf(buf, sizeof(buf), "[MysticFight] [HTTP] ID: %ls | Name: %ls | Value: %ls",
+                        id.c_str(), name.c_str(), valStr.c_str());
+                    Log(buf);
+                    foundAny = true;
+                }
+            }
+            pos = blockEnd;
+        }
+
+        if (foundAny) Log("[MysticFight] --- END OF HTTP DUMP ---");
+        else Log("[MysticFight] [Dump] No temperature sensors found in HTTP stream.");
     }
 }
 
