@@ -30,7 +30,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.19";
+const wchar_t* APP_VERSION = L"v2.20";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -56,6 +56,8 @@ const int SENSOR_ID_LEN = 256;
 
 struct Config {
     wchar_t sensorID[SENSOR_ID_LEN];
+    wchar_t targetDevice[256];      // Internal MSI device type (e.g., L"MSI_MB")
+    int targetLedIndex;             // Selected LED area index
     int tempLow, tempMed, tempHigh;
     COLORREF colorLow, colorMed, colorHigh;
 };
@@ -99,6 +101,7 @@ _COM_SMARTPTR_TYPEDEF(ILogonTrigger, __uuidof(ILogonTrigger));
 // GLOBAL STATE VARIABLES
 // =============================================================
 _bstr_t g_cachedSensorPath = L"";
+_bstr_t g_target_device = L"";
 bool g_pathCached = false;
 bool g_Running = true;
 bool g_LedsEnabled = true;
@@ -410,6 +413,8 @@ static bool IsTaskValid() {
 // Writes configuration settings to INI file.
 void SaveSettings() {
     WritePrivateProfileStringW(L"Settings", L"SensorID", g_cfg.sensorID, INI_FILE);
+    WritePrivateProfileStringW(L"Settings", L"TargetDevice", g_cfg.targetDevice, INI_FILE);
+    WritePrivateProfileStringW(L"Settings", L"TargetLedIndex", std::to_wstring(g_cfg.targetLedIndex).c_str(), INI_FILE);
     WritePrivateProfileStringW(L"Settings", L"TempLow", std::to_wstring(g_cfg.tempLow).c_str(), INI_FILE);
     WritePrivateProfileStringW(L"Settings", L"TempMed", std::to_wstring(g_cfg.tempMed).c_str(), INI_FILE);
     WritePrivateProfileStringW(L"Settings", L"TempHigh", std::to_wstring(g_cfg.tempHigh).c_str(), INI_FILE);
@@ -424,36 +429,123 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"Settings", L"ColorHigh", hH, INI_FILE);
 }
 
-// Reads configuration from INI file.
+// Reads configuration from INI file with full validation.
 void LoadSettings() {
     bool needsReset = false;
 
+    // 1. Load temperature thresholds
     int tL = GetPrivateProfileIntW(L"Settings", L"TempLow", 50, INI_FILE);
     int tM = GetPrivateProfileIntW(L"Settings", L"TempMed", 70, INI_FILE);
     int tH = GetPrivateProfileIntW(L"Settings", L"TempHigh", 90, INI_FILE);
 
+    // 2. Load hardware target settings
+    // Default to "MSI_MB" if missing
+    GetPrivateProfileStringW(L"Settings", L"TargetDevice", L"MSI_MB", g_cfg.targetDevice, 256, INI_FILE);
+    // Default to 0 (Select All) if missing
+    g_cfg.targetLedIndex = GetPrivateProfileIntW(L"Settings", L"TargetLedIndex", 0, INI_FILE);
+
+    // 3. Load Colors
     wchar_t hL[10], hM[10], hH[10];
     GetPrivateProfileStringW(L"Settings", L"ColorLow", L"#00FF00", hL, 10, INI_FILE);
     GetPrivateProfileStringW(L"Settings", L"ColorMed", L"#FFFF00", hM, 10, INI_FILE);
     GetPrivateProfileStringW(L"Settings", L"ColorHigh", L"#FF0000", hH, 10, INI_FILE);
 
+    // 4. VALIDATION LOGIC
+    // We check for:
+    // - Invalid Temperatures (out of order or out of bounds)
+    // - Invalid Hex Colors
+    // - NEW: Invalid Device Name (Empty string)
+    // - NEW: Invalid LED Index (Negative or impossibly high)
     if (tL < 0 || tH > 110 || tL >= tM || tM >= tH ||
-        !IsValidHex(hL) || !IsValidHex(hM) || !IsValidHex(hH)) {
+        !IsValidHex(hL) || !IsValidHex(hM) || !IsValidHex(hH) ||
+        wcslen(g_cfg.targetDevice) == 0 ||  // Check if Device Name is empty
+        g_cfg.targetLedIndex < 0 ||         // Check if Index is negative
+        g_cfg.targetLedIndex > 255)         // Check if Index is too high (safety cap)
+    {
         needsReset = true;
     }
 
     if (needsReset) {
+        // 5. RESTORE DEFAULTS
         g_cfg.tempLow = 50; g_cfg.tempMed = 70; g_cfg.tempHigh = 90;
         g_cfg.colorLow = RGB(0, 255, 0); g_cfg.colorMed = RGB(255, 255, 0); g_cfg.colorHigh = RGB(255, 0, 0);
-        SaveSettings();
+
+        // Reset Hardware to safe defaults
+        wcscpy_s(g_cfg.targetDevice, L"MSI_MB");
+        g_cfg.targetLedIndex = 0;
+
+        SaveSettings(); // Overwrite the corrupted INI file
+
+        Log("[MysticFight] Config file corrupted or invalid. Factory defaults restored.");
         MessageBoxW(NULL, L"Configuration was corrupted. Factory defaults restored.", L"MysticFight", MB_OK | MB_ICONINFORMATION);
     }
     else {
+        // 6. APPLY LOADED VALUES
         g_cfg.tempLow = tL; g_cfg.tempMed = tM; g_cfg.tempHigh = tH;
         g_cfg.colorLow = HexToColor(hL); g_cfg.colorMed = HexToColor(hM); g_cfg.colorHigh = HexToColor(hH);
+        // Note: targetDevice and targetLedIndex are already in g_cfg from the read step
     }
+
+    // Always load SensorID last (it's allowed to be empty on first run)
     GetPrivateProfileStringW(L"Settings", L"SensorID", L"", g_cfg.sensorID, SENSOR_ID_LEN, INI_FILE);
 }
+
+
+// Populates the Area list based on the selected hardware device.
+void PopulateAreaList(HWND hDlg, const wchar_t* deviceType) {
+    HWND hComboArea = GetDlgItem(hDlg, IDC_COMBO_AREA);
+    SendMessage(hComboArea, CB_RESETCONTENT, 0, 0);
+
+    if (!deviceType || !lpMLAPI_GetLedInfo) return;
+
+    for (DWORD i = 0; i < 64; i++) {
+        BSTR ledName = nullptr;
+        SAFEARRAY* pStyles = nullptr;
+        if (lpMLAPI_GetLedInfo((BSTR)deviceType, i, &ledName, &pStyles) == 0) {
+            int idx = (int)SendMessageW(hComboArea, CB_ADDSTRING, 0, (LPARAM)(ledName ? ledName : L"Unknown Area"));
+            SendMessage(hComboArea, CB_SETITEMDATA, idx, (LPARAM)i);
+            if (i == (DWORD)g_cfg.targetLedIndex) SendMessage(hComboArea, CB_SETCURSEL, idx, 0);
+            if (pStyles) SafeArrayDestroy(pStyles);
+            if (ledName) SysFreeString(ledName);
+        }
+        else break;
+    }
+    if (SendMessage(hComboArea, CB_GETCURSEL, 0, 0) == CB_ERR && SendMessage(hComboArea, CB_GETCOUNT, 0, 0) > 0)
+        SendMessage(hComboArea, CB_SETCURSEL, 0, 0);
+}
+
+// Populates the list of MSI devices detected by the SDK.
+void PopulateDeviceList(HWND hDlg) {
+    HWND hComboDev = GetDlgItem(hDlg, IDC_COMBO_DEVICE);
+    ClearComboHeapData(hComboDev);
+    SAFEARRAY* pDevType = nullptr;
+    SAFEARRAY* pLedCount = nullptr;
+
+    if (lpMLAPI_GetDeviceInfo && lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0) {
+        BSTR* pTypes = nullptr;
+        SafeArrayAccessData(pDevType, (void**)&pTypes);
+        long lBound, uBound;
+        SafeArrayGetLBound(pDevType, 1, &lBound);
+        SafeArrayGetUBound(pDevType, 1, &uBound);
+        long count = uBound - lBound + 1;
+
+        for (long i = 0; i < count; i++) {
+            BSTR typeInternal = pTypes[i];
+            BSTR friendlyName = NULL;
+            if (lpMLAPI_GetDeviceNameEx) lpMLAPI_GetDeviceNameEx(typeInternal, i, &friendlyName);
+            int idx = (int)SendMessageW(hComboDev, CB_ADDSTRING, 0, (LPARAM)(friendlyName ? friendlyName : typeInternal));
+            SendMessage(hComboDev, CB_SETITEMDATA, idx, (LPARAM)HeapDupString(typeInternal));
+            if (wcscmp(typeInternal, g_cfg.targetDevice) == 0) SendMessage(hComboDev, CB_SETCURSEL, idx, 0);
+            if (friendlyName) SysFreeString(friendlyName);
+        }
+        SafeArrayUnaccessData(pDevType);
+        SafeArrayDestroy(pDevType);
+        SafeArrayDestroy(pLedCount);
+        if (SendMessage(hComboDev, CB_GETCURSEL, 0, 0) == CB_ERR && SendMessage(hComboDev, CB_GETCOUNT, 0, 0) > 0)
+            SendMessage(hComboDev, CB_SETCURSEL, 0, 0);
+    }
+}
+
 
 // Populates combo box with available temperature sensors via WMI.
 void PopulateSensorList(HWND hDlg) {
@@ -529,7 +621,7 @@ static void CacheSensorPath() {
                 g_pathCached = true;
 
                 char pathLog[512];
-                snprintf(pathLog, sizeof(pathLog), "[MysticFight] PATH CACHED: %ls", g_cachedSensorPath.GetBSTR());
+                snprintf(pathLog, sizeof(pathLog), "[MysticFight] LHM WMI PATH CACHED -> %ls", g_cachedSensorPath.GetBSTR());
                 Log(pathLog);
             }
             else {
@@ -562,9 +654,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         HDC hdc = (HDC)wParam;
         HWND hCtrl = (HWND)lParam;
         int id = GetDlgCtrlID(hCtrl);
-
         HBRUSH hSelectedBrush = NULL;
-
         if (id == IDC_HEX_LOW)  hSelectedBrush = hBrushLow;
         if (id == IDC_HEX_MED)  hSelectedBrush = hBrushMed;
         if (id == IDC_HEX_HIGH) hSelectedBrush = hBrushHigh;
@@ -575,7 +665,6 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             if (IsValidHex(buf)) {
                 COLORREF c = HexToColor(buf);
                 SetBkColor(hdc, c);
-                // Adjust text color based on background brightness
                 if (IsColorDark(c)) SetTextColor(hdc, RGB(255, 255, 255));
                 else SetTextColor(hdc, RGB(0, 0, 0));
                 return (INT_PTR)hSelectedBrush;
@@ -583,52 +672,43 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         }
         return (INT_PTR)GetStockObject(WHITE_BRUSH);
     }
+
     case WM_INITDIALOG: {
-        // UI Aesthetics
-        HICON hIcon = (HICON)LoadImage(GetModuleHandle(NULL), MAKEINTRESOURCE(101), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
-        if (hIcon) {
-            SendMessage(hDlg, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
-            SendMessage(hDlg, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
+        RECT rcDlg;
+        GetWindowRect(hDlg, &rcDlg);
+
+        int dwWidth = rcDlg.right - rcDlg.left;
+        int dwHeight = rcDlg.bottom - rcDlg.top;
+
+        int x = (GetSystemMetrics(SM_CXSCREEN) - dwWidth) / 2;
+        int y = (GetSystemMetrics(SM_CYSCREEN) - dwHeight) / 2;
+
+        SetWindowPos(hDlg, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE);
+        
+        PopulateSensorList(hDlg);
+        PopulateDeviceList(hDlg);
+
+        // Populate initial Area list based on current Device selection
+        int devIdx = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_GETCURSEL, 0, 0);
+        if (devIdx != CB_ERR) {
+            wchar_t* devType = (wchar_t*)SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_GETITEMDATA, devIdx, 0);
+            if (devType) PopulateAreaList(hDlg, devType);
         }
 
-        if (IsTaskValid()) {
-            CheckDlgButton(hDlg, IDC_CHK_STARTUP, BST_CHECKED);
-        }
-        else {
-            CheckDlgButton(hDlg, IDC_CHK_STARTUP, BST_UNCHECKED);
-        }
+        SetDlgItemInt(hDlg, IDC_TEMP_LOW, g_cfg.tempLow, TRUE);
+        SetDlgItemInt(hDlg, IDC_TEMP_MED, g_cfg.tempMed, TRUE);
+        SetDlgItemInt(hDlg, IDC_TEMP_HIGH, g_cfg.tempHigh, TRUE);
+
+        wchar_t hexBuf[10];
+        ColorToHex(g_cfg.colorLow, hexBuf, 10); SetDlgItemTextW(hDlg, IDC_HEX_LOW, hexBuf);
+        ColorToHex(g_cfg.colorMed, hexBuf, 10); SetDlgItemTextW(hDlg, IDC_HEX_MED, hexBuf);
+        ColorToHex(g_cfg.colorHigh, hexBuf, 10); SetDlgItemTextW(hDlg, IDC_HEX_HIGH, hexBuf);
 
         hBrushLow = CreateSolidBrush(g_cfg.colorLow);
         hBrushMed = CreateSolidBrush(g_cfg.colorMed);
         hBrushHigh = CreateSolidBrush(g_cfg.colorHigh);
 
-        RECT rcOwner, rcDlg;
-        GetWindowRect(GetDesktopWindow(), &rcOwner);
-        GetWindowRect(hDlg, &rcDlg);
-        int x = ((rcOwner.right - rcOwner.left) - (rcDlg.right - rcDlg.left)) / 2;
-        int y = ((rcOwner.bottom - rcOwner.top) - (rcDlg.bottom - rcDlg.top)) / 2;
-        SetWindowPos(hDlg, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE);
-
-        // Populate fields
-        PopulateSensorList(hDlg);
-        SetDlgItemInt(hDlg, IDC_TEMP_LOW, g_cfg.tempLow, TRUE);
-        SetDlgItemInt(hDlg, IDC_TEMP_MED, g_cfg.tempMed, TRUE);
-        SetDlgItemInt(hDlg, IDC_TEMP_HIGH, g_cfg.tempHigh, TRUE);
-
-        SendMessage(GetDlgItem(hDlg, IDC_HEX_LOW), EM_SETLIMITTEXT, HEX_COLOR_LEN, 0);
-        SendMessage(GetDlgItem(hDlg, IDC_HEX_MED), EM_SETLIMITTEXT, HEX_COLOR_LEN, 0);
-        SendMessage(GetDlgItem(hDlg, IDC_HEX_HIGH), EM_SETLIMITTEXT, HEX_COLOR_LEN, 0);
-
-        wchar_t hexBuf[10];
-        ColorToHex(g_cfg.colorLow, hexBuf, 10);
-        SetDlgItemTextW(hDlg, IDC_HEX_LOW, hexBuf);
-
-        ColorToHex(g_cfg.colorMed, hexBuf, 10);
-        SetDlgItemTextW(hDlg, IDC_HEX_MED, hexBuf);
-
-        ColorToHex(g_cfg.colorHigh, hexBuf, 10);
-        SetDlgItemTextW(hDlg, IDC_HEX_HIGH, hexBuf);
-
+        if (IsTaskValid()) CheckDlgButton(hDlg, IDC_CHK_STARTUP, BST_CHECKED);
         return (INT_PTR)TRUE;
     }
 
@@ -636,130 +716,89 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         int id = LOWORD(wParam);
         int code = HIWORD(wParam);
 
-        // Real-time color preview logic
+        if (id == IDC_COMBO_DEVICE && code == CBN_SELCHANGE) {
+            int idx = (int)SendMessage((HWND)lParam, CB_GETCURSEL, 0, 0);
+            if (idx != CB_ERR) {
+                wchar_t* devType = (wchar_t*)SendMessage((HWND)lParam, CB_GETITEMDATA, idx, 0);
+                if (devType) PopulateAreaList(hDlg, devType);
+            }
+            return TRUE;
+        }
+
         if (code == EN_CHANGE) {
             wchar_t buf[10];
             GetDlgItemTextW(hDlg, id, buf, 10);
-
             if (IsValidHex(buf)) {
                 COLORREF newCol = HexToColor(buf);
                 HBRUSH newBrush = CreateSolidBrush(newCol);
-
-                if (id == IDC_HEX_LOW) {
-                    if (hBrushLow) DeleteObject(hBrushLow);
-                    hBrushLow = newBrush;
-                }
-                else if (id == IDC_HEX_MED) {
-                    if (hBrushMed) DeleteObject(hBrushMed);
-                    hBrushMed = newBrush;
-                }
-                else if (id == IDC_HEX_HIGH) {
-                    if (hBrushHigh) DeleteObject(hBrushHigh);
-                    hBrushHigh = newBrush;
-                }
-
+                if (id == IDC_HEX_LOW) { if (hBrushLow) DeleteObject(hBrushLow); hBrushLow = newBrush; }
+                else if (id == IDC_HEX_MED) { if (hBrushMed) DeleteObject(hBrushMed); hBrushMed = newBrush; }
+                else if (id == IDC_HEX_HIGH) { if (hBrushHigh) DeleteObject(hBrushHigh); hBrushHigh = newBrush; }
                 InvalidateRect(GetDlgItem(hDlg, id), NULL, TRUE);
             }
             return TRUE;
         }
 
         switch (id) {
-        case IDC_BTN_RESET: {
-            SetDlgItemInt(hDlg, IDC_TEMP_LOW, 50, TRUE);
-            SetDlgItemInt(hDlg, IDC_TEMP_MED, 70, TRUE);
-            SetDlgItemInt(hDlg, IDC_TEMP_HIGH, 90, TRUE);
-
-            SetDlgItemTextW(hDlg, IDC_HEX_LOW, L"#00FF00");
-            SetDlgItemTextW(hDlg, IDC_HEX_MED, L"#FFFF00");
-            SetDlgItemTextW(hDlg, IDC_HEX_HIGH, L"#FF0000");
-
-            Log("[MysticFight] UI restored to factory defaults.");
-            return TRUE;
-        }
-
         case IDOK: {
-            HWND hCombo = GetDlgItem(hDlg, IDC_SENSOR_ID);
-            int idx = (int)SendMessage(hCombo, CB_GETCURSEL, 0, 0);
-            if (idx == CB_ERR) {
-                MessageBoxW(hDlg, L"Please select a sensor to continue.", L"Configuration Error", MB_ICONWARNING);
-                return TRUE;
-            }
-
-            wchar_t hL[10], hM[10], hH[10];
-            GetDlgItemTextW(hDlg, IDC_HEX_LOW, hL, 10);
-            GetDlgItemTextW(hDlg, IDC_HEX_MED, hM, 10);
-            GetDlgItemTextW(hDlg, IDC_HEX_HIGH, hH, 10);
-
-            if (!IsValidHex(hL) || !IsValidHex(hM) || !IsValidHex(hH)) {
-                MessageBoxW(hDlg, L"Invalid color codes.\nFormat must be #RRGGBB (e.g., #FF0000).", L"Validation Error", MB_ICONERROR);
-                return TRUE;
-            }
-
+            // Threshold validation
             int tL = GetDlgItemInt(hDlg, IDC_TEMP_LOW, NULL, TRUE);
             int tM = GetDlgItemInt(hDlg, IDC_TEMP_MED, NULL, TRUE);
             int tH = GetDlgItemInt(hDlg, IDC_TEMP_HIGH, NULL, TRUE);
-
             if (tL < 0 || tH > 110 || tL >= tM || tM >= tH) {
-                MessageBoxW(hDlg, L"Invalid temperature range.\nOrder must be: Low < Med < High.", L"Validation Error", MB_ICONWARNING);
+                MessageBoxW(hDlg, L"Invalid temperature range.", L"Error", MB_ICONWARNING);
                 return TRUE;
             }
 
-            wchar_t* selectedID = (wchar_t*)SendMessage(hCombo, CB_GETITEMDATA, idx, 0);
-            if (selectedID && selectedID != (wchar_t*)CB_ERR) {
-                wcscpy_s(g_cfg.sensorID, selectedID);
+            // Save hardware selection
+            int idxDev = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_GETCURSEL, 0, 0);
+            if (idxDev != CB_ERR) {
+                wchar_t* devName = (wchar_t*)SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_GETITEMDATA, idxDev, 0);
+                if (devName) wcscpy_s(g_cfg.targetDevice, devName);
+            }
+            int idxArea = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_AREA), CB_GETCURSEL, 0, 0);
+            if (idxArea != CB_ERR) g_cfg.targetLedIndex = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_AREA), CB_GETITEMDATA, idxArea, 0);
+
+            // Save sensor selection
+            int idxSens = (int)SendMessage(GetDlgItem(hDlg, IDC_SENSOR_ID), CB_GETCURSEL, 0, 0);
+            if (idxSens != CB_ERR) {
+                wchar_t* sID = (wchar_t*)SendMessage(GetDlgItem(hDlg, IDC_SENSOR_ID), CB_GETITEMDATA, idxSens, 0);
+                if (sID) wcscpy_s(g_cfg.sensorID, sID);
             }
 
-            g_cfg.tempLow = tL;  g_cfg.tempMed = tM;  g_cfg.tempHigh = tH;
-            g_cfg.colorLow = HexToColor(hL);
-            g_cfg.colorMed = HexToColor(hM);
-            g_cfg.colorHigh = HexToColor(hH);
+            g_cfg.tempLow = tL; g_cfg.tempMed = tM; g_cfg.tempHigh = tH;
+            wchar_t hL[10], hM[10], hH[10];
+            GetDlgItemTextW(hDlg, IDC_HEX_LOW, hL, 10); g_cfg.colorLow = HexToColor(hL);
+            GetDlgItemTextW(hDlg, IDC_HEX_MED, hM, 10); g_cfg.colorMed = HexToColor(hM);
+            GetDlgItemTextW(hDlg, IDC_HEX_HIGH, hH, 10); g_cfg.colorHigh = HexToColor(hH);
 
-            char config_new[LOG_BUFFER_SIZE];
-            snprintf(config_new, sizeof(config_new),
-                "[MysticFight] Config Updated - Sensor: %ls | Low: %dºC (%ls) | Med: %dºC (%ls) | High: %dºC (%ls)",
-                g_cfg.sensorID,
-                g_cfg.tempLow, hL,
-                g_cfg.tempMed, hM,
-                g_cfg.tempHigh, hH
-            );
-
-            Log(config_new);
-            
-            g_pathCached = false;
-
-            lastR = RGB_LED_REFRESH;
-
-            bool wantStartup = (IsDlgButtonChecked(hDlg, IDC_CHK_STARTUP) == BST_CHECKED);
-
-            SetRunAtStartup(wantStartup);
-
-            WritePrivateProfileStringW(L"Settings", L"BootTaskAsked", L"1", INI_FILE);
-
+            SetRunAtStartup(IsDlgButtonChecked(hDlg, IDC_CHK_STARTUP) == BST_CHECKED);
             SaveSettings();
-
+            g_target_device = g_cfg.targetDevice;
+            g_pathCached = false;
+            lastR = RGB_LED_REFRESH; // Force hardware update
             EndDialog(hDlg, IDOK);
-
             return TRUE;
         }
-
-        case IDCANCEL: {
-            EndDialog(hDlg, IDCANCEL);
+        case IDCANCEL: EndDialog(hDlg, IDCANCEL); return TRUE;
+        case IDC_BTN_RESET:
+            SetDlgItemInt(hDlg, IDC_TEMP_LOW, 50, TRUE);
+            SetDlgItemInt(hDlg, IDC_TEMP_MED, 70, TRUE);
+            SetDlgItemInt(hDlg, IDC_TEMP_HIGH, 90, TRUE);
+            SetDlgItemTextW(hDlg, IDC_HEX_LOW, L"#00FF00");
+            SetDlgItemTextW(hDlg, IDC_HEX_MED, L"#FFFF00");
+            SetDlgItemTextW(hDlg, IDC_HEX_HIGH, L"#FF0000");
             return TRUE;
-        }
         }
         break;
     }
-
-    case WM_DESTROY: {
-        if (hBrushLow)  DeleteObject(hBrushLow);
-        if (hBrushMed)  DeleteObject(hBrushMed);
+    case WM_DESTROY:
+        if (hBrushLow) DeleteObject(hBrushLow);
+        if (hBrushMed) DeleteObject(hBrushMed);
         if (hBrushHigh) DeleteObject(hBrushHigh);
-
-        hBrushLow = hBrushMed = hBrushHigh = NULL;
-
         ClearComboHeapData(GetDlgItem(hDlg, IDC_SENSOR_ID));
+        ClearComboHeapData(GetDlgItem(hDlg, IDC_COMBO_DEVICE));
         break;
-    }
     }
     return (INT_PTR)FALSE;
 }
@@ -1180,6 +1219,49 @@ static void MSIHwardwareDetection() {
 }
 
 
+// Automatically selects the first available temperature sensor if none is configured.
+static bool AutoSelectFirstSensor() {
+    if (!g_pSvc) return false;
+
+    IEnumWbemClassObjectPtr pEnum = nullptr;
+    // Query for any sensor of type Temperature
+    HRESULT hr = g_pSvc->ExecQuery(
+        _bstr_t(L"WQL"),
+        _bstr_t(L"SELECT Identifier FROM Sensor WHERE SensorType = 'Temperature'"),
+        WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+        NULL,
+        &pEnum
+    );
+
+    if (SUCCEEDED(hr) && pEnum) {
+        IWbemClassObjectPtr pObj = nullptr;
+        ULONG uRet = 0;
+
+        // We only need the very first result
+        if (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uRet) == S_OK && uRet > 0) {
+            _variant_t vtID;
+            hr = pObj->Get(L"Identifier", 0, &vtID, 0, 0);
+
+            if (SUCCEEDED(hr) && vtID.vt == VT_BSTR) {
+                // 1. Update Global Config
+                wcscpy_s(g_cfg.sensorID, vtID.bstrVal);
+
+                // 2. Persist to INI immediately
+                WritePrivateProfileStringW(L"Settings", L"SensorID", g_cfg.sensorID, INI_FILE);
+
+                char logBuf[LOG_BUFFER_SIZE];
+                snprintf(logBuf, sizeof(logBuf), "[MysticFight] Auto-selected default sensor: %ls", g_cfg.sensorID);
+                Log(logBuf);
+
+                return true;
+            }
+        }
+    }
+
+    Log("[MysticFight] Auto-select failed: No temperature sensors found in LHM.");
+    return false;
+}
+
 // =============================================================
 // MAIN ENTRY POINT
 // =============================================================
@@ -1227,6 +1309,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     Log(versionMsg);
 
     LoadSettings();
+    g_target_device=g_cfg.targetDevice;
 
     wchar_t hL[10], hH[10], hA[10];
     ColorToHex(g_cfg.colorLow, hL, 10);
@@ -1235,7 +1318,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     char startupCfg[LOG_BUFFER_SIZE];
     snprintf(startupCfg, sizeof(startupCfg),
-        "[MysticFight] Config Loaded - Sensor: %ls | Low: %dºC (%ls) | Med: %dºC (%ls) | High: %dºC (%ls)",
+        "[MysticFight] Config Loaded - Device: %ls | LED Area index: %d | Sensor: %ls | Low: %dºC (%ls) | Med: %dºC (%ls) | High: %dºC (%ls)",
+        g_cfg.targetDevice,
+        g_cfg.targetLedIndex,
         g_cfg.sensorID,
         g_cfg.tempLow, hL,
         g_cfg.tempMed, hH,
@@ -1296,17 +1381,38 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         MSIHwardwareDetection();
     }
 
-    // --- I. WMI CONNECTION  ---
-    Log("[MysticFight] Initial LHM WMI Connection attempt...");
-    CacheSensorPath();
 
-    if (InitWMI() && GetCPUTempFast()>=0) {
-        Log("[MysticFight] Connected to LHM WMI successfully.");
-        LogAllLHMTemperatureSensors();
+    // --- I. WMI CONNECTION ---
+    Log("[MysticFight] Initial LHM WMI Connection attempt...");
+
+    // 1. First: Connect to the Service
+    if (InitWMI()) {
+        Log("[MysticFight] WMI Service connected.");
+
+        // 2. Auto-Selection Logic (Zero Config)
+        // If config is empty (first run), find the first available sensor immediately.
+        if (wcslen(g_cfg.sensorID) == 0) {
+            Log("[MysticFight] No sensor configured. Attempting auto-selection...");
+            AutoSelectFirstSensor();
+        }
+
+        // 3. Now that we have a connection AND a SensorID, we can cache the path.
+        // This MUST happen after InitWMI and after AutoSelect.
+        CacheSensorPath();
+
+        // 4. Verify data stream
+        if (GetCPUTempFast() >= 0) {
+            Log("[MysticFight] Data stream established successfully.");
+            LogAllLHMTemperatureSensors(); 
+        }
+        else {
+            Log("[MysticFight] Connected to WMI, but cannot read temperature (Sensor ID invalid?).");
+        }
     }
     else {
-        Log("[MysticFight] LHM WMI initial connection failed...");
+        Log("[MysticFight] LHM WMI initial connection failed (Is LibreHardwareMonitor running?).");
     }
+
 
     // --- J. MAIN LOOP PREPARATION ---
     _bstr_t bstrOff(L"Off");
@@ -1429,16 +1535,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 // Hardware Update
                 if (nR != lastR || nG != lastG || nB != lastB) {
                     
-                    // If coming from OFF state or forced update, apply Steady style first
                     if (lastR >= RGB_LED_REFRESH) {
-                        if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+                        if (lpMLAPI_SetLedStyle)
+                            status = lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrSteady);
                     }
 
                     if (status == 0 && lpMLAPI_SetLedColor) {
-                        for (int i = 0; i < g_totalLeds; i++) {
-                            status = lpMLAPI_SetLedColor(g_deviceName, i, nR, nG, nB);
-                            if (status != 0) break;
-                        }
+                        // Now targeting specific index from config instead of a loop
+                        status = lpMLAPI_SetLedColor(g_target_device, g_cfg.targetLedIndex, nR, nG, nB);
                     }
 
                     if (status != 0) {
