@@ -729,7 +729,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
             Log(config_new);
             
-            CacheSensorPath();
+            g_pathCached = false;
 
             lastR = RGB_LED_REFRESH;
 
