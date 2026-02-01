@@ -33,7 +33,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.22";
+const wchar_t* APP_VERSION = L"v2.23";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -1831,26 +1831,72 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
                     lastR = RGB_LED_REFRESH; // Force immediate color update
                 }
+                
+                // --- COLOR CALCULATION (Gamma Corrected / RMS + LED Boost) ---
 
-                // --- COLOR CALCULATION (Linear Interpolation) ---
-                float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f; // Round to 0.25
+                // 1. Normalize temperature
+                float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f; // Round to 0.25 steps
+
                 float ratio = 0.0f;
+                COLORREF c1 = 0, c2 = 0;
 
+                // 2. Determine segments based on your 3 pivot points
                 if (temp <= (float)g_cfg.tempLow) {
-                    nR = GetRValue(g_cfg.colorLow); nG = GetGValue(g_cfg.colorLow); nB = GetBValue(g_cfg.colorLow);
-                }
-                else if (temp <= (float)g_cfg.tempMed) {
-                    ratio = (temp - (float)g_cfg.tempLow) / ((float)g_cfg.tempMed - (float)g_cfg.tempLow);
-                    nR = GetRValue(g_cfg.colorLow) + (DWORD)(ratio * (int(GetRValue(g_cfg.colorMed)) - int(GetRValue(g_cfg.colorLow))));
-                    nG = GetGValue(g_cfg.colorLow) + (DWORD)(ratio * (int(GetGValue(g_cfg.colorMed)) - int(GetGValue(g_cfg.colorLow))));
-                    nB = GetBValue(g_cfg.colorLow) + (DWORD)(ratio * (int(GetBValue(g_cfg.colorMed)) - int(GetBValue(g_cfg.colorLow))));
+                    // Case: Below minimum -> Solid Low Color
+                    nR = GetRValue(g_cfg.colorLow);
+                    nG = GetGValue(g_cfg.colorLow);
+                    nB = GetBValue(g_cfg.colorLow);
                 }
                 else {
-                    ratio = (temp - (float)g_cfg.tempMed) / ((float)g_cfg.tempHigh - (float)g_cfg.tempMed);
+                    // We are in a transition. Identify which segment.
+                    if (temp < (float)g_cfg.tempMed) {
+                        // SEGMENT 1: Low -> Medium
+                        ratio = (temp - (float)g_cfg.tempLow) /
+                            ((float)g_cfg.tempMed - (float)g_cfg.tempLow);
+                        c1 = g_cfg.colorLow;
+                        c2 = g_cfg.colorMed;
+                    }
+                    else {
+                        // SEGMENT 2: Medium -> High
+                        // Note: If temp > tempHigh, ratio becomes > 1.0, clamped below.
+                        ratio = (temp - (float)g_cfg.tempMed) /
+                            ((float)g_cfg.tempHigh - (float)g_cfg.tempMed);
+                        c1 = g_cfg.colorMed;
+                        c2 = g_cfg.colorHigh;
+                    }
+
+                    // 3. Clamp ratio for safety [0.0 - 1.0]
+                    if (ratio < 0.0f) ratio = 0.0f;
                     if (ratio > 1.0f) ratio = 1.0f;
-                    nR = GetRValue(g_cfg.colorMed) + (DWORD)(ratio * (int(GetRValue(g_cfg.colorHigh)) - int(GetRValue(g_cfg.colorMed))));
-                    nG = GetGValue(g_cfg.colorMed) + (DWORD)(ratio * (int(GetGValue(g_cfg.colorHigh)) - int(GetGValue(g_cfg.colorMed))));
-                    nB = GetBValue(g_cfg.colorMed) + (DWORD)(ratio * (int(GetBValue(g_cfg.colorHigh)) - int(GetBValue(g_cfg.colorMed))));
+
+                    // 4. APPLY RMS INTERPOLATION
+                    // Formula: sqrt( c1^2 * (1-t) + c2^2 * t )
+
+                    double r1 = (double)GetRValue(c1);
+                    double g1 = (double)GetGValue(c1);
+                    double b1 = (double)GetBValue(c1);
+
+                    double r2 = (double)GetRValue(c2);
+                    double g2 = (double)GetGValue(c2);
+                    double b2 = (double)GetBValue(c2);
+
+                    nR = (DWORD)sqrt((r1 * r1 * (1.0 - ratio)) + (r2 * r2 * ratio));
+                    nG = (DWORD)sqrt((g1 * g1 * (1.0 - ratio)) + (g2 * g2 * ratio));
+                    nB = (DWORD)sqrt((b1 * b1 * (1.0 - ratio)) + (b2 * b2 * ratio));
+
+                    // 5. LED BOOST (maximize brightness without altering hue)
+                    DWORD maxC = max(nR, max(nG, nB));
+                    if (maxC > 0 && maxC < 255) {
+                        double boost = 255.0 / (double)maxC;
+                        nR = (DWORD)(nR * boost);
+                        nG = (DWORD)(nG * boost);
+                        nB = (DWORD)(nB * boost);
+                    }
+
+                    // 6. Final saturation guard
+                    if (nR > 255) nR = 255;
+                    if (nG > 255) nG = 255;
+                    if (nB > 255) nB = 255;
                 }
 
                 // --- HARDWARE UPDATE ---
