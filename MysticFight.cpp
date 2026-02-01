@@ -30,7 +30,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.18";
+const wchar_t* APP_VERSION = L"v2.19";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -490,24 +490,22 @@ void PopulateSensorList(HWND hDlg) {
 }
 
 static void CacheSensorPath() {
-    // Validaciones básicas: Si no hay servicio o no hay ID configurado, salir.
+   
     if (!g_pSvc || wcslen(g_cfg.sensorID) == 0) return;
 
-    // 1. CONSTRUIMOS LA QUERY AQUÍ MISMO (Localmente)
-    // Usamos SELECT * para asegurar que traiga __RELPATH
     std::wstring wqlQuery = L"SELECT * FROM Sensor WHERE Identifier = '" + std::wstring(g_cfg.sensorID) + L"'";
 
-    // Logueamos qué estamos buscando (útil para debug)
+   
     char debugBuf[LOG_BUFFER_SIZE];
-    snprintf(debugBuf, sizeof(debugBuf), "[MysticFight] Buscando ruta WMI para: %ls", g_cfg.sensorID);
+    snprintf(debugBuf, sizeof(debugBuf), "[MysticFight] Searching WMI path for: %ls", g_cfg.sensorID);
     Log(debugBuf);
 
     IEnumWbemClassObjectPtr pEnum = nullptr;
 
-    // 2. Ejecutamos la búsqueda
+  
     HRESULT hr = g_pSvc->ExecQuery(
         _bstr_t(L"WQL"),
-        _bstr_t(wqlQuery.c_str()), // Convertimos el wstring local a BSTR
+        _bstr_t(wqlQuery.c_str()), 
         WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
         NULL,
         &pEnum
@@ -520,10 +518,8 @@ static void CacheSensorPath() {
         if (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uRet) == S_OK && uRet > 0) {
             _variant_t vtPath;
 
-            // 3. Intentamos obtener la Ruta Relativa
             hr = pObj->Get(L"__RELPATH", 0, &vtPath, 0, 0);
 
-            // Fallback a Ruta Absoluta si falla
             if (FAILED(hr) || vtPath.vt != VT_BSTR) {
                 pObj->Get(L"__PATH", 0, &vtPath, 0, 0);
             }
@@ -533,16 +529,16 @@ static void CacheSensorPath() {
                 g_pathCached = true;
 
                 char pathLog[512];
-                snprintf(pathLog, sizeof(pathLog), "[MysticFight] PATH CACHEADO: %ls", g_cachedSensorPath.GetBSTR());
+                snprintf(pathLog, sizeof(pathLog), "[MysticFight] PATH CACHED: %ls", g_cachedSensorPath.GetBSTR());
                 Log(pathLog);
             }
             else {
-                Log("[MysticFight] Error: Objeto encontrado pero sin ruta válida.");
+                Log("[MysticFight] Error: object found but without a valid path.");
                 g_pathCached = false;
             }
         }
         else {
-            Log("[MysticFight] Error: Sensor no encontrado en LHM. Verifica que LHM esté abierto.");
+            Log("[MysticFight] Error: sensor not found on LHM (is it running?)");
             g_pathCached = false;
         }
     }
