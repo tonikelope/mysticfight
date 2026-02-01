@@ -30,7 +30,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.17";
+const wchar_t* APP_VERSION = L"v2.18";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -98,9 +98,10 @@ _COM_SMARTPTR_TYPEDEF(ILogonTrigger, __uuidof(ILogonTrigger));
 // =============================================================
 // GLOBAL STATE VARIABLES
 // =============================================================
+_bstr_t g_cachedSensorPath = L"";
+bool g_pathCached = false;
 bool g_Running = true;
 bool g_LedsEnabled = true;
-_bstr_t g_bstrQuery = L"";
 
 // Watchdog & Timing State
 ULONGLONG g_ResetTimer = 0;
@@ -278,18 +279,6 @@ static HRESULT ControlScheduledTask(const wchar_t* taskName, bool start) {
     catch (const _com_error& e) {
         return e.Error();
     }
-}
-
-// Prepares the WMI query string based on configuration.
-static void PrepareLHMSensorWMIQueryString() {
-    if (wcslen(g_cfg.sensorID) == 0) return;
-
-    std::wstring q = L"SELECT Value FROM Sensor WHERE Identifier = '" + std::wstring(g_cfg.sensorID) + L"'";
-    g_bstrQuery = q.c_str();
-
-    char sensorLog[LOG_BUFFER_SIZE];
-    snprintf(sensorLog, sizeof(sensorLog), "[MysticFight] WMI Sensor query updated for: %ls", g_cfg.sensorID);
-    Log(sensorLog);
 }
 
 // Registers application in Task Scheduler for high-privilege startup.
@@ -500,6 +489,65 @@ void PopulateSensorList(HWND hDlg) {
     }
 }
 
+static void CacheSensorPath() {
+    // Validaciones básicas: Si no hay servicio o no hay ID configurado, salir.
+    if (!g_pSvc || wcslen(g_cfg.sensorID) == 0) return;
+
+    // 1. CONSTRUIMOS LA QUERY AQUÍ MISMO (Localmente)
+    // Usamos SELECT * para asegurar que traiga __RELPATH
+    std::wstring wqlQuery = L"SELECT * FROM Sensor WHERE Identifier = '" + std::wstring(g_cfg.sensorID) + L"'";
+
+    // Logueamos qué estamos buscando (útil para debug)
+    char debugBuf[LOG_BUFFER_SIZE];
+    snprintf(debugBuf, sizeof(debugBuf), "[MysticFight] Buscando ruta WMI para: %ls", g_cfg.sensorID);
+    Log(debugBuf);
+
+    IEnumWbemClassObjectPtr pEnum = nullptr;
+
+    // 2. Ejecutamos la búsqueda
+    HRESULT hr = g_pSvc->ExecQuery(
+        _bstr_t(L"WQL"),
+        _bstr_t(wqlQuery.c_str()), // Convertimos el wstring local a BSTR
+        WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+        NULL,
+        &pEnum
+    );
+
+    if (SUCCEEDED(hr) && pEnum) {
+        IWbemClassObjectPtr pObj = nullptr;
+        ULONG uRet = 0;
+
+        if (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uRet) == S_OK && uRet > 0) {
+            _variant_t vtPath;
+
+            // 3. Intentamos obtener la Ruta Relativa
+            hr = pObj->Get(L"__RELPATH", 0, &vtPath, 0, 0);
+
+            // Fallback a Ruta Absoluta si falla
+            if (FAILED(hr) || vtPath.vt != VT_BSTR) {
+                pObj->Get(L"__PATH", 0, &vtPath, 0, 0);
+            }
+
+            if (SUCCEEDED(hr) && vtPath.vt == VT_BSTR) {
+                g_cachedSensorPath = vtPath.bstrVal;
+                g_pathCached = true;
+
+                char pathLog[512];
+                snprintf(pathLog, sizeof(pathLog), "[MysticFight] PATH CACHEADO: %ls", g_cachedSensorPath.GetBSTR());
+                Log(pathLog);
+            }
+            else {
+                Log("[MysticFight] Error: Objeto encontrado pero sin ruta válida.");
+                g_pathCached = false;
+            }
+        }
+        else {
+            Log("[MysticFight] Error: Sensor no encontrado en LHM. Verifica que LHM esté abierto.");
+            g_pathCached = false;
+        }
+    }
+}
+
 
 // Calculates color brightness to ensure text contrast in UI.
 static bool IsColorDark(COLORREF col) {
@@ -680,8 +728,8 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             );
 
             Log(config_new);
-
-            PrepareLHMSensorWMIQueryString();
+            
+            CacheSensorPath();
 
             lastR = RGB_LED_REFRESH;
 
@@ -828,7 +876,6 @@ static void FinalCleanup(HWND hWnd) {
         SysFreeString(g_deviceName);
         g_deviceName = NULL;
     }
-    g_bstrQuery = L"";
 
     // 3. UI Cleanup
     if (hWnd) {
@@ -918,24 +965,54 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 
 // Retrieves CPU Temperature from WMI.
 static float GetCPUTempFast() {
-    if (!g_pSvc || g_bstrQuery.length() == 0) return -1.0f;
+    // 1. Validaciones básicas
+    if (!g_pSvc) return -1.0f;
 
-    IEnumWbemClassObjectPtr pEnum = nullptr;
-    HRESULT hr = g_pSvc->ExecQuery(_bstr_t(L"WQL"), g_bstrQuery,
-        WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnum);
+    // 2. Si no tenemos la ruta cacheada, intentamos obtenerla ahora
+    if (!g_pathCached) {
+        CacheSensorPath();
+        if (!g_pathCached) return -1.0f; // Si falló, abortamos
+    }
 
-    if (SUCCEEDED(hr) && pEnum) {
+    try {
         IWbemClassObjectPtr pObj = nullptr;
-        ULONG uRet = 0;
 
-        if (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uRet) == S_OK && uRet > 0) {
-            _variant_t vtVal;
-            if (SUCCEEDED(pObj->Get(L"Value", 0, &vtVal, 0, 0))) {
-                if (vtVal.vt == VT_R4) return vtVal.fltVal;
-                if (vtVal.vt == VT_R8) return (float)vtVal.dblVal;
-            }
+        // 3. Acceso Directo (Fast Path)
+        HRESULT hr = g_pSvc->GetObject(
+            g_cachedSensorPath,
+            0, // Flags standard
+            NULL,
+            &pObj,
+            NULL
+        );
+
+        // 4. CRUCIAL: Verificar si WMI nos devolvió un objeto válido
+        if (FAILED(hr) || pObj == nullptr) {
+            // Si falla el objeto directo, puede que ID haya cambiado. Forzamos recacheo.
+            g_pathCached = false;
+            return -1.0f;
+        }
+
+        _variant_t vtVal;
+        hr = pObj->Get(L"Value", 0, &vtVal, 0, 0);
+
+        if (SUCCEEDED(hr)) {
+            if (vtVal.vt == VT_R4) return vtVal.fltVal;
+            if (vtVal.vt == VT_R8) return (float)vtVal.dblVal;
         }
     }
+    catch (const _com_error& e) {
+        // 5. Capturamos excepciones de COM para que NO se cierre el programa
+        char errBuf[256];
+        snprintf(errBuf, sizeof(errBuf), "[MysticFight] WMI Error: 0x%08X", e.Error());
+        Log(errBuf);
+        g_pathCached = false; // Invalidamos cache por seguridad
+    }
+    catch (...) {
+        Log("[MysticFight] Unknown Exception in WMI");
+        g_pathCached = false;
+    }
+
     return -1.0f;
 }
 
@@ -1106,6 +1183,7 @@ static void MSIHwardwareDetection() {
     }
 }
 
+
 // =============================================================
 // MAIN ENTRY POINT
 // =============================================================
@@ -1224,7 +1302,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     // --- I. WMI CONNECTION  ---
     Log("[MysticFight] Initial LHM WMI Connection attempt...");
-    PrepareLHMSensorWMIQueryString();
+    CacheSensorPath();
 
     if (InitWMI() && GetCPUTempFast()>=0) {
         Log("[MysticFight] Connected to LHM WMI successfully.");
