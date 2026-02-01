@@ -12,11 +12,14 @@
 #include <taskschd.h>
 #include <shlobj.h>
 #include <exdisp.h>
+#include <winhttp.h>
+#include <algorithm>
 #include "resource.h"
 
 #pragma comment(lib, "wbemuuid.lib")
 #pragma comment(lib, "OleAut32.lib")
 #pragma comment(lib, "Shell32.lib")
+#pragma comment(lib, "winhttp.lib")
 
 // =============================================================
 // GLOBAL CONSTANTS AND DEFINITIONS
@@ -30,7 +33,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.20";
+const wchar_t* APP_VERSION = L"v2.21";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -63,6 +66,116 @@ struct Config {
 };
 
 Config g_cfg;
+
+// =============================================================
+// DATA SOURCE STATE MACHINE & CONSTANTS
+// =============================================================
+
+// LHM HTTP Config
+const wchar_t* LHM_HOST = L"localhost";
+const INTERNET_PORT LHM_PORT = 8085;
+const wchar_t* LHM_PATH = L"/data.json";
+
+// State Machine for Data Source
+enum class DataSource {
+    Searching, // Initial state or after failure: try WMI, then HTTP
+    WMI,       // Locked state: Use only WMI
+    HTTP       // Locked state: Use only HTTP
+};
+
+// Global state variable
+DataSource g_activeSource = DataSource::Searching;
+
+// =============================================================
+// HTTP & JSON PARSING UTILS (FALLBACK SYSTEM)
+// =============================================================
+
+// Performs a GET request to LHM and returns raw JSON
+static std::string FetchLHMJson() {
+    std::string responseData;
+    HINTERNET hSession = NULL, hConnect = NULL, hRequest = NULL;
+
+    // 1. Open Session
+    hSession = WinHttpOpen(L"MysticFight/2.2", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return "";
+
+    // 2. Connect to localhost:8085
+    hConnect = WinHttpConnect(hSession, LHM_HOST, LHM_PORT, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return ""; }
+
+    // 3. Create Request
+    hRequest = WinHttpOpenRequest(hConnect, L"GET", LHM_PATH, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return ""; }
+
+    // 4. Send Request & Read
+    if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        WinHttpReceiveResponse(hRequest, NULL)) {
+
+        DWORD dwSize = 0;
+        DWORD dwDownloaded = 0;
+        do {
+            dwSize = 0;
+            if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) break;
+            if (dwSize == 0) break;
+
+            char* pszOutBuffer = new char[dwSize + 1];
+            if (!pszOutBuffer) break;
+
+            ZeroMemory(pszOutBuffer, dwSize + 1);
+            if (WinHttpReadData(hRequest, (LPVOID)pszOutBuffer, dwSize, &dwDownloaded)) {
+                responseData.append(pszOutBuffer, dwDownloaded);
+            }
+            delete[] pszOutBuffer;
+        } while (dwSize > 0);
+    }
+
+    if (hRequest) WinHttpCloseHandle(hRequest);
+    if (hConnect) WinHttpCloseHandle(hConnect);
+    if (hSession) WinHttpCloseHandle(hSession);
+
+    return responseData;
+}
+
+// "Surgical" parser to extract value from specific SensorID
+static float ParseLHMJsonForTemp(const std::string& json, const wchar_t* sensorIDW) {
+    if (json.empty() || !sensorIDW) return -1.0f;
+
+    char sensorID[256];
+    size_t converted;
+    wcstombs_s(&converted, sensorID, sizeof(sensorID), sensorIDW, _TRUNCATE);
+
+    // 1. Find Sensor ID key
+    std::string searchKey = "\"SensorId\":\"" + std::string(sensorID) + "\"";
+    size_t idPos = json.find(searchKey);
+    if (idPos == std::string::npos) return -1.0f;
+
+    // 2. Isolate the JSON object {...} surrounding this ID
+    size_t objStart = json.rfind('{', idPos);
+    size_t objEnd = json.find('}', idPos);
+    if (objStart == std::string::npos || objEnd == std::string::npos) return -1.0f;
+
+    std::string objBlock = json.substr(objStart, objEnd - objStart);
+
+    // 3. Find "Value" within this block
+    size_t valPos = objBlock.find("\"Value\":");
+    if (valPos == std::string::npos) return -1.0f;
+
+    valPos += 9; // Skip "Value":"
+    size_t valEnd = objBlock.find('"', valPos);
+    if (valEnd == std::string::npos) return -1.0f;
+
+    std::string valStr = objBlock.substr(valPos, valEnd - valPos); // e.g., "49,4 °C"
+
+    // 4. Sanitize (European comma to dot)
+    std::replace(valStr.begin(), valStr.end(), ',', '.');
+
+    try {
+        return std::stof(valStr);
+    }
+    catch (...) {
+        return -1.0f;
+    }
+}
 
 // =============================================================
 // MSI SDK TYPE DEFINITIONS
@@ -546,38 +659,135 @@ void PopulateDeviceList(HWND hDlg) {
     }
 }
 
+// Helper to extract string value from a JSON block (e.g., "Text":"CPU Core")
+static std::wstring ExtractJsonString(const std::string& block, const std::string& key) {
+    std::string searchKey = "\"" + key + "\":\"";
+    size_t start = block.find(searchKey);
+    if (start == std::string::npos) return L"";
 
-// Populates combo box with available temperature sensors via WMI.
+    start += searchKey.length();
+    size_t end = block.find("\"", start);
+    if (end == std::string::npos) return L"";
+
+    std::string val = block.substr(start, end - start);
+
+    // Convert UTF8 to Wide String (Windows)
+    int len = MultiByteToWideChar(CP_UTF8, 0, val.c_str(), -1, NULL, 0);
+    if (len > 0) {
+        std::vector<wchar_t> buf(len);
+        MultiByteToWideChar(CP_UTF8, 0, val.c_str(), -1, &buf[0], len);
+        return std::wstring(&buf[0]);
+    }
+    return L"";
+}
+
+// Populates the ComboBox using HTTP JSON data
+static void PopulateSensorsFromHTTP(HWND hCombo) {
+    std::string json = FetchLHMJson();
+    if (json.empty()) return;
+
+    std::string typeKey = "\"Type\":\"Temperature\"";
+    size_t pos = 0;
+    bool foundAny = false;
+
+    // Search for all occurrences of "Type":"Temperature"
+    while ((pos = json.find(typeKey, pos)) != std::string::npos) {
+        // Find the limits of the current JSON object {...}
+        size_t blockEnd = json.find('}', pos);
+        size_t blockStart = json.rfind('{', pos);
+
+        if (blockEnd != std::string::npos && blockStart != std::string::npos) {
+            std::string block = json.substr(blockStart, blockEnd - blockStart + 1);
+
+            std::wstring name = ExtractJsonString(block, "Text");
+            std::wstring id = ExtractJsonString(block, "SensorId");
+
+            if (!name.empty() && !id.empty()) {
+                int idx = (int)SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)name.c_str());
+                if (idx != CB_ERR) {
+                    SendMessage(hCombo, CB_SETITEMDATA, idx, (LPARAM)HeapDupString(id.c_str()));
+                    // Select if matches current config
+                    if (wcscmp(id.c_str(), g_cfg.sensorID) == 0) {
+                        SendMessage(hCombo, CB_SETCURSEL, idx, 0);
+                        foundAny = true;
+                    }
+                }
+            }
+        }
+        pos = blockEnd; // Advance
+    }
+
+    if (!foundAny && SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 0)
+        SendMessage(hCombo, CB_SETCURSEL, 0, 0);
+}
+
 void PopulateSensorList(HWND hDlg) {
     HWND hCombo = GetDlgItem(hDlg, IDC_SENSOR_ID);
     ClearComboHeapData(hCombo);
 
-    if (!g_pSvc) InitWMI();
-    
-    if (g_pSvc) {
-        IEnumWbemClassObjectPtr pEnumerator = NULL;
-        bstr_t query("SELECT Name, Identifier FROM Sensor WHERE SensorType = 'Temperature'");
-        if (SUCCEEDED(g_pSvc->ExecQuery(bstr_t("WQL"), query, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator))) {
-            IWbemClassObjectPtr pclsObj = NULL;
-            ULONG uReturn = 0;
-            bool found = false;
-            while (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK) {
-                _variant_t vtName, vtID;
-                if (SUCCEEDED(pclsObj->Get(L"Name", 0, &vtName, 0, 0)) && SUCCEEDED(pclsObj->Get(L"Identifier", 0, &vtID, 0, 0))) {
-                    if (vtName.vt == VT_BSTR && vtID.vt == VT_BSTR) {
-                        int idx = (int)SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)vtName.bstrVal);
-                        if (idx != CB_ERR) {
-                            SendMessage(hCombo, CB_SETITEMDATA, idx, (LPARAM)HeapDupString(vtID.bstrVal));
-                            if (wcscmp(vtID.bstrVal, g_cfg.sensorID) == 0) {
-                                SendMessage(hCombo, CB_SETCURSEL, idx, 0);
-                                found = true;
+    // LOGIC: Respect Global Strategy
+    // 1. If we are locked on HTTP, DO NOT touch WMI (it might hang).
+    // 2. If we are locked on WMI or still Searching, prioritize WMI.
+
+    bool tryWMI = (g_activeSource != DataSource::HTTP);
+    bool wmiSuccess = false;
+
+    // --- STEP A: TRY WMI (Priority) ---
+    if (tryWMI) {
+        // Lazy connection: Only connect if not already connected
+        if (!g_pSvc) InitWMI();
+
+        if (g_pSvc) {
+            IEnumWbemClassObjectPtr pEnumerator = NULL;
+            bstr_t query("SELECT Name, Identifier FROM Sensor WHERE SensorType = 'Temperature'");
+
+            // Execute Query
+            HRESULT hr = g_pSvc->ExecQuery(
+                bstr_t("WQL"),
+                query,
+                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                NULL,
+                &pEnumerator
+            );
+
+            if (SUCCEEDED(hr)) {
+                IWbemClassObjectPtr pclsObj = NULL;
+                ULONG uReturn = 0;
+                bool found = false;
+
+                while (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK) {
+                    _variant_t vtName, vtID;
+                    if (SUCCEEDED(pclsObj->Get(L"Name", 0, &vtName, 0, 0)) &&
+                        SUCCEEDED(pclsObj->Get(L"Identifier", 0, &vtID, 0, 0))) {
+
+                        if (vtName.vt == VT_BSTR && vtID.vt == VT_BSTR) {
+                            int idx = (int)SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)vtName.bstrVal);
+                            if (idx != CB_ERR) {
+                                SendMessage(hCombo, CB_SETITEMDATA, idx, (LPARAM)HeapDupString(vtID.bstrVal));
+
+                                // Auto-select current config
+                                if (wcscmp(vtID.bstrVal, g_cfg.sensorID) == 0) {
+                                    SendMessage(hCombo, CB_SETCURSEL, idx, 0);
+                                    found = true;
+                                }
+                                wmiSuccess = true;
                             }
                         }
                     }
                 }
+                // Select first item if nothing matched
+                if (!found && SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 0)
+                    SendMessage(hCombo, CB_SETCURSEL, 0, 0);
             }
-            if (!found && SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 0) SendMessage(hCombo, CB_SETCURSEL, 0, 0);
         }
+    }
+
+    // --- STEP B: HTTP FALLBACK ---
+    // Execute this ONLY if:
+    // 1. We are locked in HTTP mode (tryWMI was false).
+    // 2. OR we tried WMI (Searching mode) but it found 0 sensors.
+    if (!wmiSuccess) {
+        PopulateSensorsFromHTTP(hCombo);
     }
 }
 
@@ -998,54 +1208,87 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
     return DefWindowProc(hWnd, message, wParam, lParam);
 }
 
-// Retrieves CPU Temperature from WMI.
+// Retrieves CPU Temperature using the active strategy (WMI or HTTP)
 static float GetCPUTempFast() {
-    // 1. Basic validations
-    if (!g_pSvc) return -1.0f;
+    float temp = -1.0f;
 
-    // 2. If the path is not cached, attempt to retrieve it now
-    if (!g_pathCached) {
-        CacheSensorPath();
-        if (!g_pathCached) return -1.0f; // Si falló, abortamos
-    }
+    // CASE 1: LOCKED ON WMI
+    if (g_activeSource == DataSource::WMI) {
+        bool success = false;
+        if (g_pSvc && g_pathCached) {
+            try {
+                IWbemClassObjectPtr pObj = nullptr;
+                if (SUCCEEDED(g_pSvc->GetObject(g_cachedSensorPath, 0, NULL, &pObj, NULL)) && pObj) {
+                    _variant_t vtVal;
+                    if (SUCCEEDED(pObj->Get(L"Value", 0, &vtVal, 0, 0))) {
+                        if (vtVal.vt == VT_R4) temp = vtVal.fltVal;
+                        else if (vtVal.vt == VT_R8) temp = (float)vtVal.dblVal;
+                        success = true;
+                    }
+                }
+            }
+            catch (...) { success = false; }
+        }
 
-    try {
-        IWbemClassObjectPtr pObj = nullptr;
-
-        // 3. Direct Access (Fast Path)
-        HRESULT hr = g_pSvc->GetObject(
-            g_cachedSensorPath,
-            0, // Flags standard
-            NULL,
-            &pObj,
-            NULL
-        );
-
-        // 4. CRUCIAL: Verify if WMI returned a valid object
-        if (FAILED(hr) || pObj == nullptr) {
-            // If the direct object retrieval fails, the ID might have changed. Force recaching.
+        if (!success) {
+            Log("[MysticFight] WMI reading failed. Resetting to SEARCH mode.");
+            g_activeSource = DataSource::Searching; // Unlock to try alternatives next frame
             g_pathCached = false;
             return -1.0f;
         }
+        return temp;
+    }
 
-        _variant_t vtVal;
-        hr = pObj->Get(L"Value", 0, &vtVal, 0, 0);
-
-        if (SUCCEEDED(hr)) {
-            if (vtVal.vt == VT_R4) return vtVal.fltVal;
-            if (vtVal.vt == VT_R8) return (float)vtVal.dblVal;
+    // CASE 2: LOCKED ON HTTP
+    else if (g_activeSource == DataSource::HTTP) {
+        std::string json = FetchLHMJson();
+        if (!json.empty()) {
+            temp = ParseLHMJsonForTemp(json, g_cfg.sensorID);
         }
+
+        if (temp < 0.0f) {
+            Log("[MysticFight] HTTP reading failed. Resetting to SEARCH mode.");
+            g_activeSource = DataSource::Searching; // Unlock to try alternatives next frame
+            return -1.0f;
+        }
+        return temp;
     }
-    catch (const _com_error& e) {
-        // 5. Catch COM exceptions to prevent the program from crashing
-        char errBuf[256];
-        snprintf(errBuf, sizeof(errBuf), "[MysticFight] WMI Error: 0x%08X", e.Error());
-        Log(errBuf);
-        g_pathCached = false; // Invalidate cache for safety
-    }
-    catch (...) {
-        Log("[MysticFight] Unknown Exception in WMI");
-        g_pathCached = false;
+
+    // CASE 3: SEARCHING (First run or after failure)
+    else {
+        // A) Try WMI First
+        if (g_pSvc) {
+            if (!g_pathCached) CacheSensorPath();
+            if (g_pathCached) {
+                try {
+                    IWbemClassObjectPtr pObj = nullptr;
+                    if (SUCCEEDED(g_pSvc->GetObject(g_cachedSensorPath, 0, NULL, &pObj, NULL))) {
+                        _variant_t vtVal;
+                        if (SUCCEEDED(pObj->Get(L"Value", 0, &vtVal, 0, 0))) {
+                            // SUCCESS: Lock onto WMI
+                            g_activeSource = DataSource::WMI;
+                            Log("[MysticFight] Source detected: WMI (Locked).");
+
+                            if (vtVal.vt == VT_R4) return vtVal.fltVal;
+                            if (vtVal.vt == VT_R8) return (float)vtVal.dblVal;
+                        }
+                    }
+                }
+                catch (...) {}
+            }
+        }
+
+        // B) Try HTTP Second (if WMI failed)
+        std::string json = FetchLHMJson();
+        if (!json.empty()) {
+            temp = ParseLHMJsonForTemp(json, g_cfg.sensorID);
+            if (temp >= 0.0f) {
+                // SUCCESS: Lock onto HTTP
+                g_activeSource = DataSource::HTTP;
+                Log("[MysticFight] Source detected: HTTP (Locked).");
+                return temp;
+            }
+        }
     }
 
     return -1.0f;
@@ -1382,35 +1625,57 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
 
-    // --- I. WMI CONNECTION ---
-    Log("[MysticFight] Initial LHM WMI Connection attempt...");
+    // --- I. INITIAL CONNECTION STRATEGY & DISCOVERY ---
+    Log("[MysticFight] Determining data source strategy...");
 
-    // 1. First: Connect to the Service
+    // STRATEGY A: Try WMI First (Priority)
+    bool strategyLocked = false;
+
     if (InitWMI()) {
-        Log("[MysticFight] WMI Service connected.");
+        Log("[MysticFight] WMI Service connected. Checking data stream...");
 
-        // 2. Auto-Selection Logic (Zero Config)
-        // If config is empty (first run), find the first available sensor immediately.
+        // 1. Auto-Selection Logic (First Run / Zero Config)
         if (wcslen(g_cfg.sensorID) == 0) {
-            Log("[MysticFight] No sensor configured. Attempting auto-selection...");
+            Log("[MysticFight] First run (No ID). Attempting auto-selection via WMI...");
             AutoSelectFirstSensor();
         }
 
-        // 3. Now that we have a connection AND a SensorID, we can cache the path.
-        // This MUST happen after InitWMI and after AutoSelect.
+        // 2. Prepare Path
         CacheSensorPath();
 
-        // 4. Verify data stream
-        if (GetCPUTempFast() >= 0) {
-            Log("[MysticFight] Data stream established successfully.");
-            LogAllLHMTemperatureSensors(); 
+        // 3. Test Read: Force WMI mode temporarily to verify
+        g_activeSource = DataSource::WMI;
+
+        if (GetCPUTempFast() >= 0.0f) {
+            Log("[MysticFight] SUCCESS: WMI is working. Strategy LOCKED: WMI.");
+            LogAllLHMTemperatureSensors();
+            strategyLocked = true;
         }
         else {
-            Log("[MysticFight] Connected to WMI, but cannot read temperature (Sensor ID invalid?).");
+            Log("[MysticFight] WARNING: WMI connected but cannot read value. Dropping WMI...");
+            g_activeSource = DataSource::Searching; // Revert to neutral
         }
     }
     else {
-        Log("[MysticFight] LHM WMI initial connection failed (Is LibreHardwareMonitor running?).");
+        Log("[MysticFight] WMI Service not available.");
+    }
+
+    // STRATEGY B: Try HTTP Second (Fallback if WMI failed)
+    if (!strategyLocked) {
+        Log("[MysticFight] Attempting HTTP Fallback...");
+
+        // Force HTTP mode temporarily to verify
+        g_activeSource = DataSource::HTTP;
+
+        if (GetCPUTempFast() >= 0.0f) {
+            Log("[MysticFight] SUCCESS: HTTP is working. Strategy LOCKED: HTTP.");
+            strategyLocked = true;
+        }
+        else {
+            Log("[MysticFight] ERROR: Both WMI and HTTP failed.");
+            Log("[MysticFight] System will enter SEARCH mode (retrying in background).");
+            g_activeSource = DataSource::Searching; // Revert to neutral so the loop keeps trying
+        }
     }
 
 
@@ -1419,25 +1684,29 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     _bstr_t bstrBreath(L"Breath");
     _bstr_t bstrSteady(L"Steady");
 
-    // Initialize style if hardware is present
+    // Initialize "Steady" style if hardware is ready
     if (g_deviceName != NULL && lpMLAPI_SetLedStyle) {
         lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
     }
 
     DWORD nR = 0, nG = 0, nB = 0;
+
+    // Force initial update
     lastR = RGB_LED_REFRESH;
     lastG = RGB_LED_REFRESH;
     lastB = RGB_LED_REFRESH;
-    MSG msg = { 0 };
-    bool lhmAlive = true;
 
-    // --- MAIN APPLICATION LOOP ---
+    MSG msg = { 0 };
+    bool lhmAlive = true; // Assume alive at start to avoid immediate error flashing
+
+    // =============================================================
+    // MAIN APPLICATION LOOP
+    // =============================================================
     while (g_Running) {
         int status = 0;
-
         ULONGLONG currentTime = GetTickCount64();
 
-        // 1. Process Messages
+        // 1. PROCESS WINDOW MESSAGES
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) { g_Running = false; break; }
             TranslateMessage(&msg);
@@ -1446,75 +1715,63 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         if (!g_Running) break;
 
-        // 2. Reset State Machine (Watchdog)
+        // 2. WATCHDOG: SDK RESET STATE MACHINE
+        // (Handles cases where MSI SDK hangs or crashes)
         if (g_Resetting_sdk) {
-
             if (currentTime >= g_ResetTimer) {
                 switch (g_ResetStage) {
-                case 0:
+                case 0: // Kill Process
                     Log("[MysticFight] Reset Stage 0: Cleaning MSI...");
                     ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", false);
                     system("taskkill /F /IM LEDKeeper2.exe /T > nul 2>&1");
-                    g_ResetTimer = currentTime + RESET_KILL_TASK_WAIT_MS; g_ResetStage = 1;
+                    g_ResetTimer = currentTime + RESET_KILL_TASK_WAIT_MS;
+                    g_ResetStage = 1;
                     break;
-                case 1:
+                case 1: // Restart Service
                     Log("[MysticFight] Reset Stage 1: Restarting MSI...");
                     ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", true);
-                    g_ResetTimer = currentTime + RESET_RESTART_TASK_DELAY_MS; g_ResetStage = 2;
+                    g_ResetTimer = currentTime + RESET_RESTART_TASK_DELAY_MS;
+                    g_ResetStage = 2;
                     break;
-                case 2:
+                case 2: // Re-initialize SDK
                     Log("[MysticFight] Reset Stage 2: Re-initializing SDK...");
-                    
                     if (lpMLAPI_Initialize && lpMLAPI_Initialize() == 0) {
                         MSIHwardwareDetection();
+                        // Restore Steady style after reset
+                        if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
                     }
-
                     g_ResetTimer = currentTime + RESET_RESTART_TASK_DELAY_MS;
                     g_Resetting_sdk = false;
-
+                    lastR = RGB_LED_REFRESH; // Force repaint
                     break;
                 }
             }
         }
-        // 3. Sensor & Hardware Logic
+
+        // 3. MAIN LOGIC (If LEDs are enabled by user)
         else if (g_LedsEnabled) {
-            
+
+            // Attempt to read temperature (via Locked WMI or HTTP)
             float rawTemp = GetCPUTempFast();
 
-            if (rawTemp < 0.0f) {
-                
-                if (lhmAlive) {
-                    
-                    Log("[MysticFight] LHM WMI disconnected!");
-                    
-                    if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_deviceName, 0, bstrBreath);
-                    
-                    if (status == 0 && lpMLAPI_SetLedColor) {
-                        for (int i = 0; i < g_totalLeds; i++) {
-                            status = lpMLAPI_SetLedColor(g_deviceName, i, 255, 255, 255);
-                            if (status != 0) break;
-                        }
-                    }
+            // CASE A: SUCCESSFUL READ
+            if (rawTemp >= 0.0f) {
 
-                    lhmAlive = false;
-                }
-
-                if (currentTime - lastWMIRetry > LHM_RETRY_DELAY_MS) {
-                    lastWMIRetry = currentTime;  
-                    InitWMI(); 
-                }
-            }
-            else {
-
+                // If recovering from an error state
                 if (!lhmAlive) {
                     lhmAlive = true;
-                    Log("[MysticFight] Reconnected to LHM WMI successfully.");
-                    lastR = RGB_LED_REFRESH;
+                    Log("[MysticFight] Connection established/recovered.");
+
+                    // Restore "Steady" mode instead of "Breath"
+                    if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+
+                    lastR = RGB_LED_REFRESH; // Force immediate color update
                 }
-                
-                // Color Calculation
-                float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f;
+
+                // --- COLOR CALCULATION (Linear Interpolation) ---
+                float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f; // Round to 0.25
                 float ratio = 0.0f;
+
                 if (temp <= (float)g_cfg.tempLow) {
                     nR = GetRValue(g_cfg.colorLow); nG = GetGValue(g_cfg.colorLow); nB = GetBValue(g_cfg.colorLow);
                 }
@@ -1532,21 +1789,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     nB = GetBValue(g_cfg.colorMed) + (DWORD)(ratio * (int(GetBValue(g_cfg.colorHigh)) - int(GetBValue(g_cfg.colorMed))));
                 }
 
-                // Hardware Update
+                // --- HARDWARE UPDATE ---
+                // Only send command if color changed
                 if (nR != lastR || nG != lastG || nB != lastB) {
-                    
+
+                    // Ensure Steady style on startup/refresh
                     if (lastR >= RGB_LED_REFRESH) {
                         if (lpMLAPI_SetLedStyle)
                             status = lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrSteady);
                     }
 
                     if (status == 0 && lpMLAPI_SetLedColor) {
-                        // Now targeting specific index from config instead of a loop
                         status = lpMLAPI_SetLedColor(g_target_device, g_cfg.targetLedIndex, nR, nG, nB);
                     }
 
                     if (status != 0) {
-                        Log("[MysticFight] SDK Call failed. Triggering Reset...");
+                        // If MSI SDK fails, trigger Watchdog Reset
+                        Log("[MysticFight] SDK Call failed (SetColor). Triggering Reset...");
                         g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0;
                     }
                     else {
@@ -1554,17 +1813,41 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     }
                 }
             }
+
+            // CASE B: READ FAILURE (Both WMI and HTTP failed)
+            else {
+                if (lhmAlive) {
+                    lhmAlive = false;
+                    Log("[MysticFight] Data source disconnected (LHM closed?).");
+
+                    // IMPORTANT: Unlock source to allow searching (Search Mode) when it comes back
+                    g_activeSource = DataSource::Searching;
+
+                    // Set Error Effect (White Breathing)
+                    if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_deviceName, 0, bstrBreath);
+                    if (status == 0 && lpMLAPI_SetLedColor) {
+                        // Set all LEDs to white
+                        for (int i = 0; i < g_totalLeds; i++) {
+                            lpMLAPI_SetLedColor(g_deviceName, i, 255, 255, 255);
+                        }
+                    }
+                }
+
+                // Periodic WMI Retry (Only needed if we are in Search mode)
+                if (g_activeSource == DataSource::Searching && (currentTime - lastWMIRetry > LHM_RETRY_DELAY_MS)) {
+                    lastWMIRetry = currentTime;
+                    InitWMI();
+                }
+            }
         }
+
+        // 4. OFF MODE (User disabled LEDs via Hotkey)
         else {
-            // OFF Mode: Only enter if not already in OFF
             if (lastR != RGB_LEDS_OFF) {
-
-                int status = 0;
-
                 if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
 
                 if (status != 0) {
-                    Log("[MysticFight] SDK Call failed. Triggering Reset...");
+                    Log("[MysticFight] SDK Call failed (SetOff). Triggering Reset...");
                     g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0;
                 }
                 else {
@@ -1573,6 +1856,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             }
         }
 
+        // 5. CPU CONTROL (Delay)
         MsgWaitForMultipleObjects(0, NULL, FALSE, MAIN_LOOP_DELAY_MS, QS_ALLINPUT);
     }
 
