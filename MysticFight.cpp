@@ -961,10 +961,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 
 // Retrieves CPU Temperature from WMI.
 static float GetCPUTempFast() {
-    // 1. Validaciones básicas
+    // 1. Basic validations
     if (!g_pSvc) return -1.0f;
 
-    // 2. Si no tenemos la ruta cacheada, intentamos obtenerla ahora
+    // 2. If the path is not cached, attempt to retrieve it now
     if (!g_pathCached) {
         CacheSensorPath();
         if (!g_pathCached) return -1.0f; // Si falló, abortamos
@@ -973,7 +973,7 @@ static float GetCPUTempFast() {
     try {
         IWbemClassObjectPtr pObj = nullptr;
 
-        // 3. Acceso Directo (Fast Path)
+        // 3. Direct Access (Fast Path)
         HRESULT hr = g_pSvc->GetObject(
             g_cachedSensorPath,
             0, // Flags standard
@@ -982,9 +982,9 @@ static float GetCPUTempFast() {
             NULL
         );
 
-        // 4. CRUCIAL: Verificar si WMI nos devolvió un objeto válido
+        // 4. CRUCIAL: Verify if WMI returned a valid object
         if (FAILED(hr) || pObj == nullptr) {
-            // Si falla el objeto directo, puede que ID haya cambiado. Forzamos recacheo.
+            // If the direct object retrieval fails, the ID might have changed. Force recaching.
             g_pathCached = false;
             return -1.0f;
         }
@@ -998,11 +998,11 @@ static float GetCPUTempFast() {
         }
     }
     catch (const _com_error& e) {
-        // 5. Capturamos excepciones de COM para que NO se cierre el programa
+        // 5. Catch COM exceptions to prevent the program from crashing
         char errBuf[256];
         snprintf(errBuf, sizeof(errBuf), "[MysticFight] WMI Error: 0x%08X", e.Error());
         Log(errBuf);
-        g_pathCached = false; // Invalidamos cache por seguridad
+        g_pathCached = false; // Invalidate cache for safety
     }
     catch (...) {
         Log("[MysticFight] Unknown Exception in WMI");
