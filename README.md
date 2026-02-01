@@ -14,9 +14,11 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 ## Features
 * **Real-time Monitoring:** Temperature tracking via WMI.
 * **VERY Lightweight:** No heavy dashboards; just a simple tray app that stays out of your way.
+* **Customizable Device and LED area:** Choose the one you prefer (WARNING: The SDK may not recognise all areas available on the device until it is updated).
 * **Customizable Temperature Sensor:** Choose the one you prefer.
 * **Customizable Temperature and Colors Thresholds:** LERP RGB algorithm.
 * **Night-Mode with Global Hotkey:** `Ctrl + Alt + Shift + L` to power-off/on LEDs instantly.
+  <img src="mf_settings.png" align="center" />
   
 ## ⚠️ Requirements
 For this tool to work, you MUST have the following installed/running:
