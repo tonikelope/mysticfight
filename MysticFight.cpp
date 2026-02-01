@@ -33,7 +33,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.24";
+const wchar_t* APP_VERSION = L"v2.25";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -1780,6 +1780,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     lastG = RGB_LED_REFRESH;
     lastB = RGB_LED_REFRESH;
 
+    float lastTemp = -1.0f;
+
     MSG msg = { 0 };
     bool lhmAlive = true; // Assume alive at start to avoid immediate error flashing
 
@@ -1851,93 +1853,99 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
                     lastR = RGB_LED_REFRESH; // Force immediate color update
                 }
-                
-                // --- COLOR CALCULATION (RMS + Gamma only in intermediates, pure extremes) ---
 
                 float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f; // Round to 0.25 steps
-                float ratio = 0.0f;
-                COLORREF c1 = 0, c2 = 0;
 
-                if (temp <= (float)g_cfg.tempLow) {
-                    // Solid Low Color: pure, no gamma
-                    nR = GetRValue(g_cfg.colorLow);
-                    nG = GetGValue(g_cfg.colorLow);
-                    nB = GetBValue(g_cfg.colorLow);
-                }
-                else if (temp < (float)g_cfg.tempMed) {
-                    // SEGMENT 1: Low -> Medium
-                    ratio = (temp - (float)g_cfg.tempLow) / ((float)g_cfg.tempMed - (float)g_cfg.tempLow);
-                    c1 = g_cfg.colorLow;
-                    c2 = g_cfg.colorMed;
+                if (temp != lastTemp) {
 
-                    double r1 = (double)GetRValue(c1);
-                    double g1 = (double)GetGValue(c1);
-                    double b1 = (double)GetBValue(c1);
+                    lastTemp = temp;
 
-                    double r2 = (double)GetRValue(c2);
-                    double g2 = (double)GetGValue(c2);
-                    double b2 = (double)GetBValue(c2);
+                    float ratio = 0.0f;
+                    COLORREF c1 = 0, c2 = 0;
 
-                    DWORD rawR = (DWORD)sqrt(r1 * r1 * (1.0 - ratio) + r2 * r2 * ratio);
-                    DWORD rawG = (DWORD)sqrt(g1 * g1 * (1.0 - ratio) + g2 * g2 * ratio);
-                    DWORD rawB = (DWORD)sqrt(b1 * b1 * (1.0 - ratio) + b2 * b2 * ratio);
+                    // --- COLOR CALCULATION (RMS + Gamma only in intermediates, pure extremes) ---
 
-                    // Apply gamma only in intermediates
-                    nR = gamma8[rawR];
-                    nG = gamma8[rawG];
-                    nB = gamma8[rawB];
-                }
-                else if (temp < (float)g_cfg.tempHigh) {
-                    // SEGMENT 2: Medium -> High
-                    ratio = (temp - (float)g_cfg.tempMed) / ((float)g_cfg.tempHigh - (float)g_cfg.tempMed);
-                    c1 = g_cfg.colorMed;
-                    c2 = g_cfg.colorHigh;
-
-                    double r1 = (double)GetRValue(c1);
-                    double g1 = (double)GetGValue(c1);
-                    double b1 = (double)GetBValue(c1);
-
-                    double r2 = (double)GetRValue(c2);
-                    double g2 = (double)GetGValue(c2);
-                    double b2 = (double)GetBValue(c2);
-
-                    DWORD rawR = (DWORD)sqrt(r1 * r1 * (1.0 - ratio) + r2 * r2 * ratio);
-                    DWORD rawG = (DWORD)sqrt(g1 * g1 * (1.0 - ratio) + g2 * g2 * ratio);
-                    DWORD rawB = (DWORD)sqrt(b1 * b1 * (1.0 - ratio) + b2 * b2 * ratio);
-
-                    // Apply gamma only in intermediates
-                    nR = gamma8[rawR];
-                    nG = gamma8[rawG];
-                    nB = gamma8[rawB];
-                }
-                else {
-                    // Solid High Color: pure, no gamma
-                    nR = GetRValue(g_cfg.colorHigh);
-                    nG = GetGValue(g_cfg.colorHigh);
-                    nB = GetBValue(g_cfg.colorHigh);
-                }
-
-                // --- HARDWARE UPDATE ---
-                // Only send command if color changed
-                if (nR != lastR || nG != lastG || nB != lastB) {
-
-                    // Ensure Steady style on startup/refresh
-                    if (lastR >= RGB_LED_REFRESH) {
-                        if (lpMLAPI_SetLedStyle)
-                            status = lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrSteady);
+                    if (temp <= (float)g_cfg.tempLow) {
+                        // Solid Low Color: pure, no gamma
+                        nR = GetRValue(g_cfg.colorLow);
+                        nG = GetGValue(g_cfg.colorLow);
+                        nB = GetBValue(g_cfg.colorLow);
                     }
+                    else if (temp < (float)g_cfg.tempMed) {
+                        // SEGMENT 1: Low -> Medium
+                        ratio = (temp - (float)g_cfg.tempLow) / ((float)g_cfg.tempMed - (float)g_cfg.tempLow);
+                        c1 = g_cfg.colorLow;
+                        c2 = g_cfg.colorMed;
 
-                    if (status == 0 && lpMLAPI_SetLedColor) {
-                        status = lpMLAPI_SetLedColor(g_target_device, g_cfg.targetLedIndex, nR, nG, nB);
+                        double r1 = (double)GetRValue(c1);
+                        double g1 = (double)GetGValue(c1);
+                        double b1 = (double)GetBValue(c1);
+
+                        double r2 = (double)GetRValue(c2);
+                        double g2 = (double)GetGValue(c2);
+                        double b2 = (double)GetBValue(c2);
+
+                        DWORD rawR = (DWORD)sqrt(r1 * r1 * (1.0 - ratio) + r2 * r2 * ratio);
+                        DWORD rawG = (DWORD)sqrt(g1 * g1 * (1.0 - ratio) + g2 * g2 * ratio);
+                        DWORD rawB = (DWORD)sqrt(b1 * b1 * (1.0 - ratio) + b2 * b2 * ratio);
+
+                        // Apply gamma only in intermediates
+                        nR = gamma8[rawR];
+                        nG = gamma8[rawG];
+                        nB = gamma8[rawB];
                     }
+                    else if (temp < (float)g_cfg.tempHigh) {
+                        // SEGMENT 2: Medium -> High
+                        ratio = (temp - (float)g_cfg.tempMed) / ((float)g_cfg.tempHigh - (float)g_cfg.tempMed);
+                        c1 = g_cfg.colorMed;
+                        c2 = g_cfg.colorHigh;
 
-                    if (status != 0) {
-                        // If MSI SDK fails, trigger Watchdog Reset
-                        Log("[MysticFight] SDK Call failed (SetColor). Triggering Reset...");
-                        g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0;
+                        double r1 = (double)GetRValue(c1);
+                        double g1 = (double)GetGValue(c1);
+                        double b1 = (double)GetBValue(c1);
+
+                        double r2 = (double)GetRValue(c2);
+                        double g2 = (double)GetGValue(c2);
+                        double b2 = (double)GetBValue(c2);
+
+                        DWORD rawR = (DWORD)sqrt(r1 * r1 * (1.0 - ratio) + r2 * r2 * ratio);
+                        DWORD rawG = (DWORD)sqrt(g1 * g1 * (1.0 - ratio) + g2 * g2 * ratio);
+                        DWORD rawB = (DWORD)sqrt(b1 * b1 * (1.0 - ratio) + b2 * b2 * ratio);
+
+                        // Apply gamma only in intermediates
+                        nR = gamma8[rawR];
+                        nG = gamma8[rawG];
+                        nB = gamma8[rawB];
                     }
                     else {
-                        lastR = nR; lastG = nG; lastB = nB;
+                        // Solid High Color: pure, no gamma
+                        nR = GetRValue(g_cfg.colorHigh);
+                        nG = GetGValue(g_cfg.colorHigh);
+                        nB = GetBValue(g_cfg.colorHigh);
+                    }
+
+                    // --- HARDWARE UPDATE ---
+                    // Only send command if color changed
+                    if (nR != lastR || nG != lastG || nB != lastB) {
+
+                        // Ensure Steady style on startup/refresh
+                        if (lastR >= RGB_LED_REFRESH) {
+                            if (lpMLAPI_SetLedStyle)
+                                status = lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrSteady);
+                        }
+
+                        if (status == 0 && lpMLAPI_SetLedColor) {
+                            status = lpMLAPI_SetLedColor(g_target_device, g_cfg.targetLedIndex, nR, nG, nB);
+                        }
+
+                        if (status != 0) {
+                            // If MSI SDK fails, trigger Watchdog Reset
+                            Log("[MysticFight] SDK Call failed (SetColor). Triggering Reset...");
+                            g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0;
+                        }
+                        else {
+                            lastR = nR; lastG = nG; lastB = nB;
+                        }
                     }
                 }
             }
@@ -1967,6 +1975,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     InitWMI();
                 }
             }
+
+
+
         }
 
         // 4. OFF MODE (User disabled LEDs via Hotkey)
