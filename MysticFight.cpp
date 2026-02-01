@@ -33,7 +33,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.25";
+const wchar_t* APP_VERSION = L"v2.26";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -1860,16 +1860,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
                     lastTemp = temp;
 
+                    // --- COLOR CALCULATION (RMS + Gamma) ---
+
                     float ratio = 0.0f;
                     COLORREF c1 = 0, c2 = 0;
-
-                    // --- COLOR CALCULATION (RMS + Gamma only in intermediates, pure extremes) ---
+                    DWORD rawR, rawG, rawB;
 
                     if (temp <= (float)g_cfg.tempLow) {
-                        // Solid Low Color: pure, no gamma
-                        nR = GetRValue(g_cfg.colorLow);
-                        nG = GetGValue(g_cfg.colorLow);
-                        nB = GetBValue(g_cfg.colorLow);
+
+                        rawR = GetRValue(g_cfg.colorLow);
+                        rawG = GetGValue(g_cfg.colorLow);
+                        rawB = GetBValue(g_cfg.colorLow);
                     }
                     else if (temp < (float)g_cfg.tempMed) {
                         // SEGMENT 1: Low -> Medium
@@ -1885,14 +1886,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                         double g2 = (double)GetGValue(c2);
                         double b2 = (double)GetBValue(c2);
 
-                        DWORD rawR = (DWORD)sqrt(r1 * r1 * (1.0 - ratio) + r2 * r2 * ratio);
-                        DWORD rawG = (DWORD)sqrt(g1 * g1 * (1.0 - ratio) + g2 * g2 * ratio);
-                        DWORD rawB = (DWORD)sqrt(b1 * b1 * (1.0 - ratio) + b2 * b2 * ratio);
+                        rawR = (DWORD)sqrt(r1 * r1 * (1.0 - ratio) + r2 * r2 * ratio);
+                        rawG = (DWORD)sqrt(g1 * g1 * (1.0 - ratio) + g2 * g2 * ratio);
+                        rawB = (DWORD)sqrt(b1 * b1 * (1.0 - ratio) + b2 * b2 * ratio);
 
-                        // Apply gamma only in intermediates
-                        nR = gamma8[rawR];
-                        nG = gamma8[rawG];
-                        nB = gamma8[rawB];
                     }
                     else if (temp < (float)g_cfg.tempHigh) {
                         // SEGMENT 2: Medium -> High
@@ -1908,21 +1905,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                         double g2 = (double)GetGValue(c2);
                         double b2 = (double)GetBValue(c2);
 
-                        DWORD rawR = (DWORD)sqrt(r1 * r1 * (1.0 - ratio) + r2 * r2 * ratio);
-                        DWORD rawG = (DWORD)sqrt(g1 * g1 * (1.0 - ratio) + g2 * g2 * ratio);
-                        DWORD rawB = (DWORD)sqrt(b1 * b1 * (1.0 - ratio) + b2 * b2 * ratio);
-
-                        // Apply gamma only in intermediates
-                        nR = gamma8[rawR];
-                        nG = gamma8[rawG];
-                        nB = gamma8[rawB];
+                        rawR = (DWORD)sqrt(r1 * r1 * (1.0 - ratio) + r2 * r2 * ratio);
+                        rawG = (DWORD)sqrt(g1 * g1 * (1.0 - ratio) + g2 * g2 * ratio);
+                        rawB = (DWORD)sqrt(b1 * b1 * (1.0 - ratio) + b2 * b2 * ratio);
                     }
                     else {
                         // Solid High Color: pure, no gamma
-                        nR = GetRValue(g_cfg.colorHigh);
-                        nG = GetGValue(g_cfg.colorHigh);
-                        nB = GetBValue(g_cfg.colorHigh);
+                        rawR = GetRValue(g_cfg.colorHigh);
+                        rawG = GetGValue(g_cfg.colorHigh);
+                        rawB = GetBValue(g_cfg.colorHigh);
                     }
+
+                    //Gamma correction
+                    nR = gamma8[rawR];
+                    nG = gamma8[rawG];
+                    nB = gamma8[rawB];
 
                     // --- HARDWARE UPDATE ---
                     // Only send command if color changed
