@@ -16,7 +16,7 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * **VERY Lightweight:** No heavy dashboards; just a simple tray app that stays out of your way.
 * **Customizable Device and LED area:** Choose the one you prefer (WARNING: The SDK may not recognise all areas available on the device until it is updated).
 * **Customizable Temperature Sensor:** Choose the one you prefer.
-* **Customizable Temperature and Colors Thresholds:** LERP RGB algorithm.
+* **Customizable Temperature and Colors Thresholds:** Gamma Corrected / RMS + LED Boost.
 * **Night-Mode with Global Hotkey:** `Ctrl + Alt + Shift + L` to power-off/on LEDs instantly.
   <p align="center"><img src="mf_settings.png" /></p>
   
