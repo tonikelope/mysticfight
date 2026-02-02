@@ -33,7 +33,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.38";
+const wchar_t* APP_VERSION = L"v2.39";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -46,10 +46,12 @@ const DWORD RGB_LEDS_OFF = 1000;     // Signals that the hardware is currently i
 const ULONGLONG MAIN_LOOP_DELAY_MS = 50;        // Animation speed (20 FPS). User requested 50ms.
 const ULONGLONG SENSOR_POLL_INTERVAL_MS = 500;  // How often we check the Sensor (Temperature)
 const float SMOOTHING_FACTOR = 0.06f;           // Interpolation speed (0.01 = Slow, 1.0 = Instant). 0.06 is balanced.
+const ULONGLONG LAG_COMPENSATION_THRESHOLD_MS = 150; // NEW: Max allowed sensor time before snapping
 
 const ULONGLONG LHM_RETRY_DELAY_MS = 5000;      // Cooldown before retrying WMI connection
 const ULONGLONG RESET_KILL_TASK_WAIT_MS = 2000; // Watchdog: Time to wait after killing processes
 const ULONGLONG RESET_RESTART_TASK_DELAY_MS = 5000; // Watchdog: Time to wait after restarting service
+const int WINHTTP_TIMEOUT_MS = 30000;            // NEW: HTTP Timeout (2s for stability under load)
 
 // Buffer Sizes
 const int HEX_COLOR_LEN = 7;
@@ -123,8 +125,7 @@ static std::string FetchLHMJson() {
     hSession = WinHttpOpen(L"MysticFight/2.3", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return "";
 
-    // Evita que la app se cuelgue si LHM no responde rápido (500ms es suficiente para localhost)
-    WinHttpSetTimeouts(hSession, 500, 500, 500, 500);
+    WinHttpSetTimeouts(hSession, WINHTTP_TIMEOUT_MS, WINHTTP_TIMEOUT_MS, WINHTTP_TIMEOUT_MS, WINHTTP_TIMEOUT_MS);
 
     std::wstring host(urlComp.lpszHostName, urlComp.dwHostNameLength);
     hConnect = WinHttpConnect(hSession, host.c_str(), urlComp.nPort, 0);
@@ -1683,7 +1684,7 @@ static bool AutoSelectFirstSensor() {
 }
 
 // =============================================================
-// MAIN ENTRY POINT (CORREGIDO Y BLINDADO)
+// MAIN ENTRY POINT
 // =============================================================
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
 
@@ -1812,10 +1813,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // "Target" Integer values (Where we want to go based on Temperature)
     DWORD targetR = 0, targetG = 0, targetB = 0;
 
-    // FIX: Eliminamos las variables locales "lastSentR" para usar las GLOBALES (lastR)
-    // Esto permite que el diálogo de configuración fuerce un refresco real.
-    // Usaremos lastR, lastG, lastB definidos arriba del todo.
-
     // Timer state for Sensor reading
     ULONGLONG lastSensorReadTime = 0;
 
@@ -1823,6 +1820,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     MSG msg = { 0 };
     bool lhmAlive = true;  // Tracks if data source is healthy
     bool firstRun = true;  // Used to snap color instantly on startup (no fade in from black)
+    bool lagDetected = false; // Flag for lag compensation
 
     // =============================================================
     // MAIN APPLICATION LOOP
@@ -1883,17 +1881,37 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             // =========================================================
             if (currentTime - lastSensorReadTime >= SENSOR_POLL_INTERVAL_MS || firstRun) {
 
-                lastSensorReadTime = currentTime;
-
-                // Read temperature from currently active source
+                // TIMING CHECK FOR LAG COMPENSATION
+                ULONGLONG readStart = GetTickCount64();
                 float rawTemp = GetCPUTempFast();
+                ULONGLONG readEnd = GetTickCount64();
+
+                // If reading took > LAG_COMPENSATION_THRESHOLD_MS, enable snap mode
+                if ((readEnd - readStart) > LAG_COMPENSATION_THRESHOLD_MS) {
+                    
+                    if(!lagDetected)
+                        Log("[MysticFight] Sensor LAG DETECTED (smooth interpolation disabled).");
+
+                    lagDetected = true;
+
+                }
+                else {
+
+                    if(lagDetected)
+                        Log("[MysticFight] Sensor latency normal (smooth interpolation re-enabled).");
+
+                    lagDetected = false;
+
+                }
+
+                lastSensorReadTime = currentTime;
 
                 if (rawTemp >= 0.0f) {
                     // RECOVERY: If we were disconnected, restore state
                     if (!lhmAlive) {
                         lhmAlive = true;
                         Log("[MysticFight] Connection established/recovered.");
-                        if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrSteady);
+                        lastR = RGB_LED_REFRESH;
                     }
 
                     // Round 0.5ºC (50.0, 50.5, 51.0...)
@@ -1977,11 +1995,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             // Runs every MAIN_LOOP_DELAY_MS (e.g., 50ms)
             // =========================================================
             if (lhmAlive) {
-                // 1. Math: Move 'Current' towards 'Target' by the Smoothing Factor
-                // Formula: current = current + (target - current) * 0.06
-                currR += ((float)targetR - currR) * SMOOTHING_FACTOR;
-                currG += ((float)targetG - currG) * SMOOTHING_FACTOR;
-                currB += ((float)targetB - currB) * SMOOTHING_FACTOR;
+                // 1. Math: Move 'Current' towards 'Target'
+                if (lagDetected) {
+                    // LAG COMPENSATION: Snap directly to target if lagging
+                    currR = (float)targetR;
+                    currG = (float)targetG;
+                    currB = (float)targetB;
+                }
+                else {
+                    // NORMAL OPERATION: Smooth interpolation
+                    currR += ((float)targetR - currR) * SMOOTHING_FACTOR;
+                    currG += ((float)targetG - currG) * SMOOTHING_FACTOR;
+                    currB += ((float)targetB - currB) * SMOOTHING_FACTOR;
+                }
 
                 // 2. Convert Float to Int for Hardware
                 DWORD sendR = (DWORD)currR;
