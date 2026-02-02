@@ -33,7 +33,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.32";
+const wchar_t* APP_VERSION = L"v2.33";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -483,6 +483,34 @@ static void SetRunAtStartup(bool run) {
     }
 }
 
+// Safely extracts integers from SafeArray variants.
+static int GetIntFromSafeArray(void* pRawData, VARTYPE vt, int index) {
+    if (!pRawData) return 0;
+
+    switch (vt) {
+    case VT_BSTR: {
+        BSTR* pBstrArray = (BSTR*)pRawData;
+        return _wtoi(pBstrArray[index]);
+    }
+    case VT_I4:
+    case VT_INT: {
+        long* pLongArray = (long*)pRawData;
+        return (int)pLongArray[index];
+    }
+    case VT_UI4:
+    case VT_UINT: {
+        unsigned int* pULongArray = (unsigned int*)pRawData;
+        return (int)pULongArray[index];
+    }
+    case VT_I2: {
+        short* pShortArray = (short*)pRawData;
+        return (int)pShortArray[index];
+    }
+    default:
+        return 0; // Unsupported Type
+    }
+}
+
 // Verifies if the scheduled task exists and points to the current executable.
 static bool IsTaskValid() {
     wchar_t szCurrentPath[MAX_PATH];
@@ -613,37 +641,81 @@ void LoadSettings() {
 }
 
 
-// Populates the Area list based on the selected hardware device.
 void PopulateAreaList(HWND hDlg, const wchar_t* deviceType) {
     HWND hComboArea = GetDlgItem(hDlg, IDC_COMBO_AREA);
     SendMessage(hComboArea, CB_RESETCONTENT, 0, 0);
 
-    if (!deviceType || !lpMLAPI_GetLedInfo) return;
-
-    for (DWORD i = 0; i < 64; i++) {
-        BSTR ledName = nullptr;
-        SAFEARRAY* pStyles = nullptr;
-        if (lpMLAPI_GetLedInfo((BSTR)deviceType, i, &ledName, &pStyles) == 0) {
-            int idx = (int)SendMessageW(hComboArea, CB_ADDSTRING, 0, (LPARAM)(ledName ? ledName : L"Unknown Area"));
-            SendMessage(hComboArea, CB_SETITEMDATA, idx, (LPARAM)i);
-            if (i == (DWORD)g_cfg.targetLedIndex) SendMessage(hComboArea, CB_SETCURSEL, idx, 0);
-            if (pStyles) SafeArrayDestroy(pStyles);
-            if (ledName) SysFreeString(ledName);
-        }
-        else break;
-    }
-    if (SendMessage(hComboArea, CB_GETCURSEL, 0, 0) == CB_ERR && SendMessage(hComboArea, CB_GETCOUNT, 0, 0) > 0)
-        SendMessage(hComboArea, CB_SETCURSEL, 0, 0);
-    int count = (int)SendMessage(hComboArea, CB_GETCOUNT, 0, 0);
-
-    if (count <= 1) {
-        // Si hay 1 o 0 áreas, seleccionamos la primera y desactivamos el control
-        if (count == 1) SendMessage(hComboArea, CB_SETCURSEL, 0, 0);
+    if (!deviceType || !lpMLAPI_GetLedInfo || !lpMLAPI_GetDeviceInfo) {
         EnableWindow(hComboArea, FALSE);
+        return;
+    }
+
+    // --- OBTENER EL CONTEO REAL DE LEDS PARA ESTE DISPOSITIVO ---
+    SAFEARRAY* pDevType = nullptr;
+    SAFEARRAY* pLedCount = nullptr;
+    int currentDeviceLedCount = 0;
+
+    if (lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0 && pDevType && pLedCount) {
+        BSTR* pTypes = nullptr;
+        void* pCountsRaw = nullptr;
+        VARTYPE vtCount;
+        SafeArrayGetVartype(pLedCount, &vtCount);
+
+        if (SUCCEEDED(SafeArrayAccessData(pDevType, (void**)&pTypes)) &&
+            SUCCEEDED(SafeArrayAccessData(pLedCount, &pCountsRaw))) {
+
+            long lBound, uBound;
+            SafeArrayGetLBound(pDevType, 1, &lBound);
+            SafeArrayGetUBound(pDevType, 1, &uBound);
+            long totalDevices = uBound - lBound + 1;
+
+            // Buscamos el índice del dispositivo actual para sacar su LedCount
+            for (long j = 0; j < totalDevices; j++) {
+                if (wcscmp(pTypes[j], deviceType) == 0) {
+                    currentDeviceLedCount = GetIntFromSafeArray(pCountsRaw, vtCount, j);
+                    break;
+                }
+            }
+            SafeArrayUnaccessData(pDevType);
+            SafeArrayUnaccessData(pLedCount);
+        }
+        SafeArrayDestroy(pDevType);
+        SafeArrayDestroy(pLedCount);
+
+
+        // Si no detectamos LEDs, usamos una búsqueda de seguridad o salimos
+        if (currentDeviceLedCount <= 0) currentDeviceLedCount = 0;
+
+        // --- LLENAR EL COMBOBOX CON EL CONTEO REAL ---
+        for (DWORD i = 0; i < (DWORD)currentDeviceLedCount; i++) {
+            BSTR ledName = nullptr;
+            SAFEARRAY* pStyles = nullptr;
+            if (lpMLAPI_GetLedInfo((BSTR)deviceType, i, &ledName, &pStyles) == 0) {
+                int idx = (int)SendMessageW(hComboArea, CB_ADDSTRING, 0, (LPARAM)(ledName ? ledName : L"Unknown Area"));
+                SendMessage(hComboArea, CB_SETITEMDATA, idx, (LPARAM)i);
+                if (i == (DWORD)g_cfg.targetLedIndex) SendMessage(hComboArea, CB_SETCURSEL, idx, 0);
+
+                if (pStyles) SafeArrayDestroy(pStyles);
+                if (ledName) SysFreeString(ledName);
+            }
+        }
+
+        // --- LÓGICA DE ACTIVACIÓN/DESACTIVACIÓN (UX) ---
+        int finalCount = (int)SendMessage(hComboArea, CB_GETCOUNT, 0, 0);
+
+        if (finalCount <= 1) {
+            if (finalCount == 1) SendMessage(hComboArea, CB_SETCURSEL, 0, 0);
+            EnableWindow(hComboArea, FALSE);
+        }
+        else {
+            if (SendMessage(hComboArea, CB_GETCURSEL, 0, 0) == CB_ERR)
+                SendMessage(hComboArea, CB_SETCURSEL, 0, 0);
+            EnableWindow(hComboArea, TRUE);
+        }
     }
     else {
-        // Si hay múltiples áreas, nos aseguramos de que esté activado
-        EnableWindow(hComboArea, TRUE);
+        EnableWindow(hComboArea, FALSE);
+        Log("[MysticFight] [Settings - PopulateAreaList] SDK Error or No MSI Devices found.");
     }
 }
 
@@ -674,8 +746,25 @@ void PopulateDeviceList(HWND hDlg) {
         SafeArrayUnaccessData(pDevType);
         SafeArrayDestroy(pDevType);
         SafeArrayDestroy(pLedCount);
+        
         if (SendMessage(hComboDev, CB_GETCURSEL, 0, 0) == CB_ERR && SendMessage(hComboDev, CB_GETCOUNT, 0, 0) > 0)
             SendMessage(hComboDev, CB_SETCURSEL, 0, 0);
+
+        // --- LÓGICA DE ACTIVACIÓN/DESACTIVACIÓN (UX) ---
+        int finalCount = (int)SendMessage(hComboDev, CB_GETCOUNT, 0, 0);
+        if (finalCount <= 1) {
+            if (finalCount == 1) SendMessage(hComboDev, CB_SETCURSEL, 0, 0);
+            EnableWindow(hComboDev, FALSE);
+        }
+        else {
+            if (SendMessage(hComboDev, CB_GETCURSEL, 0, 0) == CB_ERR)
+                SendMessage(hComboDev, CB_SETCURSEL, 0, 0);
+            EnableWindow(hComboDev, TRUE);
+        }
+    }
+    else {
+        EnableWindow(hComboDev, FALSE);
+        Log("[MysticFight] [Settings - PopulateDeviceList] SDK Error or No MSI Devices found.");
     }
 }
 
@@ -1431,33 +1520,7 @@ static void ShowNotification(HWND hWnd, HINSTANCE hInstance, const wchar_t* titl
     Shell_NotifyIcon(NIM_MODIFY, &nid);
 }
 
-// Safely extracts integers from SafeArray variants.
-static int GetIntFromSafeArray(void* pRawData, VARTYPE vt, int index) {
-    if (!pRawData) return 0;
 
-    switch (vt) {
-    case VT_BSTR: {
-        BSTR* pBstrArray = (BSTR*)pRawData;
-        return _wtoi(pBstrArray[index]);
-    }
-    case VT_I4:
-    case VT_INT: {
-        long* pLongArray = (long*)pRawData;
-        return (int)pLongArray[index];
-    }
-    case VT_UI4:
-    case VT_UINT: {
-        unsigned int* pULongArray = (unsigned int*)pRawData;
-        return (int)pULongArray[index];
-    }
-    case VT_I2: {
-        short* pShortArray = (short*)pRawData;
-        return (int)pShortArray[index];
-    }
-    default:
-        return 0; // Unsupported Type
-    }
-}
 
 // Extracts embedded MSI DLL resource to disk.
 static bool ExtractMSIDLL() {
