@@ -33,7 +33,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.31";
+const wchar_t* APP_VERSION = L"v2.32";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -634,6 +634,17 @@ void PopulateAreaList(HWND hDlg, const wchar_t* deviceType) {
     }
     if (SendMessage(hComboArea, CB_GETCURSEL, 0, 0) == CB_ERR && SendMessage(hComboArea, CB_GETCOUNT, 0, 0) > 0)
         SendMessage(hComboArea, CB_SETCURSEL, 0, 0);
+    int count = (int)SendMessage(hComboArea, CB_GETCOUNT, 0, 0);
+
+    if (count <= 1) {
+        // Si hay 1 o 0 áreas, seleccionamos la primera y desactivamos el control
+        if (count == 1) SendMessage(hComboArea, CB_SETCURSEL, 0, 0);
+        EnableWindow(hComboArea, FALSE);
+    }
+    else {
+        // Si hay múltiples áreas, nos aseguramos de que esté activado
+        EnableWindow(hComboArea, TRUE);
+    }
 }
 
 // Populates the list of MSI devices detected by the SDK.
