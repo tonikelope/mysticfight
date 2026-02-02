@@ -33,7 +33,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.35";
+const wchar_t* APP_VERSION = L"v2.36";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -108,7 +108,6 @@ static std::string FetchLHMJson() {
     HINTERNET hSession = NULL, hConnect = NULL, hRequest = NULL;
     URL_COMPONENTS urlComp = { sizeof(URL_COMPONENTS) };
 
-    // Configurar componentes para parsear la URL de la configuración
     urlComp.dwHostNameLength = (DWORD)-1;
     urlComp.dwUrlPathLength = (DWORD)-1;
     urlComp.dwExtraInfoLength = (DWORD)-1;
@@ -118,17 +117,16 @@ static std::string FetchLHMJson() {
         return "";
     }
 
-    hSession = WinHttpOpen(L"MysticFight/2.2", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    hSession = WinHttpOpen(L"MysticFight/2.3", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return "";
 
+    // Evita que la app se cuelgue si LHM no responde rápido (500ms es suficiente para localhost)
     WinHttpSetTimeouts(hSession, 500, 500, 500, 500);
 
-    // Usar el host y puerto extraídos de la URL
     std::wstring host(urlComp.lpszHostName, urlComp.dwHostNameLength);
     hConnect = WinHttpConnect(hSession, host.c_str(), urlComp.nPort, 0);
 
     if (hConnect) {
-        // Combinar el path de la URL con el endpoint /data.json
         std::wstring path = std::wstring(urlComp.lpszUrlPath, urlComp.dwUrlPathLength) + L"/data.json";
         hRequest = WinHttpOpenRequest(hConnect, L"GET", path.c_str(), NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
 
@@ -136,14 +134,13 @@ static std::string FetchLHMJson() {
             WinHttpReceiveResponse(hRequest, NULL)) {
 
             DWORD dwSize = 0, dwDownloaded = 0;
-            do {
-                if (!WinHttpQueryDataAvailable(hRequest, &dwSize) || dwSize == 0) break;
-                char* pszOutBuffer = new char[dwSize + 1];
-                if (WinHttpReadData(hRequest, (LPVOID)pszOutBuffer, dwSize, &dwDownloaded)) {
-                    responseData.append(pszOutBuffer, dwDownloaded);
+            // Bucle optimizado con vector para seguridad de memoria
+            while (WinHttpQueryDataAvailable(hRequest, &dwSize) && dwSize > 0) {
+                std::vector<char> buffer(dwSize);
+                if (WinHttpReadData(hRequest, (LPVOID)buffer.data(), dwSize, &dwDownloaded)) {
+                    responseData.append(buffer.data(), dwDownloaded);
                 }
-                delete[] pszOutBuffer;
-            } while (dwSize > 0);
+            }
         }
     }
 
@@ -1408,9 +1405,6 @@ static float GetCPUTempFast() {
             Log("[MysticFight] WMI Service not available. Trying HTTP...");
         }
 
-        g_pSvc = nullptr;
-        g_pLoc = nullptr;
-        
         // B) Try HTTP Second (if WMI failed)
         std::string json = FetchLHMJson();
         
@@ -1420,6 +1414,8 @@ static float GetCPUTempFast() {
                 // SUCCESS: Lock onto HTTP
                 g_activeSource = DataSource::HTTP;
                 Log("[MysticFight] Source detected: HTTP (Locked).");
+                g_pSvc = nullptr;
+                g_pLoc = nullptr;
                 return temp;
             }
             else {
