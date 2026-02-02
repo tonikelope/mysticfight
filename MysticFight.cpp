@@ -33,7 +33,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.28";
+const wchar_t* APP_VERSION = L"v2.29";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -1757,11 +1757,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     _bstr_t bstrOff(L"Off");
     _bstr_t bstrBreath(L"Breath");
     _bstr_t bstrSteady(L"Steady");
-
-    // Initialize "Steady" style if hardware is ready
-    if (g_deviceName != NULL && lpMLAPI_SetLedStyle) {
-        lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
-    }
 
     DWORD nR = 0, nG = 0, nB = 0;
 
