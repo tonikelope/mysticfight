@@ -14,6 +14,8 @@
 #include <exdisp.h>
 #include <winhttp.h>
 #include <algorithm>
+#include <thread>
+#include <atomic>
 #include "resource.h"
 
 #pragma comment(lib, "wbemuuid.lib")
@@ -33,7 +35,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.39";
+const wchar_t* APP_VERSION = L"v2.40";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -46,12 +48,11 @@ const DWORD RGB_LEDS_OFF = 1000;     // Signals that the hardware is currently i
 const ULONGLONG MAIN_LOOP_DELAY_MS = 50;        // Animation speed (20 FPS). User requested 50ms.
 const ULONGLONG SENSOR_POLL_INTERVAL_MS = 500;  // How often we check the Sensor (Temperature)
 const float SMOOTHING_FACTOR = 0.06f;           // Interpolation speed (0.01 = Slow, 1.0 = Instant). 0.06 is balanced.
-const ULONGLONG LAG_COMPENSATION_THRESHOLD_MS = 150; // NEW: Max allowed sensor time before snapping
 
 const ULONGLONG LHM_RETRY_DELAY_MS = 5000;      // Cooldown before retrying WMI connection
 const ULONGLONG RESET_KILL_TASK_WAIT_MS = 2000; // Watchdog: Time to wait after killing processes
 const ULONGLONG RESET_RESTART_TASK_DELAY_MS = 5000; // Watchdog: Time to wait after restarting service
-const int WINHTTP_TIMEOUT_MS = 30000;            // NEW: HTTP Timeout (2s for stability under load)
+const ULONGLONG WINHTTP_TIMEOUT_MS = 60000;
 
 // Buffer Sizes
 const int HEX_COLOR_LEN = 7;
@@ -237,6 +238,9 @@ bool g_pathCached = false;
 bool g_Running = true;
 bool g_LedsEnabled = true;
 
+std::atomic<float> g_asyncTemp(-1.0f);
+HANDLE g_hSensorEvent = NULL;
+
 // Watchdog & Timing State
 ULONGLONG g_ResetTimer = 0;
 bool g_Resetting_sdk = false;
@@ -267,6 +271,7 @@ LPMLAPI_SetLedSpeed lpMLAPI_SetLedSpeed = nullptr;
 LPMLAPI_Release lpMLAPI_Release = nullptr;
 LPMLAPI_GetDeviceNameEx lpMLAPI_GetDeviceNameEx = nullptr;
 LPMLAPI_GetLedInfo lpMLAPI_GetLedInfo = nullptr;
+
 
 // =============================================================
 // UTILITY FUNCTIONS
@@ -1434,6 +1439,21 @@ static float GetCPUTempFast() {
     return -1.0f;
 }
 
+static void SensorThread() {
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+
+    while (g_Running) {
+        float temp = GetCPUTempFast();
+        g_asyncTemp.store(temp);
+
+        // Espera de forma eficiente. Se despierta si pasan 500ms 
+        // O si señalizamos el evento g_hSensorEvent al cerrar.
+        WaitForSingleObject(g_hSensorEvent, (DWORD)SENSOR_POLL_INTERVAL_MS);
+    }
+
+    CoUninitialize();
+}
+
 // Dumps all available temperature sensors to the log file
 // Adapts automatically to the active source (WMI or HTTP)
 static void LogAllLHMTemperatureSensors() {
@@ -1820,7 +1840,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     MSG msg = { 0 };
     bool lhmAlive = true;  // Tracks if data source is healthy
     bool firstRun = true;  // Used to snap color instantly on startup (no fade in from black)
-    bool lagDetected = false; // Flag for lag compensation
+
+    g_hSensorEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+    std::thread sThread(SensorThread);
+    sThread.detach();
 
     // =============================================================
     // MAIN APPLICATION LOOP
@@ -1881,29 +1904,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             // =========================================================
             if (currentTime - lastSensorReadTime >= SENSOR_POLL_INTERVAL_MS || firstRun) {
 
-                // TIMING CHECK FOR LAG COMPENSATION
-                ULONGLONG readStart = GetTickCount64();
-                float rawTemp = GetCPUTempFast();
-                ULONGLONG readEnd = GetTickCount64();
-
-                // If reading took > LAG_COMPENSATION_THRESHOLD_MS, enable snap mode
-                if ((readEnd - readStart) > LAG_COMPENSATION_THRESHOLD_MS) {
-                    
-                    if(!lagDetected)
-                        Log("[MysticFight] Sensor LAG DETECTED (smooth interpolation disabled).");
-
-                    lagDetected = true;
-
-                }
-                else {
-
-                    if(lagDetected)
-                        Log("[MysticFight] Sensor latency normal (smooth interpolation re-enabled).");
-
-                    lagDetected = false;
-
-                }
-
+                float rawTemp = g_asyncTemp.load();
+                
                 lastSensorReadTime = currentTime;
 
                 if (rawTemp >= 0.0f) {
@@ -1971,24 +1973,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                         currB = (float)targetB;
                         firstRun = false;
                     }
-
                 }
-                else {
-                    // ERROR HANDLING: If reading failed
-                    if (lhmAlive) {
-                        lhmAlive = false;
-                        Log("[MysticFight] Data source disconnected or invalid.");
-
-                        // Set "Error Mode" (Breath White)
-                        if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrBreath);
-                        if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_target_device, g_cfg.targetLedIndex, 255, 255, 255);
-
-                        // Force refresh so next valid read sets style back to Steady
-                        lastR = RGB_LED_REFRESH;
-                    }
-                    g_activeSource = DataSource::Searching; // Unlock source to try others
-                }
-            } // End Sensor Polling Block
+            }
 
             // =========================================================
             // B. INTERPOLATION & RENDER
@@ -1996,19 +1982,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             // =========================================================
             if (lhmAlive) {
                 // 1. Math: Move 'Current' towards 'Target'
-                if (lagDetected) {
-                    // LAG COMPENSATION: Snap directly to target if lagging
-                    currR = (float)targetR;
-                    currG = (float)targetG;
-                    currB = (float)targetB;
-                }
-                else {
-                    // NORMAL OPERATION: Smooth interpolation
-                    currR += ((float)targetR - currR) * SMOOTHING_FACTOR;
-                    currG += ((float)targetG - currG) * SMOOTHING_FACTOR;
-                    currB += ((float)targetB - currB) * SMOOTHING_FACTOR;
-                }
-
+                
+                currR += ((float)targetR - currR) * SMOOTHING_FACTOR;
+                currG += ((float)targetG - currG) * SMOOTHING_FACTOR;
+                currB += ((float)targetB - currB) * SMOOTHING_FACTOR;
+                
                 // 2. Convert Float to Int for Hardware
                 DWORD sendR = (DWORD)currR;
                 DWORD sendG = (DWORD)currG;
@@ -2062,6 +2040,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         // This controls the animation speed (e.g., 50ms)
         MsgWaitForMultipleObjects(0, NULL, FALSE, (DWORD)MAIN_LOOP_DELAY_MS, QS_ALLINPUT);
     }
+
+    SetEvent(g_hSensorEvent);
 
     // --- 4. CLEANUP ---
     FinalCleanup(hWnd);
