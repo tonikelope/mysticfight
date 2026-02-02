@@ -33,7 +33,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.37";
+const wchar_t* APP_VERSION = L"v2.38";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -1683,7 +1683,7 @@ static bool AutoSelectFirstSensor() {
 }
 
 // =============================================================
-// MAIN ENTRY POINT
+// MAIN ENTRY POINT (CORREGIDO Y BLINDADO)
 // =============================================================
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
 
@@ -1729,12 +1729,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     Log(versionMsg);
 
     LoadSettings();
-    g_target_device=g_cfg.targetDevice;
+    g_target_device = g_cfg.targetDevice;
 
-    wchar_t hL[10], hH[10], hA[10];
+    wchar_t hL[10], hM[10], hH[10];
     ColorToHex(g_cfg.colorLow, hL, 10);
-    ColorToHex(g_cfg.colorMed, hH, 10);
-    ColorToHex(g_cfg.colorHigh, hA, 10);
+    ColorToHex(g_cfg.colorMed, hM, 10);
+    ColorToHex(g_cfg.colorHigh, hH, 10);
 
     char startupCfg[LOG_BUFFER_SIZE];
     snprintf(startupCfg, sizeof(startupCfg),
@@ -1743,8 +1743,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         g_cfg.targetLedIndex,
         g_cfg.sensorID,
         g_cfg.tempLow, hL,
-        g_cfg.tempMed, hH,
-        g_cfg.tempHigh, hA
+        g_cfg.tempMed, hM,
+        g_cfg.tempHigh, hH
     );
     Log(startupCfg);
 
@@ -1812,10 +1812,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // "Target" Integer values (Where we want to go based on Temperature)
     DWORD targetR = 0, targetG = 0, targetB = 0;
 
-    // Hardware tracking (Stores the last value actually sent to the SDK to avoid spam)
-    DWORD lastSentR = RGB_LED_REFRESH;
-    DWORD lastSentG = RGB_LED_REFRESH;
-    DWORD lastSentB = RGB_LED_REFRESH;
+    // FIX: Eliminamos las variables locales "lastSentR" para usar las GLOBALES (lastR)
+    // Esto permite que el diálogo de configuración fuerce un refresco real.
+    // Usaremos lastR, lastG, lastB definidos arriba del todo.
 
     // Timer state for Sensor reading
     ULONGLONG lastSensorReadTime = 0;
@@ -1868,7 +1867,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     g_Resetting_sdk = false;
 
                     // IMPORTANT: Force hardware refresh after reset
-                    lastSentR = RGB_LED_REFRESH;
+                    lastR = RGB_LED_REFRESH; // Usamos la global
                     firstRun = true;
                     break;
                 }
@@ -1911,6 +1910,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     }
                     else if (temp < (float)g_cfg.tempMed) {
                         ratio = (temp - (float)g_cfg.tempLow) / ((float)g_cfg.tempMed - (float)g_cfg.tempLow);
+
+                        // FIX: Clamp ratio to prevent SQRT domain error (CRASH FIX)
+                        if (ratio < 0.0f) ratio = 0.0f;
+                        if (ratio > 1.0f) ratio = 1.0f;
+
                         c1 = g_cfg.colorLow; c2 = g_cfg.colorMed;
 
                         double r1 = (double)GetRValue(c1); double g1 = (double)GetGValue(c1); double b1 = (double)GetBValue(c1);
@@ -1922,6 +1926,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     }
                     else if (temp < (float)g_cfg.tempHigh) {
                         ratio = (temp - (float)g_cfg.tempMed) / ((float)g_cfg.tempHigh - (float)g_cfg.tempMed);
+
+                        // FIX: Clamp ratio to prevent SQRT domain error (CRASH FIX)
+                        if (ratio < 0.0f) ratio = 0.0f;
+                        if (ratio > 1.0f) ratio = 1.0f;
+
                         c1 = g_cfg.colorMed; c2 = g_cfg.colorHigh;
 
                         double r1 = (double)GetRValue(c1); double g1 = (double)GetGValue(c1); double b1 = (double)GetBValue(c1);
@@ -1957,7 +1966,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                         if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_target_device, g_cfg.targetLedIndex, 255, 255, 255);
 
                         // Force refresh so next valid read sets style back to Steady
-                        lastSentR = RGB_LED_REFRESH;
+                        lastR = RGB_LED_REFRESH;
                     }
                     g_activeSource = DataSource::Searching; // Unlock source to try others
                 }
@@ -1980,13 +1989,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 DWORD sendB = (DWORD)currB;
 
                 // 3. Send to MSI SDK (Only if value changed visibly)
-                // This prevents spamming the controller with identical values
-                if (sendR != lastSentR || sendG != lastSentG || sendB != lastSentB) {
+                // FIX: Usamos las variables globales lastR/G/B para coordinar con el Dialog
+                if (sendR != lastR || sendG != lastG || sendB != lastB) {
 
                     int status = 0;
 
                     // Safety: Ensure we are in 'Steady' mode if we just came from 'Off'
-                    if (lastSentR == RGB_LEDS_OFF || lastSentR == RGB_LED_REFRESH) {
+                    if (lastR == RGB_LEDS_OFF || lastR == RGB_LED_REFRESH) {
                         if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrSteady);
                     }
 
@@ -2000,8 +2009,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                         g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0;
                     }
                     else {
-                        // Success: Update tracking
-                        lastSentR = sendR; lastSentG = sendG; lastSentB = sendB;
+                        // Success: Update tracking (Globals)
+                        lastR = sendR; lastG = sendG; lastB = sendB;
                     }
                 }
             }
@@ -2010,7 +2019,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         // 4. OFF MODE LOGIC
         else {
-            if (lastSentR != RGB_LEDS_OFF) {
+            if (lastR != RGB_LEDS_OFF) {
                 int status = 0;
                 if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
 
@@ -2018,7 +2027,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0;
                 }
                 else {
-                    lastSentR = RGB_LEDS_OFF;
+                    lastR = RGB_LEDS_OFF;
                 }
             }
         }
