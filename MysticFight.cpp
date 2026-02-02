@@ -33,7 +33,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.36";
+const wchar_t* APP_VERSION = L"v2.37";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -43,10 +43,13 @@ const DWORD RGB_LED_REFRESH = 999;  // Signals a mandatory style refresh (e.g., 
 const DWORD RGB_LEDS_OFF = 1000;     // Signals that the hardware is currently in the "Off" state
 
 // Timing Configuration (Milliseconds)
-const ULONGLONG MAIN_LOOP_DELAY_MS = 500;        // Tick rate for the main event loop
-const ULONGLONG LHM_RETRY_DELAY_MS = 5000;       // Cooldown before retrying WMI connection
-const ULONGLONG RESET_KILL_TASK_WAIT_MS = 2000;   // Watchdog: Time to wait after killing processes
-const ULONGLONG RESET_RESTART_TASK_DELAY_MS = 5000;   // Watchdog: Time to wait after restarting service
+const ULONGLONG MAIN_LOOP_DELAY_MS = 50;        // Animation speed (20 FPS). User requested 50ms.
+const ULONGLONG SENSOR_POLL_INTERVAL_MS = 500;  // How often we check the Sensor (Temperature)
+const float SMOOTHING_FACTOR = 0.06f;           // Interpolation speed (0.01 = Slow, 1.0 = Instant). 0.06 is balanced.
+
+const ULONGLONG LHM_RETRY_DELAY_MS = 5000;      // Cooldown before retrying WMI connection
+const ULONGLONG RESET_KILL_TASK_WAIT_MS = 2000; // Watchdog: Time to wait after killing processes
+const ULONGLONG RESET_RESTART_TASK_DELAY_MS = 5000; // Watchdog: Time to wait after restarting service
 
 // Buffer Sizes
 const int HEX_COLOR_LEN = 7;
@@ -1803,36 +1806,41 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     _bstr_t bstrBreath(L"Breath");
     _bstr_t bstrSteady(L"Steady");
 
-    DWORD nR = 0, nG = 0, nB = 0;
+    // "Current" Floating point values for smooth precision (Animation State)
+    float currR = 0.0f, currG = 0.0f, currB = 0.0f;
 
-    // Force initial update
-    lastR = RGB_LED_REFRESH;
-    lastG = RGB_LED_REFRESH;
-    lastB = RGB_LED_REFRESH;
+    // "Target" Integer values (Where we want to go based on Temperature)
+    DWORD targetR = 0, targetG = 0, targetB = 0;
 
-    float lastTemp = -1.0f;
+    // Hardware tracking (Stores the last value actually sent to the SDK to avoid spam)
+    DWORD lastSentR = RGB_LED_REFRESH;
+    DWORD lastSentG = RGB_LED_REFRESH;
+    DWORD lastSentB = RGB_LED_REFRESH;
 
+    // Timer state for Sensor reading
+    ULONGLONG lastSensorReadTime = 0;
+
+    // State flags
     MSG msg = { 0 };
-    bool lhmAlive = true; // Assume alive at start to avoid immediate error flashing
+    bool lhmAlive = true;  // Tracks if data source is healthy
+    bool firstRun = true;  // Used to snap color instantly on startup (no fade in from black)
 
     // =============================================================
     // MAIN APPLICATION LOOP
     // =============================================================
     while (g_Running) {
-        int status = 0;
-        ULONGLONG currentTime = GetTickCount64();
 
-        // 1. PROCESS WINDOW MESSAGES
+        // 1. PROCESS WINDOW MESSAGES (Standard Windows boilerplate)
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) { g_Running = false; break; }
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
-
         if (!g_Running) break;
 
-        // 2. WATCHDOG: SDK RESET STATE MACHINE
-        // (Handles cases where MSI SDK hangs or crashes)
+        ULONGLONG currentTime = GetTickCount64();
+
+        // 2. WATCHDOG: SDK RESET STATE MACHINE (Keep your existing logic mostly generic)
         if (g_Resetting_sdk) {
             if (currentTime >= g_ResetTimer) {
                 switch (g_ResetStage) {
@@ -1853,163 +1861,171 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     Log("[MysticFight] Reset Stage 2: Re-initializing SDK...");
                     if (lpMLAPI_Initialize && lpMLAPI_Initialize() == 0) {
                         MSIHwardwareDetection();
-                        // Restore Steady style after reset
+                        // Restore Steady style immediately after reset
                         if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
                     }
                     g_ResetTimer = currentTime + RESET_RESTART_TASK_DELAY_MS;
                     g_Resetting_sdk = false;
-                    lastR = RGB_LED_REFRESH; // Force repaint
+
+                    // IMPORTANT: Force hardware refresh after reset
+                    lastSentR = RGB_LED_REFRESH;
+                    firstRun = true;
                     break;
                 }
             }
         }
 
-        // 3. MAIN LOGIC (If LEDs are enabled by user)
+        // 3. MAIN LOGIC (Only if LEDs are enabled)
         else if (g_LedsEnabled) {
 
-            // Attempt to read temperature (via Locked WMI or HTTP)
-            float rawTemp = GetCPUTempFast();
+            // =========================================================
+            // A. SENSOR POLLING & TARGET CALCULATION
+            // Runs every SENSOR_POLL_INTERVAL_MS (e.g., 500ms)
+            // =========================================================
+            if (currentTime - lastSensorReadTime >= SENSOR_POLL_INTERVAL_MS || firstRun) {
 
-            // CASE A: SUCCESSFUL READ
-            if (rawTemp >= 0.0f) {
+                lastSensorReadTime = currentTime;
 
-                // If recovering from an error state
-                if (!lhmAlive) {
-                    lhmAlive = true;
-                    Log("[MysticFight] Connection established/recovered.");
+                // Read temperature from currently active source
+                float rawTemp = GetCPUTempFast();
 
-                    // Restore "Steady" mode instead of "Breath"
-                    if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+                if (rawTemp >= 0.0f) {
+                    // RECOVERY: If we were disconnected, restore state
+                    if (!lhmAlive) {
+                        lhmAlive = true;
+                        Log("[MysticFight] Connection established/recovered.");
+                        if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrSteady);
+                    }
 
-                    lastR = RGB_LED_REFRESH; // Force immediate color update
-                }
+                    // Round 0.5ºC (50.0, 50.5, 51.0...)
+                    float temp = floorf(rawTemp * 2.0f + 0.5f) / 2.0f;
 
-                float temp = floorf(rawTemp * 4.0f + 0.5f) / 4.0f; // Round to 0.25 steps
-
-                if (temp != lastTemp) {
-
-                    lastTemp = temp;
-
-                    // --- COLOR CALCULATION (RMS interpolation) ---
-
+                    // --- COLOR MATH (RMS Calculation for Target) ---
                     float ratio = 0.0f;
                     COLORREF c1 = 0, c2 = 0;
 
                     if (temp <= (float)g_cfg.tempLow) {
-
-                        nR = GetRValue(g_cfg.colorLow);
-                        nG = GetGValue(g_cfg.colorLow);
-                        nB = GetBValue(g_cfg.colorLow);
+                        targetR = GetRValue(g_cfg.colorLow);
+                        targetG = GetGValue(g_cfg.colorLow);
+                        targetB = GetBValue(g_cfg.colorLow);
                     }
                     else if (temp < (float)g_cfg.tempMed) {
-                        // SEGMENT 1: Low -> Medium
                         ratio = (temp - (float)g_cfg.tempLow) / ((float)g_cfg.tempMed - (float)g_cfg.tempLow);
-                        c1 = g_cfg.colorLow;
-                        c2 = g_cfg.colorMed;
+                        c1 = g_cfg.colorLow; c2 = g_cfg.colorMed;
 
-                        double r1 = (double)GetRValue(c1);
-                        double g1 = (double)GetGValue(c1);
-                        double b1 = (double)GetBValue(c1);
+                        double r1 = (double)GetRValue(c1); double g1 = (double)GetGValue(c1); double b1 = (double)GetBValue(c1);
+                        double r2 = (double)GetRValue(c2); double g2 = (double)GetGValue(c2); double b2 = (double)GetBValue(c2);
 
-                        double r2 = (double)GetRValue(c2);
-                        double g2 = (double)GetGValue(c2);
-                        double b2 = (double)GetBValue(c2);
-
-                        nR = (DWORD)sqrt(r1 * r1 * (1.0 - ratio) + r2 * r2 * ratio);
-                        nG = (DWORD)sqrt(g1 * g1 * (1.0 - ratio) + g2 * g2 * ratio);
-                        nB = (DWORD)sqrt(b1 * b1 * (1.0 - ratio) + b2 * b2 * ratio);
-
+                        targetR = (DWORD)sqrt(r1 * r1 * (1.0 - ratio) + r2 * r2 * ratio);
+                        targetG = (DWORD)sqrt(g1 * g1 * (1.0 - ratio) + g2 * g2 * ratio);
+                        targetB = (DWORD)sqrt(b1 * b1 * (1.0 - ratio) + b2 * b2 * ratio);
                     }
                     else if (temp < (float)g_cfg.tempHigh) {
-                        // SEGMENT 2: Medium -> High
                         ratio = (temp - (float)g_cfg.tempMed) / ((float)g_cfg.tempHigh - (float)g_cfg.tempMed);
-                        c1 = g_cfg.colorMed;
-                        c2 = g_cfg.colorHigh;
+                        c1 = g_cfg.colorMed; c2 = g_cfg.colorHigh;
 
-                        double r1 = (double)GetRValue(c1);
-                        double g1 = (double)GetGValue(c1);
-                        double b1 = (double)GetBValue(c1);
+                        double r1 = (double)GetRValue(c1); double g1 = (double)GetGValue(c1); double b1 = (double)GetBValue(c1);
+                        double r2 = (double)GetRValue(c2); double g2 = (double)GetGValue(c2); double b2 = (double)GetBValue(c2);
 
-                        double r2 = (double)GetRValue(c2);
-                        double g2 = (double)GetGValue(c2);
-                        double b2 = (double)GetBValue(c2);
-
-                        nR = (DWORD)sqrt(r1 * r1 * (1.0 - ratio) + r2 * r2 * ratio);
-                        nG = (DWORD)sqrt(g1 * g1 * (1.0 - ratio) + g2 * g2 * ratio);
-                        nB = (DWORD)sqrt(b1 * b1 * (1.0 - ratio) + b2 * b2 * ratio);
+                        targetR = (DWORD)sqrt(r1 * r1 * (1.0 - ratio) + r2 * r2 * ratio);
+                        targetG = (DWORD)sqrt(g1 * g1 * (1.0 - ratio) + g2 * g2 * ratio);
+                        targetB = (DWORD)sqrt(b1 * b1 * (1.0 - ratio) + b2 * b2 * ratio);
                     }
                     else {
-                        nR = GetRValue(g_cfg.colorHigh);
-                        nG = GetGValue(g_cfg.colorHigh);
-                        nB = GetBValue(g_cfg.colorHigh);
+                        targetR = GetRValue(g_cfg.colorHigh);
+                        targetG = GetGValue(g_cfg.colorHigh);
+                        targetB = GetBValue(g_cfg.colorHigh);
                     }
 
-                    // --- HARDWARE UPDATE ---
-                    // Only send command if color changed
-                    if (nR != lastR || nG != lastG || nB != lastB) {
-
-                        // Ensure Steady style on startup/refresh
-                        if (lastR >= RGB_LED_REFRESH) {
-                            if (lpMLAPI_SetLedStyle)
-                                status = lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrSteady);
-                        }
-
-                        if (status == 0 && lpMLAPI_SetLedColor) {
-                            status = lpMLAPI_SetLedColor(g_target_device, g_cfg.targetLedIndex, nR, nG, nB);
-                        }
-
-                        if (status != 0) {
-                            // If MSI SDK fails, trigger Watchdog Reset
-                            Log("[MysticFight] SDK Call failed (SetColor). Triggering Reset...");
-                            g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0;
-                        }
-                        else {
-                            lastR = nR; lastG = nG; lastB = nB;
-                        }
+                    // On startup, snap directly to target (skip fade-in)
+                    if (firstRun) {
+                        currR = (float)targetR;
+                        currG = (float)targetG;
+                        currB = (float)targetB;
+                        firstRun = false;
                     }
+
                 }
-            }
+                else {
+                    // ERROR HANDLING: If reading failed
+                    if (lhmAlive) {
+                        lhmAlive = false;
+                        Log("[MysticFight] Data source disconnected or invalid.");
 
-            // CASE B: READ FAILURE (Both WMI and HTTP failed)
-            else {
-                if (lhmAlive) {
-                    
-                    lhmAlive = false;
-                    
-                    Log("[MysticFight] Data source disconnected (LHM closed?).");
+                        // Set "Error Mode" (Breath White)
+                        if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrBreath);
+                        if (lpMLAPI_SetLedColor) lpMLAPI_SetLedColor(g_target_device, g_cfg.targetLedIndex, 255, 255, 255);
 
-                    // Set Error Effect (White Breathing)
-                    if (lpMLAPI_SetLedStyle)
-                        status = lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrBreath);
+                        // Force refresh so next valid read sets style back to Steady
+                        lastSentR = RGB_LED_REFRESH;
+                    }
+                    g_activeSource = DataSource::Searching; // Unlock source to try others
+                }
+            } // End Sensor Polling Block
+
+            // =========================================================
+            // B. INTERPOLATION & RENDER
+            // Runs every MAIN_LOOP_DELAY_MS (e.g., 50ms)
+            // =========================================================
+            if (lhmAlive) {
+                // 1. Math: Move 'Current' towards 'Target' by the Smoothing Factor
+                // Formula: current = current + (target - current) * 0.06
+                currR += ((float)targetR - currR) * SMOOTHING_FACTOR;
+                currG += ((float)targetG - currG) * SMOOTHING_FACTOR;
+                currB += ((float)targetB - currB) * SMOOTHING_FACTOR;
+
+                // 2. Convert Float to Int for Hardware
+                DWORD sendR = (DWORD)currR;
+                DWORD sendG = (DWORD)currG;
+                DWORD sendB = (DWORD)currB;
+
+                // 3. Send to MSI SDK (Only if value changed visibly)
+                // This prevents spamming the controller with identical values
+                if (sendR != lastSentR || sendG != lastSentG || sendB != lastSentB) {
+
+                    int status = 0;
+
+                    // Safety: Ensure we are in 'Steady' mode if we just came from 'Off'
+                    if (lastSentR == RGB_LEDS_OFF || lastSentR == RGB_LED_REFRESH) {
+                        if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrSteady);
+                    }
 
                     if (status == 0 && lpMLAPI_SetLedColor) {
-                        status = lpMLAPI_SetLedColor(g_target_device, g_cfg.targetLedIndex, 255, 255, 255);
+                        status = lpMLAPI_SetLedColor(g_target_device, g_cfg.targetLedIndex, sendR, sendG, sendB);
                     }
 
+                    if (status != 0) {
+                        // If hardware fails, trigger the Watchdog
+                        Log("[MysticFight] SDK SetColor failed. Triggering Reset...");
+                        g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0;
+                    }
+                    else {
+                        // Success: Update tracking
+                        lastSentR = sendR; lastSentG = sendG; lastSentB = sendB;
+                    }
                 }
-
-                g_activeSource = DataSource::Searching;
             }
 
-        }
+        } // End g_LedsEnabled
 
-        // 4. OFF MODE (User disabled LEDs via Hotkey)
+        // 4. OFF MODE LOGIC
         else {
-            if (lastR != RGB_LEDS_OFF) {
+            if (lastSentR != RGB_LEDS_OFF) {
+                int status = 0;
                 if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
 
                 if (status != 0) {
-                    Log("[MysticFight] SDK Call failed (SetOff). Triggering Reset...");
                     g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0;
                 }
                 else {
-                    lastR = RGB_LEDS_OFF;
+                    lastSentR = RGB_LEDS_OFF;
                 }
             }
         }
 
-        // 5. CPU CONTROL (Delay)
-        MsgWaitForMultipleObjects(0, NULL, FALSE, MAIN_LOOP_DELAY_MS, QS_ALLINPUT);
+        // 5. WAIT FOR NEXT FRAME
+        // This controls the animation speed (e.g., 50ms)
+        MsgWaitForMultipleObjects(0, NULL, FALSE, (DWORD)MAIN_LOOP_DELAY_MS, QS_ALLINPUT);
     }
 
     // --- 4. CLEANUP ---
