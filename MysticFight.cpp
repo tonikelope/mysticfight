@@ -35,7 +35,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.40";
+const wchar_t* APP_VERSION = L"v2.41";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -45,9 +45,9 @@ const DWORD RGB_LED_REFRESH = 999;  // Signals a mandatory style refresh (e.g., 
 const DWORD RGB_LEDS_OFF = 1000;     // Signals that the hardware is currently in the "Off" state
 
 // Timing Configuration (Milliseconds)
-const ULONGLONG MAIN_LOOP_DELAY_MS = 50;        // Animation speed (20 FPS). User requested 50ms.
+const ULONGLONG MAIN_LOOP_DELAY_MS = 40;        // Animation speed (25 FPS).
 const ULONGLONG SENSOR_POLL_INTERVAL_MS = 500;  // How often we check the Sensor (Temperature)
-const float SMOOTHING_FACTOR = 0.06f;           // Interpolation speed (0.01 = Slow, 1.0 = Instant). 0.06 is balanced.
+const float SMOOTHING_FACTOR = 0.15f;           // Interpolation speed (0.01 = Slow, 1.0 = Instant).
 
 const ULONGLONG LHM_RETRY_DELAY_MS = 5000;      // Cooldown before retrying WMI connection
 const ULONGLONG RESET_KILL_TASK_WAIT_MS = 2000; // Watchdog: Time to wait after killing processes
