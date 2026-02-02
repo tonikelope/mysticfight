@@ -33,7 +33,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.33";
+const wchar_t* APP_VERSION = L"v2.34";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -120,6 +120,8 @@ static std::string FetchLHMJson() {
 
     hSession = WinHttpOpen(L"MysticFight/2.2", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return "";
+
+    WinHttpSetTimeouts(hSession, 500, 500, 500, 500);
 
     // Usar el host y puerto extraídos de la URL
     std::wstring host(urlComp.lpszHostName, urlComp.dwHostNameLength);
@@ -901,22 +903,22 @@ void PopulateSensorList(HWND hDlg) {
 }
 
 static void CacheSensorPath() {
-   
+    // Reset state: assume failure until proven otherwise
+    g_pathCached = false;
+
     if (!g_pSvc || wcslen(g_cfg.sensorID) == 0) return;
 
     std::wstring wqlQuery = L"SELECT * FROM Sensor WHERE Identifier = '" + std::wstring(g_cfg.sensorID) + L"'";
 
-   
     char debugBuf[LOG_BUFFER_SIZE];
     snprintf(debugBuf, sizeof(debugBuf), "[MysticFight] Searching WMI path for: %ls", g_cfg.sensorID);
     Log(debugBuf);
 
     IEnumWbemClassObjectPtr pEnum = nullptr;
 
-  
     HRESULT hr = g_pSvc->ExecQuery(
         _bstr_t(L"WQL"),
-        _bstr_t(wqlQuery.c_str()), 
+        _bstr_t(wqlQuery.c_str()),
         WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
         NULL,
         &pEnum
@@ -940,21 +942,22 @@ static void CacheSensorPath() {
                 g_pathCached = true;
 
                 char pathLog[512];
-                snprintf(pathLog, sizeof(pathLog), "[MysticFight] LHM WMI PATH CACHED -> %ls", g_cachedSensorPath.GetBSTR());
+                // Cast to wchar_t* for safety
+                snprintf(pathLog, sizeof(pathLog), "[MysticFight] LHM WMI PATH CACHED -> %ls", (wchar_t*)g_cachedSensorPath);
                 Log(pathLog);
             }
             else {
-                Log("[MysticFight] Error: object found but without a valid path.");
-                g_pathCached = false;
+                Log("[MysticFight] Error: Object found but without a valid path.");
             }
         }
         else {
-            Log("[MysticFight] Error: sensor not found on LHM (is it running?)");
-            g_pathCached = false;
+            Log("[MysticFight] Error: Sensor not found on LHM (Is it running?)");
         }
     }
+    else {
+        Log("[MysticFight] Error: WMI Query execution failed.");
+    }
 }
-
 
 // Calculates color brightness to ensure text contrast in UI.
 static bool IsColorDark(COLORREF col) {
@@ -1389,18 +1392,20 @@ static float GetCPUTempFast() {
         // A) Try WMI First
         if (InitWMI()) {
             
-            if(!g_pathCached)
-                CacheSensorPath();
+            CacheSensorPath();
 
-            g_activeSource = DataSource::WMI;
-
-            Log("[MysticFight] Source detected: WMI (Locked).");
-
-            return GetCPUTempFast();
-
+            // El fallo estaba aquí: g_pathCached debe ser TRUE para bloquearse en WMI
+            if (g_pathCached) {
+                g_activeSource = DataSource::WMI;
+                Log("[MysticFight] Source detected: WMI (Locked).");
+                return GetCPUTempFast();
+            }
+            else {
+                Log("[MysticFight] WMI connected but target sensor not found. Trying HTTP...");
+            }
         }
         else {
-            Log("[MysticFight] WMI Service not available.");
+            Log("[MysticFight] WMI Service not available. Trying HTTP...");
         }
         
         // B) Try HTTP Second (if WMI failed)
@@ -1412,8 +1417,14 @@ static float GetCPUTempFast() {
                 // SUCCESS: Lock onto HTTP
                 g_activeSource = DataSource::HTTP;
                 Log("[MysticFight] Source detected: HTTP (Locked).");
-                return GetCPUTempFast();
+                return temp;
             }
+            else {
+                Log("[MysticFight] HTTP connected but target sensor not found.");
+            }
+        }
+        else {
+            Log("[MysticFight] HTTP Service not available. Is Web Server enabled on LHM?");
         }
     }
 
