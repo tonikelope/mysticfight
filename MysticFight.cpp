@@ -33,7 +33,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.27";
+const wchar_t* APP_VERSION = L"v2.28";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -223,7 +223,7 @@ bool g_LedsEnabled = true;
 ULONGLONG g_ResetTimer = 0;
 bool g_Resetting_sdk = false;
 int g_ResetStage = 0;
-ULONGLONG lastWMIRetry = 0;
+ULONGLONG g_lastDataSourceSearchRetry = 0;
 
 // WMI Interfaces
 IWbemServicesPtr g_pSvc = nullptr;
@@ -306,6 +306,7 @@ static void ClearComboHeapData(HWND hCombo) {
 static bool InitWMI() {
     g_pSvc = nullptr;
     g_pLoc = nullptr;
+    g_pathCached = false;
 
     HRESULT hr = g_pLoc.CreateInstance(CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER);
     if (FAILED(hr)) return false;
@@ -1210,11 +1211,14 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 
 // Retrieves CPU Temperature using the active strategy (WMI or HTTP)
 static float GetCPUTempFast() {
+    ULONGLONG currentTime = GetTickCount64();
+
     float temp = -1.0f;
 
     // CASE 1: LOCKED ON WMI
     if (g_activeSource == DataSource::WMI) {
         bool success = false;
+        
         if (g_pSvc && g_pathCached) {
             try {
                 IWbemClassObjectPtr pObj = nullptr;
@@ -1232,7 +1236,7 @@ static float GetCPUTempFast() {
 
         if (!success) {
             Log("[MysticFight] WMI reading failed. Resetting to SEARCH mode.");
-            g_activeSource = DataSource::Searching; // Unlock to try alternatives next frame
+            g_activeSource = DataSource::Searching;
             g_pathCached = false;
             return -1.0f;
         }
@@ -1242,6 +1246,7 @@ static float GetCPUTempFast() {
     // CASE 2: LOCKED ON HTTP
     else if (g_activeSource == DataSource::HTTP) {
         std::string json = FetchLHMJson();
+        
         if (!json.empty()) {
             temp = ParseLHMJsonForTemp(json, g_cfg.sensorID);
         }
@@ -1256,37 +1261,42 @@ static float GetCPUTempFast() {
 
     // CASE 3: SEARCHING (First run or after failure)
     else {
-        // A) Try WMI First
-        if (g_pSvc) {
-            if (!g_pathCached) CacheSensorPath();
-            if (g_pathCached) {
-                try {
-                    IWbemClassObjectPtr pObj = nullptr;
-                    if (SUCCEEDED(g_pSvc->GetObject(g_cachedSensorPath, 0, NULL, &pObj, NULL))) {
-                        _variant_t vtVal;
-                        if (SUCCEEDED(pObj->Get(L"Value", 0, &vtVal, 0, 0))) {
-                            // SUCCESS: Lock onto WMI
-                            g_activeSource = DataSource::WMI;
-                            Log("[MysticFight] Source detected: WMI (Locked).");
-
-                            if (vtVal.vt == VT_R4) return vtVal.fltVal;
-                            if (vtVal.vt == VT_R8) return (float)vtVal.dblVal;
-                        }
-                    }
-                }
-                catch (...) {}
-            }
+        
+        if (currentTime - g_lastDataSourceSearchRetry <= LHM_RETRY_DELAY_MS) {
+            return -1.0f;
         }
+
+        g_lastDataSourceSearchRetry = currentTime;
+        
+        Log("[MysticFight] Attempting fresh data source discovery...");
+
+        // A) Try WMI First
+        if (InitWMI()) {
+            Log("[MysticFight] WMI Service connected. Checking data stream...");
+
+            if(!g_pathCached)
+                CacheSensorPath();
+
+            g_activeSource = DataSource::WMI;
+
+            return GetCPUTempFast();
+
+        }
+        else {
+            Log("[MysticFight] WMI Service not available.");
+        }
+
 
         // B) Try HTTP Second (if WMI failed)
         std::string json = FetchLHMJson();
+        
         if (!json.empty()) {
             temp = ParseLHMJsonForTemp(json, g_cfg.sensorID);
             if (temp >= 0.0f) {
                 // SUCCESS: Lock onto HTTP
                 g_activeSource = DataSource::HTTP;
                 Log("[MysticFight] Source detected: HTTP (Locked).");
-                return temp;
+                return GetCPUTempFast();
             }
         }
     }
@@ -1923,30 +1933,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             // CASE B: READ FAILURE (Both WMI and HTTP failed)
             else {
                 if (lhmAlive) {
+                    
                     lhmAlive = false;
+                    
                     Log("[MysticFight] Data source disconnected (LHM closed?).");
 
-                    // IMPORTANT: Unlock source to allow searching (Search Mode) when it comes back
-                    g_activeSource = DataSource::Searching;
-
                     // Set Error Effect (White Breathing)
-                    if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_deviceName, 0, bstrBreath);
+                    if (lpMLAPI_SetLedStyle)
+                        status = lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrBreath);
+
                     if (status == 0 && lpMLAPI_SetLedColor) {
-                        // Set all LEDs to white
-                        for (int i = 0; i < g_totalLeds; i++) {
-                            lpMLAPI_SetLedColor(g_deviceName, i, 255, 255, 255);
-                        }
+                        status = lpMLAPI_SetLedColor(g_target_device, g_cfg.targetLedIndex, 255, 255, 255);
                     }
+
                 }
 
-                // Periodic WMI Retry (Only needed if we are in Search mode)
-                if (g_activeSource == DataSource::Searching && (currentTime - lastWMIRetry > LHM_RETRY_DELAY_MS)) {
-                    lastWMIRetry = currentTime;
-                    InitWMI();
-                }
+                g_activeSource = DataSource::Searching;
             }
-
-
 
         }
 
