@@ -33,7 +33,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.34";
+const wchar_t* APP_VERSION = L"v2.35";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -1407,6 +1407,9 @@ static float GetCPUTempFast() {
         else {
             Log("[MysticFight] WMI Service not available. Trying HTTP...");
         }
+
+        g_pSvc = nullptr;
+        g_pLoc = nullptr;
         
         // B) Try HTTP Second (if WMI failed)
         std::string json = FetchLHMJson();
