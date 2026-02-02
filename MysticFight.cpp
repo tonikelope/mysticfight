@@ -33,7 +33,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.29";
+const wchar_t* APP_VERSION = L"v2.30";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -63,6 +63,7 @@ struct Config {
     int targetLedIndex;             // Selected LED area index
     int tempLow, tempMed, tempHigh;
     COLORREF colorLow, colorMed, colorHigh;
+    wchar_t webServerUrl[256];
 };
 
 Config g_cfg;
@@ -72,8 +73,6 @@ Config g_cfg;
 // =============================================================
 
 // LHM HTTP Config
-const wchar_t* LHM_HOST = L"localhost";
-const INTERNET_PORT LHM_PORT = 8085;
 const wchar_t* LHM_PATH = L"/data.json";
 
 // State Machine for Data Source
@@ -86,6 +85,19 @@ enum class DataSource {
 // Global state variable
 DataSource g_activeSource = DataSource::Searching;
 
+// Appends log entries to the debug file.
+static void Log(const char* text) {
+    time_t now = time(0);
+    char dt[26];
+    ctime_s(dt, sizeof(dt), &now);
+    dt[24] = '\0';
+
+    std::ofstream out(LOG_FILENAME, std::ios::app);
+    if (out) {
+        out << "[" << dt << "] " << text << "\n";
+    }
+}
+
 // =============================================================
 // HTTP & JSON PARSING UTILS (FALLBACK SYSTEM)
 // =============================================================
@@ -94,45 +106,48 @@ DataSource g_activeSource = DataSource::Searching;
 static std::string FetchLHMJson() {
     std::string responseData;
     HINTERNET hSession = NULL, hConnect = NULL, hRequest = NULL;
+    URL_COMPONENTS urlComp = { sizeof(URL_COMPONENTS) };
 
-    // 1. Open Session
+    // Configurar componentes para parsear la URL de la configuración
+    urlComp.dwHostNameLength = (DWORD)-1;
+    urlComp.dwUrlPathLength = (DWORD)-1;
+    urlComp.dwExtraInfoLength = (DWORD)-1;
+
+    if (!WinHttpCrackUrl(g_cfg.webServerUrl, (DWORD)wcslen(g_cfg.webServerUrl), 0, &urlComp)) {
+        Log("[MysticFight] Error: Invalid Web Server URL format.");
+        return "";
+    }
+
     hSession = WinHttpOpen(L"MysticFight/2.2", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return "";
 
-    // 2. Connect to localhost:8085
-    hConnect = WinHttpConnect(hSession, LHM_HOST, LHM_PORT, 0);
-    if (!hConnect) { WinHttpCloseHandle(hSession); return ""; }
+    // Usar el host y puerto extraídos de la URL
+    std::wstring host(urlComp.lpszHostName, urlComp.dwHostNameLength);
+    hConnect = WinHttpConnect(hSession, host.c_str(), urlComp.nPort, 0);
 
-    // 3. Create Request
-    hRequest = WinHttpOpenRequest(hConnect, L"GET", LHM_PATH, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return ""; }
+    if (hConnect) {
+        // Combinar el path de la URL con el endpoint /data.json
+        std::wstring path = std::wstring(urlComp.lpszUrlPath, urlComp.dwUrlPathLength) + L"/data.json";
+        hRequest = WinHttpOpenRequest(hConnect, L"GET", path.c_str(), NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
 
-    // 4. Send Request & Read
-    if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
-        WinHttpReceiveResponse(hRequest, NULL)) {
+        if (hRequest && WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+            WinHttpReceiveResponse(hRequest, NULL)) {
 
-        DWORD dwSize = 0;
-        DWORD dwDownloaded = 0;
-        do {
-            dwSize = 0;
-            if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) break;
-            if (dwSize == 0) break;
-
-            char* pszOutBuffer = new char[dwSize + 1];
-            if (!pszOutBuffer) break;
-
-            ZeroMemory(pszOutBuffer, dwSize + 1);
-            if (WinHttpReadData(hRequest, (LPVOID)pszOutBuffer, dwSize, &dwDownloaded)) {
-                responseData.append(pszOutBuffer, dwDownloaded);
-            }
-            delete[] pszOutBuffer;
-        } while (dwSize > 0);
+            DWORD dwSize = 0, dwDownloaded = 0;
+            do {
+                if (!WinHttpQueryDataAvailable(hRequest, &dwSize) || dwSize == 0) break;
+                char* pszOutBuffer = new char[dwSize + 1];
+                if (WinHttpReadData(hRequest, (LPVOID)pszOutBuffer, dwSize, &dwDownloaded)) {
+                    responseData.append(pszOutBuffer, dwDownloaded);
+                }
+                delete[] pszOutBuffer;
+            } while (dwSize > 0);
+        }
     }
 
     if (hRequest) WinHttpCloseHandle(hRequest);
     if (hConnect) WinHttpCloseHandle(hConnect);
     if (hSession) WinHttpCloseHandle(hSession);
-
     return responseData;
 }
 
@@ -326,18 +341,7 @@ static bool InitWMI() {
     return SUCCEEDED(hr);
 }
 
-// Appends log entries to the debug file.
-static void Log(const char* text) {
-    time_t now = time(0);
-    char dt[26];
-    ctime_s(dt, sizeof(dt), &now);
-    dt[24] = '\0';
 
-    std::ofstream out(LOG_FILENAME, std::ios::app);
-    if (out) {
-        out << "[" << dt << "] " << text << "\n";
-    }
-}
 
 // Truncates log file if it exceeds size limit to prevent bloat.
 static void TrimLogFile() {
@@ -541,6 +545,8 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"Settings", L"ColorLow", hL, INI_FILE);
     WritePrivateProfileStringW(L"Settings", L"ColorMed", hM, INI_FILE);
     WritePrivateProfileStringW(L"Settings", L"ColorHigh", hH, INI_FILE);
+
+    WritePrivateProfileStringW(L"Settings", L"WebServerUrl", g_cfg.webServerUrl, INI_FILE);
 }
 
 // Reads configuration from INI file with full validation.
@@ -563,6 +569,8 @@ void LoadSettings() {
     GetPrivateProfileStringW(L"Settings", L"ColorLow", L"#00FF00", hL, 10, INI_FILE);
     GetPrivateProfileStringW(L"Settings", L"ColorMed", L"#FFFF00", hM, 10, INI_FILE);
     GetPrivateProfileStringW(L"Settings", L"ColorHigh", L"#FF0000", hH, 10, INI_FILE);
+
+    GetPrivateProfileStringW(L"Settings", L"WebServerUrl", L"http://localhost:8085", g_cfg.webServerUrl, 256, INI_FILE);
 
     // 4. VALIDATION LOGIC
     // We check for:
@@ -899,6 +907,8 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         PopulateSensorList(hDlg);
         PopulateDeviceList(hDlg);
 
+        SetDlgItemTextW(hDlg, IDC_EDIT_SERVER, g_cfg.webServerUrl);
+
         // Populate initial Area list based on current Device selection
         int devIdx = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_GETCURSEL, 0, 0);
         if (devIdx != CB_ERR) {
@@ -956,10 +966,13 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             int tL = GetDlgItemInt(hDlg, IDC_TEMP_LOW, NULL, TRUE);
             int tM = GetDlgItemInt(hDlg, IDC_TEMP_MED, NULL, TRUE);
             int tH = GetDlgItemInt(hDlg, IDC_TEMP_HIGH, NULL, TRUE);
+
             if (tL < 0 || tH > 110 || tL >= tM || tM >= tH) {
                 MessageBoxW(hDlg, L"Invalid temperature range.", L"Error", MB_ICONWARNING);
                 return TRUE;
             }
+
+            GetDlgItemTextW(hDlg, IDC_EDIT_SERVER, g_cfg.webServerUrl, 256);
 
             // Save hardware selection
             int idxDev = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_GETCURSEL, 0, 0);
@@ -985,9 +998,12 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
             SetRunAtStartup(IsDlgButtonChecked(hDlg, IDC_CHK_STARTUP) == BST_CHECKED);
             SaveSettings();
+            
             g_target_device = g_cfg.targetDevice;
-            g_pathCached = false;
+            g_activeSource = DataSource::Searching;
+
             lastR = RGB_LED_REFRESH; // Force hardware update
+            
             EndDialog(hDlg, IDOK);
             return TRUE;
         }
@@ -1272,12 +1288,13 @@ static float GetCPUTempFast() {
 
         // A) Try WMI First
         if (InitWMI()) {
-            Log("[MysticFight] WMI Service connected. Checking data stream...");
-
+            
             if(!g_pathCached)
                 CacheSensorPath();
 
             g_activeSource = DataSource::WMI;
+
+            Log("[MysticFight] Source detected: WMI (Locked).");
 
             return GetCPUTempFast();
 
@@ -1285,8 +1302,7 @@ static float GetCPUTempFast() {
         else {
             Log("[MysticFight] WMI Service not available.");
         }
-
-
+        
         // B) Try HTTP Second (if WMI failed)
         std::string json = FetchLHMJson();
         
@@ -1698,62 +1714,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         MSIHwardwareDetection();
     }
 
-
-    // --- I. INITIAL CONNECTION STRATEGY & DISCOVERY ---
-    Log("[MysticFight] Determining data source strategy...");
-
-    // STRATEGY A: Try WMI First (Priority)
-    bool strategyLocked = false;
-
-    if (InitWMI()) {
-        Log("[MysticFight] WMI Service connected. Checking data stream...");
-
-        // 1. Auto-Selection Logic (First Run / Zero Config)
-        if (wcslen(g_cfg.sensorID) == 0) {
-            Log("[MysticFight] First run (No ID). Attempting auto-selection via WMI...");
-            AutoSelectFirstSensor();
-        }
-
-        // 2. Prepare Path
-        CacheSensorPath();
-
-        // 3. Test Read: Force WMI mode temporarily to verify
-        g_activeSource = DataSource::WMI;
-
-        if (GetCPUTempFast() >= 0.0f) {
-            Log("[MysticFight] SUCCESS: WMI is working. Strategy LOCKED: WMI.");
-            LogAllLHMTemperatureSensors();
-            strategyLocked = true;
-        }
-        else {
-            Log("[MysticFight] WARNING: WMI connected but cannot read value. Dropping WMI...");
-            g_activeSource = DataSource::Searching; // Revert to neutral
-        }
-    }
-    else {
-        Log("[MysticFight] WMI Service not available.");
-    }
-
-    // STRATEGY B: Try HTTP Second (Fallback if WMI failed)
-    if (!strategyLocked) {
-        Log("[MysticFight] Attempting HTTP Fallback...");
-
-        // Force HTTP mode temporarily to verify
-        g_activeSource = DataSource::HTTP;
-
-        if (GetCPUTempFast() >= 0.0f) {
-            Log("[MysticFight] SUCCESS: HTTP is working. Strategy LOCKED: HTTP.");
-            strategyLocked = true;
-        }
-        else {
-            Log("[MysticFight] ERROR: Both WMI and HTTP failed.");
-            Log("[MysticFight] System will enter SEARCH mode (retrying in background).");
-            g_activeSource = DataSource::Searching; // Revert to neutral so the loop keeps trying
-        }
-    }
-
-
-    // --- J. MAIN LOOP PREPARATION ---
+    // --- I. MAIN LOOP PREPARATION ---
     _bstr_t bstrOff(L"Off");
     _bstr_t bstrBreath(L"Breath");
     _bstr_t bstrSteady(L"Steady");

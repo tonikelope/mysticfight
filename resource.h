@@ -16,3 +16,4 @@
 #define IDC_ABOUT_VERSION				5003
 #define IDC_COMBO_DEVICE				6002  
 #define IDC_COMBO_AREA					6003
+#define IDC_EDIT_SERVER					7001
