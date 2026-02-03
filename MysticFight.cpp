@@ -22,6 +22,7 @@
 #pragma comment(lib, "OleAut32.lib")
 #pragma comment(lib, "Shell32.lib")
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "winmm.lib")
 
 // =============================================================
 // GLOBAL CONSTANTS AND DEFINITIONS
@@ -35,7 +36,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.43";
+const wchar_t* APP_VERSION = L"v2.44";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -1297,7 +1298,17 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
     case WM_HOTKEY:
         if (wParam == 1) {
             g_LedsEnabled = !g_LedsEnabled;
-            MessageBeep(g_LedsEnabled ? MB_OK : MB_ICONHAND);
+            
+            // Play sound from Resources
+            if (g_LedsEnabled) {
+                PlaySound(MAKEINTRESOURCE(IDR_WAV_LIGHTS_ON), GetModuleHandle(NULL),
+                    SND_RESOURCE | SND_ASYNC);
+            }
+            else {
+                PlaySound(MAKEINTRESOURCE(IDR_WAV_LIGHTS_OFF), GetModuleHandle(NULL),
+                    SND_RESOURCE | SND_ASYNC);
+            }
+            
             lastR = RGB_LED_REFRESH;
         }
         break;

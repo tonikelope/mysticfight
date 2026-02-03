@@ -17,3 +17,5 @@
 #define IDC_COMBO_DEVICE				6002  
 #define IDC_COMBO_AREA					6003
 #define IDC_EDIT_SERVER					7001
+#define IDR_WAV_LIGHTS_ON				8001
+#define IDR_WAV_LIGHTS_OFF				8002
