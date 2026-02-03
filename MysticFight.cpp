@@ -35,8 +35,14 @@
 #define ID_TRAY_LOG 3001
 #define ID_TRAY_ABOUT 4001
 
+// =============================================================
+// HTTP PERSISTENCE HANDLES (NUEVO)
+// =============================================================
+HINTERNET g_hSession = NULL;
+HINTERNET g_hConnect = NULL;
+
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.47";
+const wchar_t* APP_VERSION = L"v2.48";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -54,7 +60,6 @@ const float SMOOTHING_FACTOR = 0.15f;           // Interpolation speed (0.01 = S
 const ULONGLONG LHM_RETRY_DELAY_MS = 5000;      // Cooldown before retrying WMI connection
 const ULONGLONG RESET_KILL_TASK_WAIT_MS = 2000; // Watchdog: Time to wait after killing processes
 const ULONGLONG RESET_RESTART_TASK_DELAY_MS = 5000; // Watchdog: Time to wait after restarting service
-const ULONGLONG WINHTTP_TIMEOUT_MS = 60000;
 
 // Buffer Sizes
 const int HEX_COLOR_LEN = 7;
@@ -106,54 +111,100 @@ static void Log(const char* text) {
     }
 }
 
-// =============================================================
-// HTTP & JSON PARSING UTILS (FALLBACK SYSTEM)
-// =============================================================
-
-// Performs a GET request to LHM and returns raw JSON
+// Performs a GET request to LHM maintaining the connection open (Persistent HTTP)
 static std::string FetchLHMJson() {
     std::string responseData;
-    HINTERNET hSession = NULL, hConnect = NULL, hRequest = NULL;
-    URL_COMPONENTS urlComp = { sizeof(URL_COMPONENTS) };
+    HINTERNET hRequest = NULL;
+    bool connectionFailed = false;
 
-    urlComp.dwHostNameLength = (DWORD)-1;
-    urlComp.dwUrlPathLength = (DWORD)-1;
-    urlComp.dwExtraInfoLength = (DWORD)-1;
+    // 1. Inicializar Sesión (Solo una vez)
+    if (!g_hSession) {
+       
+        g_hSession = WinHttpOpen(L"MysticFight/2.5 (Persistent)",
+            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+            WINHTTP_NO_PROXY_NAME,
+            WINHTTP_NO_PROXY_BYPASS, 0);
+        
+        if (!g_hSession) return ""; // Fatal error
+    }
 
-    if (!WinHttpCrackUrl(g_cfg.webServerUrl, (DWORD)wcslen(g_cfg.webServerUrl), 0, &urlComp)) {
-        Log("[MysticFight] Error: Invalid Web Server URL format.");
+    // 2. Inicializar Conexión (Si no existe o se cayó)
+    if (!g_hConnect) {
+        URL_COMPONENTS urlComp = { sizeof(URL_COMPONENTS) };
+        urlComp.dwHostNameLength = (DWORD)-1;
+        urlComp.dwUrlPathLength = (DWORD)-1;
+
+        // Parseamos la URL solo cuando necesitamos conectar
+        if (WinHttpCrackUrl(g_cfg.webServerUrl, (DWORD)wcslen(g_cfg.webServerUrl), 0, &urlComp)) {
+            std::wstring host(urlComp.lpszHostName, urlComp.dwHostNameLength);
+            g_hConnect = WinHttpConnect(g_hSession, host.c_str(), urlComp.nPort, 0);
+        }
+
+        if (!g_hConnect) return ""; // No se pudo conectar al host
+    }
+
+    // 3. Crear la Request
+    // Nota: LHM suele usar "/data.json", construimos el path
+    // Asumimos path simple "/data.json" para evitar re-parsear urlComp cada vez si es constante
+    // Si tu URL en config incluye path complejo, habría que guardar el path en una variable global también.
+    // Por defecto LHM es root, así que hardcodeamos el path relativo estándar:
+    hRequest = WinHttpOpenRequest(g_hConnect, L"GET", L"/data.json", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+
+    if (!hRequest) {
+        // Si falla crear la request, el handle de conexión podría estar corrupto. Reseteamos.
+        WinHttpCloseHandle(g_hConnect);
+        g_hConnect = NULL;
         return "";
     }
 
-    hSession = WinHttpOpen(L"MysticFight/2.3", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSession) return "";
+    // 4. Enviar Request
+    if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        WinHttpReceiveResponse(hRequest, NULL)) {
 
-    WinHttpSetTimeouts(hSession, WINHTTP_TIMEOUT_MS, WINHTTP_TIMEOUT_MS, WINHTTP_TIMEOUT_MS, WINHTTP_TIMEOUT_MS);
+        DWORD dwSize = 0, dwDownloaded = 0;
 
-    std::wstring host(urlComp.lpszHostName, urlComp.dwHostNameLength);
-    hConnect = WinHttpConnect(hSession, host.c_str(), urlComp.nPort, 0);
-
-    if (hConnect) {
-        std::wstring path = std::wstring(urlComp.lpszUrlPath, urlComp.dwUrlPathLength) + L"/data.json";
-        hRequest = WinHttpOpenRequest(hConnect, L"GET", path.c_str(), NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-
-        if (hRequest && WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
-            WinHttpReceiveResponse(hRequest, NULL)) {
-
-            DWORD dwSize = 0, dwDownloaded = 0;
-            // Bucle optimizado con vector para seguridad de memoria
-            while (WinHttpQueryDataAvailable(hRequest, &dwSize) && dwSize > 0) {
-                std::vector<char> buffer(dwSize);
-                if (WinHttpReadData(hRequest, (LPVOID)buffer.data(), dwSize, &dwDownloaded)) {
-                    responseData.append(buffer.data(), dwDownloaded);
-                }
+        // Loop de lectura
+        do {
+            dwSize = 0;
+            if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) {
+                connectionFailed = true;
+                break;
             }
-        }
+
+            if (dwSize == 0) break; // Fin de datos
+
+            // Buffer temporal en stack (más rápido que vector para chunks pequeños)
+            char chunk[4096];
+            DWORD toRead = (dwSize > sizeof(chunk)) ? sizeof(chunk) : dwSize;
+
+            if (WinHttpReadData(hRequest, (LPVOID)chunk, toRead, &dwDownloaded)) {
+                responseData.append(chunk, dwDownloaded);
+            }
+            else {
+                connectionFailed = true;
+                break;
+            }
+        } while (dwSize > 0);
+    }
+    else {
+        connectionFailed = true;
     }
 
-    if (hRequest) WinHttpCloseHandle(hRequest);
-    if (hConnect) WinHttpCloseHandle(hConnect);
-    if (hSession) WinHttpCloseHandle(hSession);
+    // Limpieza de Request (La request se cierra, la conexión se mantiene)
+    WinHttpCloseHandle(hRequest);
+
+    // 5. Gestión de Errores de Conexión
+    if (connectionFailed) {
+        // Si falló el envío o la recepción, asumimos que el socket murió.
+        // Cerramos el handle de conexión global para que se recree en la próxima llamada.
+        Log("[MysticFight] HTTP Connection dropped. Resetting handle...");
+        if (g_hConnect) {
+            WinHttpCloseHandle(g_hConnect);
+            g_hConnect = NULL;
+        }
+        return "";
+    }
+
     return responseData;
 }
 
@@ -1144,6 +1195,12 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             SetStartupTask(IsDlgButtonChecked(hDlg, IDC_CHK_STARTUP) == BST_CHECKED);
             
             SaveSettings();
+
+            if (g_hConnect) {
+                WinHttpCloseHandle(g_hConnect);
+                g_hConnect = NULL;
+                Log("[MysticFight] Settings changed. HTTP Connection reset.");
+            }
             
             g_target_device = g_cfg.targetDevice;
             
@@ -1309,6 +1366,15 @@ static void FinalCleanup(HWND hWnd) {
 
     // 6. COM Uninitialization
     CoUninitialize();
+
+    if (g_hConnect) {
+        WinHttpCloseHandle(g_hConnect);
+        g_hConnect = NULL;
+    }
+    if (g_hSession) {
+        WinHttpCloseHandle(g_hSession);
+        g_hSession = NULL;
+    }
 
     Log("[MysticFight] Cleaning finished.");
 }
