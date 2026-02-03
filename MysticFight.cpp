@@ -36,7 +36,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.45";
+const wchar_t* APP_VERSION = L"v2.47";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -47,6 +47,7 @@ const DWORD RGB_LEDS_OFF = 1000;     // Signals that the hardware is currently i
 
 // Timing Configuration (Milliseconds)
 const ULONGLONG MAIN_LOOP_DELAY_MS = 40;        // Animation speed (25 FPS).
+const ULONGLONG MAIN_LOOP_OFF_DELAY_MS = 1000;   //LEDS OFF
 const ULONGLONG SENSOR_POLL_INTERVAL_MS = 500;  // How often we check the Sensor (Temperature)
 const float SMOOTHING_FACTOR = 0.15f;           // Interpolation speed (0.01 = Slow, 1.0 = Instant).
 
@@ -236,8 +237,8 @@ _COM_SMARTPTR_TYPEDEF(ILogonTrigger, __uuidof(ILogonTrigger));
 _bstr_t g_cachedSensorPath = L"";
 _bstr_t g_target_device = L"";
 bool g_pathCached = false;
-bool g_Running = true;
-bool g_LedsEnabled = true;
+std::atomic<bool> g_Running = true;
+std::atomic<bool> g_LedsEnabled(true);
 
 std::atomic<float> g_asyncTemp(-1.0f);
 HANDLE g_hSensorEvent = NULL;
@@ -1127,11 +1128,15 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             SaveSettings();
             
             g_target_device = g_cfg.targetDevice;
+            
             g_activeSource = DataSource::Searching;
 
-            lastR = RGB_LED_REFRESH; // Force hardware update
+            SetEvent(g_hSensorEvent);
+
+            lastR = RGB_LED_REFRESH; 
             
             EndDialog(hDlg, IDOK);
+
             return TRUE;
         }
         case IDCANCEL: EndDialog(hDlg, IDCANCEL); return TRUE;
@@ -1308,7 +1313,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                 PlaySound(MAKEINTRESOURCE(IDR_WAV_LIGHTS_OFF), GetModuleHandle(NULL),
                     SND_RESOURCE | SND_ASYNC);
             }
-            
+
+            SetEvent(g_hSensorEvent);
             lastR = RGB_LED_REFRESH;
         }
         break;
@@ -1471,12 +1477,11 @@ static void SensorThread() {
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
 
     while (g_Running) {
-        float temp = GetCPUTempFast();
-        g_asyncTemp.store(temp);
+        if (g_LedsEnabled) {
+            g_asyncTemp = GetCPUTempFast();
+        }
 
-        // Espera de forma eficiente. Se despierta si pasan 500ms 
-        // O si señalizamos el evento g_hSensorEvent al cerrar.
-        WaitForSingleObject(g_hSensorEvent, (DWORD)SENSOR_POLL_INTERVAL_MS);
+        WaitForSingleObject(g_hSensorEvent, g_LedsEnabled?(DWORD)SENSOR_POLL_INTERVAL_MS:INFINITE);
     }
 
     CoUninitialize();
@@ -2065,11 +2070,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
 
         // 5. WAIT FOR NEXT FRAME
-        // This controls the animation speed (e.g., 50ms)
-        MsgWaitForMultipleObjects(0, NULL, FALSE, (DWORD)MAIN_LOOP_DELAY_MS, QS_ALLINPUT);
+        MsgWaitForMultipleObjects(0, NULL, FALSE, g_LedsEnabled?(DWORD)MAIN_LOOP_DELAY_MS:(DWORD)MAIN_LOOP_OFF_DELAY_MS, QS_ALLINPUT);
     }
 
     SetEvent(g_hSensorEvent);
+
+    if (sThread.joinable()) {
+        sThread.join();
+    }
 
     // --- 4. CLEANUP ---
     FinalCleanup(hWnd);
