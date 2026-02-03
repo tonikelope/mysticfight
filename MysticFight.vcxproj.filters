@@ -36,5 +36,6 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="MysticLight_SDK.dll" />
+    <None Include="packages.config" />
   </ItemGroup>
 </Project>

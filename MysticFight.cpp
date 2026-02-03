@@ -35,7 +35,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.41";
+const wchar_t* APP_VERSION = L"v2.42";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -798,59 +798,12 @@ static std::wstring ExtractJsonString(const std::string& block, const std::strin
     return L"";
 }
 
-// Populates the ComboBox using HTTP JSON data
-static void PopulateSensorsFromHTTP(HWND hCombo) {
-    std::string json = FetchLHMJson();
-    if (json.empty()) return;
-
-    std::string typeKey = "\"Type\":\"Temperature\"";
-    size_t pos = 0;
-    bool foundAny = false;
-
-    // Search for all occurrences of "Type":"Temperature"
-    while ((pos = json.find(typeKey, pos)) != std::string::npos) {
-        // Find the limits of the current JSON object {...}
-        size_t blockEnd = json.find('}', pos);
-        size_t blockStart = json.rfind('{', pos);
-
-        if (blockEnd != std::string::npos && blockStart != std::string::npos) {
-            std::string block = json.substr(blockStart, blockEnd - blockStart + 1);
-
-            std::wstring name = ExtractJsonString(block, "Text");
-            std::wstring id = ExtractJsonString(block, "SensorId");
-
-            if (!name.empty() && !id.empty()) {
-                int idx = (int)SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)name.c_str());
-                if (idx != CB_ERR) {
-                    SendMessage(hCombo, CB_SETITEMDATA, idx, (LPARAM)HeapDupString(id.c_str()));
-                    // Select if matches current config
-                    if (wcscmp(id.c_str(), g_cfg.sensorID) == 0) {
-                        SendMessage(hCombo, CB_SETCURSEL, idx, 0);
-                        foundAny = true;
-                    }
-                }
-            }
-        }
-        pos = blockEnd; // Advance
-    }
-
-    if (!foundAny && SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 0)
-        SendMessage(hCombo, CB_SETCURSEL, 0, 0);
-}
-
 void PopulateSensorList(HWND hDlg) {
     HWND hCombo = GetDlgItem(hDlg, IDC_SENSOR_ID);
     ClearComboHeapData(hCombo);
 
-    // LOGIC: Respect Global Strategy
-    // 1. If we are locked on HTTP, DO NOT touch WMI (it might hang).
-    // 2. If we are locked on WMI or still Searching, prioritize WMI.
-
-    bool tryWMI = (g_activeSource != DataSource::HTTP);
-    bool wmiSuccess = false;
-
     // --- STEP A: TRY WMI (Priority) ---
-    if (tryWMI) {
+    if (g_activeSource == DataSource::WMI) {
         // Lazy connection: Only connect if not already connected
         if (!g_pSvc) InitWMI();
 
@@ -868,6 +821,7 @@ void PopulateSensorList(HWND hDlg) {
             );
 
             if (SUCCEEDED(hr)) {
+
                 IWbemClassObjectPtr pclsObj = NULL;
                 ULONG uReturn = 0;
                 bool found = false;
@@ -887,24 +841,70 @@ void PopulateSensorList(HWND hDlg) {
                                     SendMessage(hCombo, CB_SETCURSEL, idx, 0);
                                     found = true;
                                 }
-                                wmiSuccess = true;
                             }
                         }
                     }
                 }
+                
                 // Select first item if nothing matched
                 if (!found && SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 0)
                     SendMessage(hCombo, CB_SETCURSEL, 0, 0);
             }
         }
     }
+    else {
 
-    // --- STEP B: HTTP FALLBACK ---
-    // Execute this ONLY if:
-    // 1. We are locked in HTTP mode (tryWMI was false).
-    // 2. OR we tried WMI (Searching mode) but it found 0 sensors.
-    if (!wmiSuccess) {
-        PopulateSensorsFromHTTP(hCombo);
+        //HTTP
+        std::string json = FetchLHMJson();
+        if (json.empty()) return;
+
+        std::string typeKey = "\"Type\":\"Temperature\"";
+        size_t pos = 0;
+        bool foundAny = false;
+
+        // Search for all occurrences of "Type":"Temperature"
+        while ((pos = json.find(typeKey, pos)) != std::string::npos) {
+            // Find the limits of the current JSON object {...}
+            size_t blockEnd = json.find('}', pos);
+            size_t blockStart = json.rfind('{', pos);
+
+            if (blockEnd != std::string::npos && blockStart != std::string::npos) {
+                std::string block = json.substr(blockStart, blockEnd - blockStart + 1);
+
+                std::wstring name = ExtractJsonString(block, "Text");
+                std::wstring id = ExtractJsonString(block, "SensorId");
+
+                if (!name.empty() && !id.empty()) {
+                    int idx = (int)SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)name.c_str());
+                    if (idx != CB_ERR) {
+                        SendMessage(hCombo, CB_SETITEMDATA, idx, (LPARAM)HeapDupString(id.c_str()));
+                        // Select if matches current config
+                        if (wcscmp(id.c_str(), g_cfg.sensorID) == 0) {
+                            SendMessage(hCombo, CB_SETCURSEL, idx, 0);
+                            foundAny = true;
+                        }
+                    }
+                }
+            }
+
+            pos = blockEnd; // Advance
+        }
+
+        if (!foundAny && SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 0)
+            SendMessage(hCombo, CB_SETCURSEL, 0, 0);
+    }
+
+    // --- LÓGICA DE ACTIVACIÓN/DESACTIVACIÓN (UX) ---
+    int finalCount = (int)SendMessage(hCombo, CB_GETCOUNT, 0, 0);
+    
+    if (finalCount <= 1) {
+        if (finalCount == 1) SendMessage(hCombo, CB_SETCURSEL, 0, 0);
+        EnableWindow(hCombo, FALSE);
+    }
+    else {
+        if (SendMessage(hCombo, CB_GETCURSEL, 0, 0) == CB_ERR)
+            SendMessage(hCombo, CB_SETCURSEL, 0, 0);
+        EnableWindow(hCombo, TRUE);
     }
 }
 
@@ -1403,7 +1403,7 @@ static float GetCPUTempFast() {
             // El fallo estaba aquí: g_pathCached debe ser TRUE para bloquearse en WMI
             if (g_pathCached) {
                 g_activeSource = DataSource::WMI;
-                Log("[MysticFight] Source detected: WMI (Locked).");
+                Log("[MysticFight] Data Source detected: WMI.");
                 return GetCPUTempFast();
             }
             else {
@@ -1422,7 +1422,7 @@ static float GetCPUTempFast() {
             if (temp >= 0.0f) {
                 // SUCCESS: Lock onto HTTP
                 g_activeSource = DataSource::HTTP;
-                Log("[MysticFight] Source detected: HTTP (Locked).");
+                Log("[MysticFight] Data Source detected: HTTP.");
                 g_pSvc = nullptr;
                 g_pLoc = nullptr;
                 return temp;
