@@ -35,7 +35,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.42";
+const wchar_t* APP_VERSION = L"v2.43";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -410,24 +410,83 @@ static HRESULT ControlScheduledTask(const wchar_t* taskName, bool start) {
     }
 }
 
-// Registers application in Task Scheduler for high-privilege startup.
-static void SetRunAtStartup(bool run) {
-    wchar_t szPath[MAX_PATH], szDir[MAX_PATH];
-    if (GetModuleFileNameW(NULL, szPath, MAX_PATH) == 0) return;
-    wcscpy_s(szDir, szPath);
-    wchar_t* lastSlash = wcsrchr(szDir, L'\\');
-    if (lastSlash) *lastSlash = L'\0';
+// Verifies if the scheduled task exists and points to the current executable.
+static bool ValidStartupTaskExists() {
+    wchar_t szCurrentPath[MAX_PATH];
+    if (GetModuleFileNameW(NULL, szCurrentPath, MAX_PATH) == 0) return false;
 
     try {
         ITaskServicePtr pService;
         HRESULT hr = pService.CreateInstance(__uuidof(TaskScheduler), NULL, CLSCTX_INPROC_SERVER);
+        if (FAILED(hr)) return false;
+
+        hr = pService->Connect(_variant_t(), _variant_t(), _variant_t(), _variant_t());
+        if (FAILED(hr)) return false;
+
+        ITaskFolderPtr pRootFolder;
+        if (FAILED(pService->GetFolder(_bstr_t(L"\\"), &pRootFolder))) return false;
+
+        IRegisteredTaskPtr pRegisteredTask;
+        if (FAILED(pRootFolder->GetTask(_bstr_t(TASK_NAME), &pRegisteredTask))) return false;
+
+        ITaskDefinitionPtr pDefinition;
+        if (FAILED(pRegisteredTask->get_Definition(&pDefinition))) return false;
+
+        IActionCollectionPtr pActions;
+        if (FAILED(pDefinition->get_Actions(&pActions))) return false;
+
+        IActionPtr pAction;
+        if (FAILED(pActions->get_Item(1, &pAction))) return false;
+
+        IExecActionPtr pExecAction = pAction;
+        if (pExecAction == nullptr) return false;
+
+        BSTR bstrPath = NULL;
+        if (SUCCEEDED(pExecAction->get_Path(&bstrPath))) {
+            bool match = (_wcsicmp(szCurrentPath, bstrPath) == 0);
+            SysFreeString(bstrPath);
+            return match;
+        }
+    }
+    catch (const _com_error&) {
+        return false;
+    }
+
+    return false;
+}
+
+// Registers application in Task Scheduler for high-privilege startup.
+static void SetStartupTask(bool run) {
+    
+    wchar_t szPath[MAX_PATH], szDir[MAX_PATH];
+    
+    if (GetModuleFileNameW(NULL, szPath, MAX_PATH) == 0) return;
+    
+    if (run && ValidStartupTaskExists()) return;
+    
+    wcscpy_s(szDir, szPath);
+    
+    wchar_t* lastSlash = wcsrchr(szDir, L'\\');
+    
+    if (lastSlash) *lastSlash = L'\0';
+
+    try {
+        ITaskServicePtr pService;
+        
+        HRESULT hr = pService.CreateInstance(__uuidof(TaskScheduler), NULL, CLSCTX_INPROC_SERVER);
+        
         if (FAILED(hr)) throw _com_error(hr);
 
         pService->Connect(_variant_t(), _variant_t(), _variant_t(), _variant_t());
+        
         ITaskFolderPtr pRootFolder;
+        
         pService->GetFolder(_bstr_t(L"\\"), &pRootFolder);
 
-        pRootFolder->DeleteTask(_bstr_t(TASK_NAME), 0);
+        hr = pRootFolder->DeleteTask(_bstr_t(TASK_NAME), 0);
+
+        if(SUCCEEDED(hr)) Log("[MysticFight] Startup task removed");
+        
         if (!run) return;
 
         ITaskDefinitionPtr pTask;
@@ -482,7 +541,7 @@ static void SetRunAtStartup(bool run) {
             &pRegisteredTask
         );
 
-        Log("[MysticFight] Task created OK");
+        Log("[MysticFight] New Startup task created");
     }
     catch (const _com_error& e) {
         char buffer[256];
@@ -519,50 +578,7 @@ static int GetIntFromSafeArray(void* pRawData, VARTYPE vt, int index) {
     }
 }
 
-// Verifies if the scheduled task exists and points to the current executable.
-static bool IsTaskValid() {
-    wchar_t szCurrentPath[MAX_PATH];
-    if (GetModuleFileNameW(NULL, szCurrentPath, MAX_PATH) == 0) return false;
 
-    try {
-        ITaskServicePtr pService;
-        HRESULT hr = pService.CreateInstance(__uuidof(TaskScheduler), NULL, CLSCTX_INPROC_SERVER);
-        if (FAILED(hr)) return false;
-
-        hr = pService->Connect(_variant_t(), _variant_t(), _variant_t(), _variant_t());
-        if (FAILED(hr)) return false;
-
-        ITaskFolderPtr pRootFolder;
-        if (FAILED(pService->GetFolder(_bstr_t(L"\\"), &pRootFolder))) return false;
-
-        IRegisteredTaskPtr pRegisteredTask;
-        if (FAILED(pRootFolder->GetTask(_bstr_t(TASK_NAME), &pRegisteredTask))) return false;
-
-        ITaskDefinitionPtr pDefinition;
-        if (FAILED(pRegisteredTask->get_Definition(&pDefinition))) return false;
-
-        IActionCollectionPtr pActions;
-        if (FAILED(pDefinition->get_Actions(&pActions))) return false;
-
-        IActionPtr pAction;
-        if (FAILED(pActions->get_Item(1, &pAction))) return false;
-
-        IExecActionPtr pExecAction = pAction;
-        if (pExecAction == nullptr) return false;
-
-        BSTR bstrPath = NULL;
-        if (SUCCEEDED(pExecAction->get_Path(&bstrPath))) {
-            bool match = (_wcsicmp(szCurrentPath, bstrPath) == 0);
-            SysFreeString(bstrPath);
-            return match;
-        }
-    }
-    catch (const _com_error&) {
-        return false;
-    }
-
-    return false;
-}
 
 // Writes configuration settings to INI file.
 void SaveSettings() {
@@ -1038,7 +1054,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         hBrushMed = CreateSolidBrush(g_cfg.colorMed);
         hBrushHigh = CreateSolidBrush(g_cfg.colorHigh);
 
-        if (IsTaskValid()) CheckDlgButton(hDlg, IDC_CHK_STARTUP, BST_CHECKED);
+        if (ValidStartupTaskExists()) CheckDlgButton(hDlg, IDC_CHK_STARTUP, BST_CHECKED);
         return (INT_PTR)TRUE;
     }
 
@@ -1105,7 +1121,8 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             GetDlgItemTextW(hDlg, IDC_HEX_MED, hM, 10); g_cfg.colorMed = HexToColor(hM);
             GetDlgItemTextW(hDlg, IDC_HEX_HIGH, hH, 10); g_cfg.colorHigh = HexToColor(hH);
 
-            SetRunAtStartup(IsDlgButtonChecked(hDlg, IDC_CHK_STARTUP) == BST_CHECKED);
+            SetStartupTask(IsDlgButtonChecked(hDlg, IDC_CHK_STARTUP) == BST_CHECKED);
+            
             SaveSettings();
             
             g_target_device = g_cfg.targetDevice;
