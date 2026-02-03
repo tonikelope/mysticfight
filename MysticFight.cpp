@@ -49,7 +49,7 @@ const wchar_t* TASK_NAME = L"MysticFight";
 
 // Sentinel Values for State Machine
 const DWORD RGB_LED_REFRESH = 999;  // Signals a mandatory style refresh (e.g., startup or reset)
-const DWORD RGB_LEDS_OFF = 1000;     // Signals that the hardware is currently in the "Off" state
+const DWORD RGB_LEDS_OFF = 1000;     // Signals that the hardware is currently in the "Off" state.
 
 // Timing Configuration (Milliseconds)
 const ULONGLONG MAIN_LOOP_DELAY_MS = 40;        // Animation speed (25 FPS).
