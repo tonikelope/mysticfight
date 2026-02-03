@@ -91,7 +91,7 @@ enum class DataSource {
 };
 
 // Global state variable
-DataSource g_activeSource = DataSource::Searching;
+std::atomic<DataSource> g_activeSource{ DataSource::Searching };
 
 // Appends log entries to the debug file.
 static void Log(const char* text) {
@@ -1032,6 +1032,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         SetWindowPos(hDlg, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE);
         
         PopulateSensorList(hDlg);
+
         PopulateDeviceList(hDlg);
 
         SetDlgItemTextW(hDlg, IDC_EDIT_SERVER, g_cfg.webServerUrl);
@@ -1056,7 +1057,24 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         hBrushMed = CreateSolidBrush(g_cfg.colorMed);
         hBrushHigh = CreateSolidBrush(g_cfg.colorHigh);
 
+        DataSource currentSrc = g_activeSource.load();
+
+        const wchar_t* sourceLabel = L"LibreHardwareMonitor";
+
+        if (currentSrc == DataSource::WMI) {
+            sourceLabel = L"LibreHardwareMonitor (Data source: WMI)";
+        }
+        else if (currentSrc == DataSource::HTTP) {
+            sourceLabel = L"LibreHardwareMonitor (Data source: HTTP)";
+        }
+        else {
+            sourceLabel = L"LibreHardwareMonitor (Searching...)";
+        }
+
+        SetDlgItemTextW(hDlg, IDC_GRP_SOURCE, sourceLabel);
+
         if (ValidStartupTaskExists()) CheckDlgButton(hDlg, IDC_CHK_STARTUP, BST_CHECKED);
+
         return (INT_PTR)TRUE;
     }
 

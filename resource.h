@@ -19,3 +19,4 @@
 #define IDC_EDIT_SERVER					7001
 #define IDR_WAV_LIGHTS_ON				8001
 #define IDR_WAV_LIGHTS_OFF				8002
+#define IDC_GRP_SOURCE                  9001
