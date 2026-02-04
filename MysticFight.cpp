@@ -43,7 +43,7 @@ HINTERNET g_hSession = NULL;
 HINTERNET g_hConnect = NULL;
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.54";
+const wchar_t* APP_VERSION = L"v2.55";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -1683,6 +1683,7 @@ static float GetCPUTempFast(IWbemServicesPtr pSvc) {
                 g_activeSource = DataSource::WMI;
                 // LogAllLHMTemperatureSensors(); // Opcional, cuidado con llamadas cruzadas
                 Log("[MysticFight] Data Source detected: WMI.");
+                LogAllLHMTemperatureSensors();
                 return GetCPUTempFast(pSvc); // Recurse immediately
             }
             else {
@@ -1701,6 +1702,7 @@ static float GetCPUTempFast(IWbemServicesPtr pSvc) {
             if (temp >= 0.0f) {
                 g_activeSource = DataSource::HTTP;
                 Log("[MysticFight] Data Source detected: HTTP.");
+                LogAllLHMTemperatureSensors();
                 return temp;
             }
             else {
