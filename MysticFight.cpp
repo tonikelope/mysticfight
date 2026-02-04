@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include "resource.h"
 
 #pragma comment(lib, "wbemuuid.lib")
@@ -42,7 +43,7 @@ HINTERNET g_hSession = NULL;
 HINTERNET g_hConnect = NULL;
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.53";
+const wchar_t* APP_VERSION = L"v2.54";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -83,6 +84,11 @@ struct Config {
 
 Config g_cfg;
 
+std::mutex g_cfgMutex;
+std::mutex g_httpMutex;
+
+std::atomic<bool> g_ResetHttp(false);
+
 // =============================================================
 // DATA SOURCE STATE MACHINE & CONSTANTS
 // =============================================================
@@ -102,6 +108,11 @@ std::atomic<DataSource> g_activeSource{ DataSource::Searching };
 
 // Appends log entries to the debug file.
 static void Log(const char* text) {
+    // Declaramos un mutex estático. Al ser estático, todos los hilos comparten
+    // este mismo cerrojo, obligándoles a hacer fila para escribir.
+    static std::mutex logMutex;
+    std::lock_guard<std::mutex> lock(logMutex);
+
     time_t now = time(0);
     char dt[26];
     ctime_s(dt, sizeof(dt), &now);
@@ -114,98 +125,80 @@ static void Log(const char* text) {
 }
 
 // Performs a GET request to LHM maintaining the connection open (Persistent HTTP)
-static std::string FetchLHMJson(int timeout) {
+// CAMBIO: Ahora acepta serverUrl como parámetro const wchar_t*
+static std::string FetchLHMJson(const wchar_t* serverUrl, int timeout) {
+    // Bloqueamos para proteger los handles, PERO la lógica de reset ahora es interna
+    std::lock_guard<std::mutex> lock(g_httpMutex);
+
+    // 1. COMPROBAR SI HAY ORDEN DE REINICIO (Desde el botón Guardar)
+    if (g_ResetHttp) {
+        if (g_hConnect) { WinHttpCloseHandle(g_hConnect); g_hConnect = NULL; }
+        if (g_hSession) { WinHttpCloseHandle(g_hSession); g_hSession = NULL; }
+        g_ResetHttp = false;
+    }
+
     std::string responseData;
     HINTERNET hRequest = NULL;
     bool connectionFailed = false;
 
-    // 1. Inicializar Sesión (Solo una vez)
+    // 2. Inicializar Sesión (Solo una vez)
     if (!g_hSession) {
-       
-        g_hSession = WinHttpOpen(L"MysticFight/2.5 (Persistent)",
+        g_hSession = WinHttpOpen(L"MysticFight/2.53 (Persistent)",
             WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
             WINHTTP_NO_PROXY_NAME,
             WINHTTP_NO_PROXY_BYPASS, 0);
-        
-        if (!g_hSession) return ""; // Fatal error
 
+        if (!g_hSession) return "";
         WinHttpSetTimeouts(g_hSession, timeout, timeout, timeout, timeout);
     }
 
-    // 2. Inicializar Conexión (Si no existe o se cayó)
+    // 3. Inicializar Conexión (Si no existe, se cayó o se reseteó)
     if (!g_hConnect) {
         URL_COMPONENTS urlComp = { sizeof(URL_COMPONENTS) };
         urlComp.dwHostNameLength = (DWORD)-1;
         urlComp.dwUrlPathLength = (DWORD)-1;
 
-        // Parseamos la URL solo cuando necesitamos conectar
-        if (WinHttpCrackUrl(g_cfg.webServerUrl, (DWORD)wcslen(g_cfg.webServerUrl), 0, &urlComp)) {
+        if (WinHttpCrackUrl(serverUrl, (DWORD)wcslen(serverUrl), 0, &urlComp)) {
             std::wstring host(urlComp.lpszHostName, urlComp.dwHostNameLength);
             g_hConnect = WinHttpConnect(g_hSession, host.c_str(), urlComp.nPort, 0);
         }
-
-        if (!g_hConnect) return ""; // No se pudo conectar al host
+        if (!g_hConnect) return "";
     }
 
-    // 3. Crear la Request
-    // Nota: LHM suele usar "/data.json", construimos el path
-    // Asumimos path simple "/data.json" para evitar re-parsear urlComp cada vez si es constante
-    // Si tu URL en config incluye path complejo, habría que guardar el path en una variable global también.
-    // Por defecto LHM es root, así que hardcodeamos el path relativo estándar:
+    // 4. Crear la Request
     hRequest = WinHttpOpenRequest(g_hConnect, L"GET", L"/data.json", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-
     if (!hRequest) {
-        // Si falla crear la request, el handle de conexión podría estar corrupto. Reseteamos.
-        WinHttpCloseHandle(g_hConnect);
-        g_hConnect = NULL;
+        WinHttpCloseHandle(g_hConnect); g_hConnect = NULL;
         return "";
     }
 
-    // 4. Enviar Request
+    // 5. Enviar Request
     if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
         WinHttpReceiveResponse(hRequest, NULL)) {
 
         DWORD dwSize = 0, dwDownloaded = 0;
-
-        // Loop de lectura
         do {
             dwSize = 0;
-            if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) {
-                connectionFailed = true;
-                break;
-            }
+            if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) { connectionFailed = true; break; }
+            if (dwSize == 0) break;
 
-            if (dwSize == 0) break; // Fin de datos
-
-            // Buffer temporal en stack (más rápido que vector para chunks pequeños)
             char chunk[4096];
             DWORD toRead = (dwSize > sizeof(chunk)) ? sizeof(chunk) : dwSize;
-
             if (WinHttpReadData(hRequest, (LPVOID)chunk, toRead, &dwDownloaded)) {
                 responseData.append(chunk, dwDownloaded);
             }
-            else {
-                connectionFailed = true;
-                break;
-            }
+            else { connectionFailed = true; break; }
         } while (dwSize > 0);
     }
     else {
         connectionFailed = true;
     }
 
-    // Limpieza de Request (La request se cierra, la conexión se mantiene)
     WinHttpCloseHandle(hRequest);
 
-    // 5. Gestión de Errores de Conexión
     if (connectionFailed) {
-        // Si falló el envío o la recepción, asumimos que el socket murió.
-        // Cerramos el handle de conexión global para que se recree en la próxima llamada.
         Log("[MysticFight] HTTP Connection dropped. Resetting handle...");
-        if (g_hConnect) {
-            WinHttpCloseHandle(g_hConnect);
-            g_hConnect = NULL;
-        }
+        if (g_hConnect) { WinHttpCloseHandle(g_hConnect); g_hConnect = NULL; }
         return "";
     }
 
@@ -305,14 +298,11 @@ bool g_Resetting_sdk = false;
 int g_ResetStage = 0;
 ULONGLONG g_lastDataSourceSearchRetry = 0;
 
-// WMI Interfaces
-IWbemServicesPtr g_pSvc = nullptr;
-IWbemLocatorPtr g_pLoc = nullptr;
 
 // LED State Tracking
-DWORD lastR = RGB_LED_REFRESH;
-DWORD lastG = RGB_LED_REFRESH;
-DWORD lastB = RGB_LED_REFRESH;
+std::atomic<DWORD> lastR = RGB_LED_REFRESH, lastG = RGB_LED_REFRESH, lastB = RGB_LED_REFRESH;
+std::atomic<float> currR{ -1.0f }, currG{ -1.0f }, currB{ -1.0f };
+std::atomic<float> lastTemp = -1.0f;
 
 // Hardware Handles
 BSTR g_deviceName = NULL;
@@ -373,6 +363,19 @@ static wchar_t* HeapDupString(const wchar_t* src) {
     return dest;
 }
 
+static void forceLEDRefresh() {
+
+    lastTemp = -1.0f;
+
+    currR = -1.0f;
+    currG = -1.0f;
+    currB = -1.0f;
+
+    lastR = RGB_LED_REFRESH;
+    lastG = RGB_LED_REFRESH;
+    lastB = RGB_LED_REFRESH;
+}
+
 // Cleans up heap memory associated with ComboBox items.
 static void ClearComboHeapData(HWND hCombo) {
     int count = (int)SendMessage(hCombo, CB_GETCOUNT, 0, 0);
@@ -384,29 +387,29 @@ static void ClearComboHeapData(HWND hCombo) {
 }
 
 // Initializes WMI connection to LibreHardwareMonitor.
-static bool InitWMI() {
-    g_pSvc = nullptr;
-    g_pLoc = nullptr;
-    g_pathCached = false;
+// Devuelve true si se conecta, y rellena los punteros pasados por referencia
+static bool InitWMI(IWbemServicesPtr& pSvcOut, IWbemLocatorPtr& pLocOut) {
+    pSvcOut = nullptr;
+    pLocOut = nullptr;
+    g_pathCached = false; // Reseteamos la caché global al reconectar
 
-    HRESULT hr = g_pLoc.CreateInstance(CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER);
+    HRESULT hr = pLocOut.CreateInstance(CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER);
     if (FAILED(hr)) return false;
 
-    hr = g_pLoc->ConnectServer(
+    hr = pLocOut->ConnectServer(
         _bstr_t(L"ROOT\\LibreHardwareMonitor"),
         nullptr, nullptr, nullptr, 0, nullptr, nullptr,
-        &g_pSvc
+        &pSvcOut
     );
     if (FAILED(hr)) return false;
 
     hr = CoSetProxyBlanket(
-        g_pSvc, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr,
+        pSvcOut, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr,
         RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE
     );
 
     return SUCCEEDED(hr);
 }
-
 
 
 // Truncates log file if it exceeds size limit to prevent bloat.
@@ -876,101 +879,129 @@ void PopulateSensorList(HWND hDlg) {
     HWND hCombo = GetDlgItem(hDlg, IDC_SENSOR_ID);
     ClearComboHeapData(hCombo);
 
-    // --- STEP A: TRY WMI (Priority) ---
-    if (g_activeSource == DataSource::WMI) {
-        // Lazy connection: Only connect if not already connected
-        if (!g_pSvc) InitWMI();
+    // --- STEP A: TRY WMI (SAFE LOCAL CONNECTION) ---
+    // En lugar de usar la variable global g_pSvc, creamos una conexión local
+    // para evitar conflictos de hilos (RPC_E_WRONG_THREAD)
+    IWbemLocatorPtr pLocLocal = nullptr;
+    IWbemServicesPtr pSvcLocal = nullptr;
+    bool wmiSuccess = false;
 
-        if (g_pSvc) {
-            IEnumWbemClassObjectPtr pEnumerator = NULL;
-            bstr_t query("SELECT Name, Identifier FROM Sensor WHERE SensorType = 'Temperature'");
+    HRESULT hr = pLocLocal.CreateInstance(CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER);
+    if (SUCCEEDED(hr)) {
+        hr = pLocLocal->ConnectServer(
+            _bstr_t(L"ROOT\\LibreHardwareMonitor"),
+            nullptr, nullptr, nullptr, 0, nullptr, nullptr,
+            &pSvcLocal
+        );
 
-            // Execute Query
-            HRESULT hr = g_pSvc->ExecQuery(
-                bstr_t("WQL"),
-                query,
-                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
-                NULL,
-                &pEnumerator
+        if (SUCCEEDED(hr)) {
+            // Ajustamos seguridad del proxy local
+            CoSetProxyBlanket(
+                pSvcLocal, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr,
+                RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE
             );
+            wmiSuccess = true;
+        }
+    }
 
-            if (SUCCEEDED(hr)) {
+    if (wmiSuccess && pSvcLocal) {
+        IEnumWbemClassObjectPtr pEnumerator = NULL;
+        bstr_t query("SELECT Name, Identifier FROM Sensor WHERE SensorType = 'Temperature'");
 
-                IWbemClassObjectPtr pclsObj = NULL;
-                ULONG uReturn = 0;
-                bool found = false;
+        hr = pSvcLocal->ExecQuery(
+            bstr_t("WQL"),
+            query,
+            WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+            NULL,
+            &pEnumerator
+        );
 
-                while (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK) {
-                    _variant_t vtName, vtID;
-                    if (SUCCEEDED(pclsObj->Get(L"Name", 0, &vtName, 0, 0)) &&
-                        SUCCEEDED(pclsObj->Get(L"Identifier", 0, &vtID, 0, 0))) {
+        if (SUCCEEDED(hr)) {
+            IWbemClassObjectPtr pclsObj = NULL;
+            ULONG uReturn = 0;
+            bool found = false;
 
-                        if (vtName.vt == VT_BSTR && vtID.vt == VT_BSTR) {
-                            int idx = (int)SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)vtName.bstrVal);
-                            if (idx != CB_ERR) {
-                                SendMessage(hCombo, CB_SETITEMDATA, idx, (LPARAM)HeapDupString(vtID.bstrVal));
+            while (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK) {
+                _variant_t vtName, vtID;
+                if (SUCCEEDED(pclsObj->Get(L"Name", 0, &vtName, 0, 0)) &&
+                    SUCCEEDED(pclsObj->Get(L"Identifier", 0, &vtID, 0, 0))) {
 
-                                // Auto-select current config
-                                if (wcscmp(vtID.bstrVal, g_cfg.sensorID) == 0) {
-                                    SendMessage(hCombo, CB_SETCURSEL, idx, 0);
-                                    found = true;
-                                }
+                    if (vtName.vt == VT_BSTR && vtID.vt == VT_BSTR) {
+                        int idx = (int)SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)vtName.bstrVal);
+                        if (idx != CB_ERR) {
+                            SendMessage(hCombo, CB_SETITEMDATA, idx, (LPARAM)HeapDupString(vtID.bstrVal));
+
+                            // Usamos el mutex para leer la config de forma segura
+                            wchar_t currentSensorID[256];
+                            {
+                                std::lock_guard<std::mutex> lock(g_cfgMutex);
+                                memcpy(currentSensorID, g_cfg.sensorID, sizeof(g_cfg.sensorID));
+                            }
+
+                            if (wcscmp(vtID.bstrVal, currentSensorID) == 0) {
+                                SendMessage(hCombo, CB_SETCURSEL, idx, 0);
+                                found = true;
                             }
                         }
                     }
                 }
-                
-                // Select first item if nothing matched
-                if (!found && SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 0)
-                    SendMessage(hCombo, CB_SETCURSEL, 0, 0);
             }
+            if (!found && SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 0)
+                SendMessage(hCombo, CB_SETCURSEL, 0, 0);
         }
     }
-    else {
 
-        //HTTP
-        std::string json = FetchLHMJson(HTTP_FAST_TIMEOUT);
+    // --- STEP B: IF WMI FAILED (OR ALWAYS), TRY HTTP ---
+    // Si WMI no funcionó, o queremos complementar, probamos HTTP.
+    // Usamos el Mutex para leer la URL segura
+    wchar_t localURL[256];
+    wchar_t currentSensorID[256];
+    {
+        std::lock_guard<std::mutex> lock(g_cfgMutex);
+        memcpy(localURL, g_cfg.webServerUrl, sizeof(g_cfg.webServerUrl));
+        memcpy(currentSensorID, g_cfg.sensorID, sizeof(g_cfg.sensorID));
+    }
+
+    if (!wmiSuccess || SendMessage(hCombo, CB_GETCOUNT, 0, 0) == 0) {
+        // CAMBIO: Pasamos localURL
+        std::string json = FetchLHMJson(localURL, HTTP_FAST_TIMEOUT);
         if (json.empty()) return;
 
         std::string typeKey = "\"Type\":\"Temperature\"";
         size_t pos = 0;
         bool foundAny = false;
 
-        // Search for all occurrences of "Type":"Temperature"
         while ((pos = json.find(typeKey, pos)) != std::string::npos) {
-            // Find the limits of the current JSON object {...}
             size_t blockEnd = json.find('}', pos);
             size_t blockStart = json.rfind('{', pos);
 
             if (blockEnd != std::string::npos && blockStart != std::string::npos) {
                 std::string block = json.substr(blockStart, blockEnd - blockStart + 1);
-
                 std::wstring name = ExtractJsonString(block, "Text");
                 std::wstring id = ExtractJsonString(block, "SensorId");
 
                 if (!name.empty() && !id.empty()) {
-                    int idx = (int)SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)name.c_str());
-                    if (idx != CB_ERR) {
-                        SendMessage(hCombo, CB_SETITEMDATA, idx, (LPARAM)HeapDupString(id.c_str()));
-                        // Select if matches current config
-                        if (wcscmp(id.c_str(), g_cfg.sensorID) == 0) {
-                            SendMessage(hCombo, CB_SETCURSEL, idx, 0);
-                            foundAny = true;
+                    // Evitar duplicados si WMI ya lo agregó (opcional, pero buena práctica)
+                    if (SendMessage(hCombo, CB_FINDSTRINGEXACT, -1, (LPARAM)name.c_str()) == CB_ERR) {
+                        int idx = (int)SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)name.c_str());
+                        if (idx != CB_ERR) {
+                            SendMessage(hCombo, CB_SETITEMDATA, idx, (LPARAM)HeapDupString(id.c_str()));
+                            if (wcscmp(id.c_str(), currentSensorID) == 0) {
+                                SendMessage(hCombo, CB_SETCURSEL, idx, 0);
+                                foundAny = true;
+                            }
                         }
                     }
                 }
             }
-
-            pos = blockEnd; // Advance
+            pos = blockEnd;
         }
-
-        if (!foundAny && SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 0)
+        if (!foundAny && SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 0 && SendMessage(hCombo, CB_GETCURSEL, 0, 0) == CB_ERR)
             SendMessage(hCombo, CB_SETCURSEL, 0, 0);
     }
 
     // --- LÓGICA DE ACTIVACIÓN/DESACTIVACIÓN (UX) ---
     int finalCount = (int)SendMessage(hCombo, CB_GETCOUNT, 0, 0);
-    
     if (finalCount <= 1) {
         if (finalCount == 1) SendMessage(hCombo, CB_SETCURSEL, 0, 0);
         EnableWindow(hCombo, FALSE);
@@ -982,21 +1013,31 @@ void PopulateSensorList(HWND hDlg) {
     }
 }
 
-static void CacheSensorPath() {
+static void CacheSensorPath(IWbemServicesPtr pSvc) {
     // Reset state: assume failure until proven otherwise
     g_pathCached = false;
 
-    if (!g_pSvc || wcslen(g_cfg.sensorID) == 0) return;
+    // VALIDACIÓN LOCAL: Si no hay servicio, nos vamos
+    if (!pSvc) return;
 
-    std::wstring wqlQuery = L"SELECT * FROM Sensor WHERE Identifier = '" + std::wstring(g_cfg.sensorID) + L"'";
+    wchar_t sensorID[256];
+    {
+        std::lock_guard<std::mutex> lock(g_cfgMutex);
+        memcpy(sensorID, g_cfg.sensorID, sizeof(g_cfg.sensorID));
+    }
+
+    if (wcslen(sensorID) == 0) return;
+
+    std::wstring wqlQuery = L"SELECT * FROM Sensor WHERE Identifier = '" + std::wstring(sensorID) + L"'";
 
     char debugBuf[LOG_BUFFER_SIZE];
-    snprintf(debugBuf, sizeof(debugBuf), "[MysticFight] Searching WMI path for: %ls", g_cfg.sensorID);
+    snprintf(debugBuf, sizeof(debugBuf), "[MysticFight] Searching WMI path for: %ls", sensorID);
     Log(debugBuf);
 
     IEnumWbemClassObjectPtr pEnum = nullptr;
 
-    HRESULT hr = g_pSvc->ExecQuery(
+    // USAMOS EL PUNTERO LOCAL pSvc
+    HRESULT hr = pSvc->ExecQuery(
         _bstr_t(L"WQL"),
         _bstr_t(wqlQuery.c_str()),
         WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
@@ -1022,7 +1063,6 @@ static void CacheSensorPath() {
                 g_pathCached = true;
 
                 char pathLog[512];
-                // Cast to wchar_t* for safety
                 snprintf(pathLog, sizeof(pathLog), "[MysticFight] LHM WMI PATH CACHED -> %ls", (wchar_t*)g_cachedSensorPath);
                 Log(pathLog);
             }
@@ -1163,7 +1203,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
         switch (id) {
         case IDOK: {
-            // Threshold validation
+            // 1. Lectura de variables de la Interfaz (UI)
             int tL = GetDlgItemInt(hDlg, IDC_TEMP_LOW, NULL, TRUE);
             int tM = GetDlgItemInt(hDlg, IDC_TEMP_MED, NULL, TRUE);
             int tH = GetDlgItemInt(hDlg, IDC_TEMP_HIGH, NULL, TRUE);
@@ -1173,54 +1213,59 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                 return TRUE;
             }
 
-            GetDlgItemTextW(hDlg, IDC_EDIT_SERVER, g_cfg.webServerUrl, 256);
-
-            // Save hardware selection
             int idxDev = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_GETCURSEL, 0, 0);
-            if (idxDev != CB_ERR) {
-                wchar_t* devName = (wchar_t*)SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_GETITEMDATA, idxDev, 0);
-                if (devName) wcscpy_s(g_cfg.targetDevice, devName);
-            }
             int idxArea = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_AREA), CB_GETCURSEL, 0, 0);
-            if (idxArea != CB_ERR) g_cfg.targetLedIndex = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_AREA), CB_GETITEMDATA, idxArea, 0);
-
-            // Save sensor selection
             int idxSens = (int)SendMessage(GetDlgItem(hDlg, IDC_SENSOR_ID), CB_GETCURSEL, 0, 0);
-            if (idxSens != CB_ERR) {
-                wchar_t* sID = (wchar_t*)SendMessage(GetDlgItem(hDlg, IDC_SENSOR_ID), CB_GETITEMDATA, idxSens, 0);
-                if (sID) wcscpy_s(g_cfg.sensorID, sID);
+
+            wchar_t hL[10], hM[10], hH[10], urlBuf[256];
+            GetDlgItemTextW(hDlg, IDC_HEX_LOW, hL, 10);
+            GetDlgItemTextW(hDlg, IDC_HEX_MED, hM, 10);
+            GetDlgItemTextW(hDlg, IDC_HEX_HIGH, hH, 10);
+            GetDlgItemTextW(hDlg, IDC_EDIT_SERVER, urlBuf, 256);
+
+            // 2. Escritura en Configuración Global (ZONA CRÍTICA)
+            {
+                std::lock_guard<std::mutex> lock(g_cfgMutex);
+
+                if (idxDev != CB_ERR) {
+                    wchar_t* devName = (wchar_t*)SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_GETITEMDATA, idxDev, 0);
+                    if (devName) wcscpy_s(g_cfg.targetDevice, devName);
+                }
+                if (idxArea != CB_ERR) {
+                    g_cfg.targetLedIndex = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_AREA), CB_GETITEMDATA, idxArea, 0);
+                }
+                if (idxSens != CB_ERR) {
+                    wchar_t* sID = (wchar_t*)SendMessage(GetDlgItem(hDlg, IDC_SENSOR_ID), CB_GETITEMDATA, idxSens, 0);
+                    if (sID) wcscpy_s(g_cfg.sensorID, sID);
+                }
+
+                g_cfg.tempLow = tL; g_cfg.tempMed = tM; g_cfg.tempHigh = tH;
+                g_cfg.colorLow = HexToColor(hL);
+                g_cfg.colorMed = HexToColor(hM);
+                g_cfg.colorHigh = HexToColor(hH);
+                wcscpy_s(g_cfg.webServerUrl, urlBuf);
             }
 
-            g_cfg.tempLow = tL; g_cfg.tempMed = tM; g_cfg.tempHigh = tH;
-            wchar_t hL[10], hM[10], hH[10];
-            GetDlgItemTextW(hDlg, IDC_HEX_LOW, hL, 10); g_cfg.colorLow = HexToColor(hL);
-            GetDlgItemTextW(hDlg, IDC_HEX_MED, hM, 10); g_cfg.colorMed = HexToColor(hM);
-            GetDlgItemTextW(hDlg, IDC_HEX_HIGH, hH, 10); g_cfg.colorHigh = HexToColor(hH);
-
+            // 3. Tareas finales
             SetStartupTask(IsDlgButtonChecked(hDlg, IDC_CHK_STARTUP) == BST_CHECKED);
             
             SaveSettings();
 
-            if (g_hConnect) {
-                WinHttpCloseHandle(g_hConnect);
-                g_hConnect = NULL;
-                Log("[MysticFight] Settings changed. HTTP Connection reset.");
-            }
-            
+            g_ResetHttp = true;
+
+            // Actualizar estado para forzar refresco visual
             g_target_device = g_cfg.targetDevice;
-
             g_pathCached = false;
-
             g_asyncTemp = -1.0f;
-
             g_activeSource = DataSource::Searching;
 
-            SetEvent(g_hSensorEvent);
+            forceLEDRefresh();
 
-            lastR = RGB_LED_REFRESH;
-            
+            SetEvent(g_hSensorEvent); // Despertar al hilo
+
+            Log("[MysticFight] Settings saved.");
+
             EndDialog(hDlg, IDOK);
-
             return TRUE;
         }
         case IDCANCEL: EndDialog(hDlg, IDCANCEL); return TRUE;
@@ -1359,10 +1404,6 @@ static void FinalCleanup(HWND hWnd) {
         UnregisterHotKey(hWnd, 1);
     }
 
-    // 4. Smart Pointers (WMI)
-    g_pSvc = nullptr;
-    g_pLoc = nullptr;
-
     // 5. Synchronization
     if (g_hMutex) {
         ReleaseMutex(g_hMutex);
@@ -1381,6 +1422,8 @@ static void FinalCleanup(HWND hWnd) {
         WinHttpCloseHandle(g_hSession);
         g_hSession = NULL;
     }
+
+    CloseHandle(g_hSensorEvent);
 
     Log("[MysticFight] Cleaning finished.");
 }
@@ -1462,12 +1505,24 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 static void LogAllLHMTemperatureSensors() {
     Log("[MysticFight] --- DUMPING ALL LHM TEMPERATURE SENSORS ---");
 
-    // 1. WMI DUMP STRATEGY
-    // We try this if we are locked to WMI or if we are still searching/determining
-    if (g_activeSource == DataSource::WMI) {
-        if (g_pSvc) {
+    // 1. WMI DUMP STRATEGY (SAFE VERSION)
+    // Creamos una conexión LOCAL temporal para evitar problemas de Marshalling
+    // si esta función es llamada desde el hilo UI (Menú contextual).
+    {
+        IWbemLocatorPtr pLocTemp = nullptr;
+        IWbemServicesPtr pSvcTemp = nullptr;
+        bool wmiAvailable = false;
+
+        if (SUCCEEDED(pLocTemp.CreateInstance(CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER))) {
+            if (SUCCEEDED(pLocTemp->ConnectServer(_bstr_t(L"ROOT\\LibreHardwareMonitor"), nullptr, nullptr, nullptr, 0, nullptr, nullptr, &pSvcTemp))) {
+                CoSetProxyBlanket(pSvcTemp, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
+                wmiAvailable = true;
+            }
+        }
+
+        if (wmiAvailable && pSvcTemp) {
             IEnumWbemClassObjectPtr pEnum = nullptr;
-            HRESULT hr = g_pSvc->ExecQuery(
+            HRESULT hr = pSvcTemp->ExecQuery(
                 bstr_t("WQL"),
                 bstr_t("SELECT Identifier, Name, Value FROM Sensor WHERE SensorType = 'Temperature'"),
                 WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
@@ -1491,7 +1546,6 @@ static void LogAllLHMTemperatureSensors() {
                     else if (vtVal.vt == VT_R8) val = (float)vtVal.dblVal;
 
                     char buf[LOG_BUFFER_SIZE];
-                    // Corrected format: Starts with [MysticFight]
                     snprintf(buf, sizeof(buf), "[MysticFight] [WMI] ID: %ls | Name: %ls | Value: %.1f",
                         (vtID.vt == VT_BSTR ? vtID.bstrVal : L"N/A"),
                         (vtName.vt == VT_BSTR ? vtName.bstrVal : L"N/A"),
@@ -1499,83 +1553,82 @@ static void LogAllLHMTemperatureSensors() {
                     Log(buf);
                     foundAny = true;
                 }
-                if (foundAny) {
-                    Log("[MysticFight] --- END OF WMI DUMP ---");
-                    return; // If WMI worked, we are done
-                }
+                if (foundAny) Log("[MysticFight] --- END OF WMI DUMP ---");
             }
         }
     }
 
     // 2. HTTP DUMP STRATEGY
-    // We try this if WMI returned nothing OR if we are locked to HTTP
-    if (g_activeSource == DataSource::HTTP) {
-        std::string json = FetchLHMJson(HTTP_NORMAL_TIMEOUT);
-        if (json.empty()) {
-            Log("[MysticFight] [Dump] HTTP JSON is empty or unreachable.");
-            return;
-        }
+    // Esto es seguro porque FetchLHMJson maneja su propio bloqueo
+    wchar_t localURL[256];
+    {
+        std::lock_guard<std::mutex> lock(g_cfgMutex);
+        memcpy(localURL, g_cfg.webServerUrl, sizeof(g_cfg.webServerUrl));
+    }
 
+    std::string json = FetchLHMJson(localURL, HTTP_FAST_TIMEOUT); // Timeout rápido para no bloquear UI
+    if (!json.empty()) {
+        // ... (El resto del código de parseo JSON es idéntico al anterior y es seguro)
+        // Solo asegúrate de copiar la parte del parseo JSON que ya tenías
         std::string typeKey = "\"Type\":\"Temperature\"";
         size_t pos = 0;
         bool foundAny = false;
 
         while ((pos = json.find(typeKey, pos)) != std::string::npos) {
-            // Find object boundaries
             size_t blockStart = json.rfind('{', pos);
             size_t blockEnd = json.find('}', pos);
-
             if (blockStart != std::string::npos && blockEnd != std::string::npos) {
                 std::string block = json.substr(blockStart, blockEnd - blockStart + 1);
-
                 std::wstring name = ExtractJsonString(block, "Text");
                 std::wstring id = ExtractJsonString(block, "SensorId");
                 std::wstring valStr = ExtractJsonString(block, "Value");
 
                 if (!id.empty()) {
-                    char buf[LOG_BUFFER_SIZE];
-                    memset(buf, 0, sizeof(buf));
-
-                    // 1. Limpiar el valor para convertirlo a float (maneja coma y quita grados)
+                    // Limpieza rápida de valor
                     std::wstring wVal = valStr;
                     for (auto& c : wVal) if (c == L',') c = L'.';
                     float valFloat = (float)_wtof(wVal.c_str());
 
-                    // 2. Formatear directamente. %ls para wstring, %.1f para float.
-                    // Usamos swprintf para que no haya quejas de tipos, y luego lo pasamos a char.
+                    char buf[LOG_BUFFER_SIZE];
                     wchar_t wBuf[LOG_BUFFER_SIZE];
-                    swprintf(wBuf, LOG_BUFFER_SIZE, L"[MysticFight] [HTTP] ID: %ls | Name: %ls | Value: %.1f",
-                        id.c_str(), name.c_str(), valFloat);
-
-                    // 3. Convertir a ANSI sin warnings (la forma "profesional" de Windows)
+                    swprintf(wBuf, LOG_BUFFER_SIZE, L"[MysticFight] [HTTP] ID: %ls | Name: %ls | Value: %.1f", id.c_str(), name.c_str(), valFloat);
                     WideCharToMultiByte(CP_ACP, 0, wBuf, -1, buf, sizeof(buf), NULL, NULL);
-
                     Log(buf);
                     foundAny = true;
                 }
             }
             pos = blockEnd;
         }
-
         if (foundAny) Log("[MysticFight] --- END OF HTTP DUMP ---");
-        else Log("[MysticFight] [Dump] No temperature sensors found in HTTP stream.");
     }
 }
 
 // Retrieves CPU Temperature using the active strategy (WMI or HTTP)
-static float GetCPUTempFast() {
+// Retrieves CPU Temperature using the active strategy (WMI or HTTP)
+static float GetCPUTempFast(IWbemServicesPtr pSvc) {
     ULONGLONG currentTime = GetTickCount64();
-
     float temp = -1.0f;
+
+    // --- PROTECCIÓN ATÓMICA DE DATOS ---
+    wchar_t localSensorID[256];
+    wchar_t localURL[256];
+
+    {
+        std::lock_guard<std::mutex> lock(g_cfgMutex);
+        memcpy(localSensorID, g_cfg.sensorID, sizeof(g_cfg.sensorID));
+        memcpy(localURL, g_cfg.webServerUrl, sizeof(g_cfg.webServerUrl));
+    }
+    // -----------------------------------
 
     // CASE 1: LOCKED ON WMI
     if (g_activeSource == DataSource::WMI) {
         bool success = false;
-        
-        if (g_pSvc && g_pathCached) {
+
+        // USAMOS pSvc LOCAL
+        if (pSvc && g_pathCached) {
             try {
                 IWbemClassObjectPtr pObj = nullptr;
-                if (SUCCEEDED(g_pSvc->GetObject(g_cachedSensorPath, 0, NULL, &pObj, NULL)) && pObj) {
+                if (SUCCEEDED(pSvc->GetObject(g_cachedSensorPath, 0, NULL, &pObj, NULL)) && pObj) {
                     _variant_t vtVal;
                     if (SUCCEEDED(pObj->Get(L"Value", 0, &vtVal, 0, 0))) {
                         if (vtVal.vt == VT_R4) temp = vtVal.fltVal;
@@ -1598,15 +1651,15 @@ static float GetCPUTempFast() {
 
     // CASE 2: LOCKED ON HTTP
     else if (g_activeSource == DataSource::HTTP) {
-        std::string json = FetchLHMJson(HTTP_NORMAL_TIMEOUT);
-        
+        std::string json = FetchLHMJson(localURL, HTTP_NORMAL_TIMEOUT);
+
         if (!json.empty()) {
-            temp = ParseLHMJsonForTemp(json, g_cfg.sensorID);
+            temp = ParseLHMJsonForTemp(json, localSensorID);
         }
 
         if (temp < 0.0f) {
             Log("[MysticFight] HTTP reading failed. Resetting to SEARCH mode.");
-            g_activeSource = DataSource::Searching; // Unlock to try alternatives next frame
+            g_activeSource = DataSource::Searching;
             return -1.0f;
         }
         return temp;
@@ -1614,47 +1667,40 @@ static float GetCPUTempFast() {
 
     // CASE 3: SEARCHING (First run or after failure)
     else {
-        
+
         if (currentTime - g_lastDataSourceSearchRetry <= LHM_RETRY_DELAY_MS) {
             return -1.0f;
         }
 
         g_lastDataSourceSearchRetry = currentTime;
-        
         Log("[MysticFight] Attempting fresh data source discovery...");
 
-        // A) Try WMI First
-        if (InitWMI()) {
-            
-            CacheSensorPath();
+        // A) Try WMI First (Solo si tenemos un puntero válido pasado desde el hilo)
+        if (pSvc) {
+            CacheSensorPath(pSvc); // PASAMOS EL PUNTERO LOCAL
 
-            // El fallo estaba aquí: g_pathCached debe ser TRUE para bloquearse en WMI
             if (g_pathCached) {
                 g_activeSource = DataSource::WMI;
-                LogAllLHMTemperatureSensors();
+                // LogAllLHMTemperatureSensors(); // Opcional, cuidado con llamadas cruzadas
                 Log("[MysticFight] Data Source detected: WMI.");
-                return GetCPUTempFast();
+                return GetCPUTempFast(pSvc); // Recurse immediately
             }
             else {
                 Log("[MysticFight] WMI connected but target sensor not found. Trying HTTP...");
             }
         }
         else {
-            Log("[MysticFight] WMI Service not available. Trying HTTP...");
+            Log("[MysticFight] WMI Service pointer is NULL (Init failed). Trying HTTP...");
         }
 
-        // B) Try HTTP Second (if WMI failed)
-        std::string json = FetchLHMJson(HTTP_NORMAL_TIMEOUT);
-        
+        // B) Try HTTP Second
+        std::string json = FetchLHMJson(localURL, HTTP_NORMAL_TIMEOUT);
+
         if (!json.empty()) {
-            temp = ParseLHMJsonForTemp(json, g_cfg.sensorID);
+            temp = ParseLHMJsonForTemp(json, localSensorID);
             if (temp >= 0.0f) {
-                // SUCCESS: Lock onto HTTP
                 g_activeSource = DataSource::HTTP;
-                LogAllLHMTemperatureSensors();
                 Log("[MysticFight] Data Source detected: HTTP.");
-                g_pSvc = nullptr;
-                g_pLoc = nullptr;
                 return temp;
             }
             else {
@@ -1670,15 +1716,35 @@ static float GetCPUTempFast() {
 }
 
 static void SensorThread() {
+    // 1. Inicializar COM para este hilo
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+
+    // 2. VARIABLES LOCALES DEL HILO (Cero Globales)
+    IWbemServicesPtr pSvcLocal = nullptr;
+    IWbemLocatorPtr pLocLocal = nullptr;
+
+    // Intentamos conectar WMI localmente al arrancar
+    if (!InitWMI(pSvcLocal, pLocLocal)) {
+        Log("[MysticFight] Warning: Could not initialize local WMI in sensor thread (Will use HTTP).");
+    }
+    else {
+        Log("[MysticFight] Local WMI Initialized in Sensor Thread.");
+    }
 
     while (g_Running) {
         if (g_LedsEnabled) {
-            g_asyncTemp = GetCPUTempFast();
+            // Pasamos pSvcLocal. Si es null, la función usará HTTP.
+            // Si WMI muere, la función GetCPUTempFast devolverá error y reintentará
+            g_asyncTemp = GetCPUTempFast(pSvcLocal);
         }
 
-        WaitForSingleObject(g_hSensorEvent, g_LedsEnabled?(DWORD)SENSOR_POLL_INTERVAL_MS:INFINITE);
+        WaitForSingleObject(g_hSensorEvent, g_LedsEnabled ? (DWORD)SENSOR_POLL_INTERVAL_MS : INFINITE);
     }
+
+    // 3. Limpieza automática
+    // Al salir, los Smart Pointers pSvcLocal y pLocLocal se destruyen solos
+    pSvcLocal = nullptr;
+    pLocLocal = nullptr;
 
     CoUninitialize();
 }
@@ -1800,12 +1866,23 @@ static void MSIHwardwareDetection() {
 
 
 // Automatically selects the first available temperature sensor if none is configured.
+// Automatically selects the first available temperature sensor if none is configured.
 static bool AutoSelectFirstSensor() {
-    if (!g_pSvc) return false;
+    // --- CONEXIÓN WMI TEMPORAL Y SEGURA ---
+    IWbemLocatorPtr pLocTemp = nullptr;
+    IWbemServicesPtr pSvcTemp = nullptr;
+
+    HRESULT hr = pLocTemp.CreateInstance(CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER);
+    if (FAILED(hr)) return false;
+
+    hr = pLocTemp->ConnectServer(_bstr_t(L"ROOT\\LibreHardwareMonitor"), nullptr, nullptr, nullptr, 0, nullptr, nullptr, &pSvcTemp);
+    if (FAILED(hr)) return false;
+
+    CoSetProxyBlanket(pSvcTemp, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
+    // --------------------------------------
 
     IEnumWbemClassObjectPtr pEnum = nullptr;
-    // Query for any sensor of type Temperature
-    HRESULT hr = g_pSvc->ExecQuery(
+    hr = pSvcTemp->ExecQuery(
         _bstr_t(L"WQL"),
         _bstr_t(L"SELECT Identifier FROM Sensor WHERE SensorType = 'Temperature'"),
         WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
@@ -1966,9 +2043,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     _bstr_t bstrBreath(L"Breath");
     _bstr_t bstrSteady(L"Steady");
 
-    // "Current" Floating point values for smooth precision (Animation State)
-    float currR = 0.0f, currG = 0.0f, currB = 0.0f;
-
     // "Target" Integer values (Where we want to go based on Temperature)
     DWORD targetR = 0, targetG = 0, targetB = 0;
 
@@ -1980,11 +2054,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     bool lhmAlive = true;  // Tracks if data source is healthy
     bool firstRun = true;  // Used to snap color instantly on startup (no fade in from black)
     int status = 0;
-    float lastTemp = -1.0f;
+    
 
     g_hSensorEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
     std::thread sThread(SensorThread);
-    sThread.detach();
 
     // =============================================================
     // MAIN APPLICATION LOOP
@@ -2029,8 +2102,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     g_Resetting_sdk = false;
 
                     // IMPORTANT: Force hardware refresh after reset
-                    lastR = RGB_LED_REFRESH; // Usamos la global
-                    firstRun = true;
+                    forceLEDRefresh();
                     break;
                 }
             }
@@ -2066,13 +2138,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 if (!lhmAlive) {
                     lhmAlive = true;
                     Log("[MysticFight] Connection established/recovered.");
-                    lastR = RGB_LED_REFRESH;
+                    forceLEDRefresh();
                 }
 
                 // Round 0.5ºC (50.0, 50.5, 51.0...)
                 float temp = floorf(rawTemp * 2.0f + 0.5f) / 2.0f;
 
-                if (temp != lastTemp || lastR == RGB_LED_REFRESH)
+                if (temp != lastTemp)
                 {
                     lastTemp = temp;
 
