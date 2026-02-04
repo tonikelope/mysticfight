@@ -42,7 +42,7 @@ HINTERNET g_hSession = NULL;
 HINTERNET g_hConnect = NULL;
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.52";
+const wchar_t* APP_VERSION = L"v2.53";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -60,6 +60,8 @@ const float SMOOTHING_FACTOR = 0.15f;           // Interpolation speed (0.01 = S
 const ULONGLONG LHM_RETRY_DELAY_MS = 5000;      // Cooldown before retrying data source search
 const ULONGLONG RESET_KILL_TASK_WAIT_MS = 2000; // Watchdog: Time to wait after killing processes
 const ULONGLONG RESET_RESTART_TASK_DELAY_MS = 5000; // Watchdog: Time to wait after restarting service
+const ULONGLONG HTTP_FAST_TIMEOUT = 1000; 
+const ULONGLONG HTTP_NORMAL_TIMEOUT = 30000;
 
 // Buffer Sizes
 const int HEX_COLOR_LEN = 7;
@@ -112,7 +114,7 @@ static void Log(const char* text) {
 }
 
 // Performs a GET request to LHM maintaining the connection open (Persistent HTTP)
-static std::string FetchLHMJson() {
+static std::string FetchLHMJson(int timeout) {
     std::string responseData;
     HINTERNET hRequest = NULL;
     bool connectionFailed = false;
@@ -126,6 +128,8 @@ static std::string FetchLHMJson() {
             WINHTTP_NO_PROXY_BYPASS, 0);
         
         if (!g_hSession) return ""; // Fatal error
+
+        WinHttpSetTimeouts(g_hSession, timeout, timeout, timeout, timeout);
     }
 
     // 2. Inicializar Conexión (Si no existe o se cayó)
@@ -287,7 +291,7 @@ _COM_SMARTPTR_TYPEDEF(ILogonTrigger, __uuidof(ILogonTrigger));
 // =============================================================
 _bstr_t g_cachedSensorPath = L"";
 _bstr_t g_target_device = L"";
-bool g_pathCached = false;
+std::atomic<bool> g_pathCached = false;
 std::atomic<bool> g_Running = true;
 std::atomic<bool> g_windows_shutdown = false;
 std::atomic<bool> g_LedsEnabled(true);
@@ -925,7 +929,7 @@ void PopulateSensorList(HWND hDlg) {
     else {
 
         //HTTP
-        std::string json = FetchLHMJson();
+        std::string json = FetchLHMJson(HTTP_FAST_TIMEOUT);
         if (json.empty()) return;
 
         std::string typeKey = "\"Type\":\"Temperature\"";
@@ -1204,12 +1208,16 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             }
             
             g_target_device = g_cfg.targetDevice;
-            
+
+            g_pathCached = false;
+
+            g_asyncTemp = -1.0f;
+
             g_activeSource = DataSource::Searching;
 
             SetEvent(g_hSensorEvent);
 
-            lastR = RGB_LED_REFRESH; 
+            lastR = RGB_LED_REFRESH;
             
             EndDialog(hDlg, IDOK);
 
@@ -1502,7 +1510,7 @@ static void LogAllLHMTemperatureSensors() {
     // 2. HTTP DUMP STRATEGY
     // We try this if WMI returned nothing OR if we are locked to HTTP
     if (g_activeSource == DataSource::HTTP) {
-        std::string json = FetchLHMJson();
+        std::string json = FetchLHMJson(HTTP_NORMAL_TIMEOUT);
         if (json.empty()) {
             Log("[MysticFight] [Dump] HTTP JSON is empty or unreachable.");
             return;
@@ -1590,7 +1598,7 @@ static float GetCPUTempFast() {
 
     // CASE 2: LOCKED ON HTTP
     else if (g_activeSource == DataSource::HTTP) {
-        std::string json = FetchLHMJson();
+        std::string json = FetchLHMJson(HTTP_NORMAL_TIMEOUT);
         
         if (!json.empty()) {
             temp = ParseLHMJsonForTemp(json, g_cfg.sensorID);
@@ -1636,7 +1644,7 @@ static float GetCPUTempFast() {
         }
 
         // B) Try HTTP Second (if WMI failed)
-        std::string json = FetchLHMJson();
+        std::string json = FetchLHMJson(HTTP_NORMAL_TIMEOUT);
         
         if (!json.empty()) {
             temp = ParseLHMJsonForTemp(json, g_cfg.sensorID);
@@ -2041,7 +2049,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             }
 
         }
-
         // 3. MAIN LOGIC (Only if LEDs are enabled)
         else if (g_LedsEnabled) {
 
@@ -2065,7 +2072,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 // Round 0.5ºC (50.0, 50.5, 51.0...)
                 float temp = floorf(rawTemp * 2.0f + 0.5f) / 2.0f;
 
-                if (temp != lastTemp)
+                if (temp != lastTemp || lastR == RGB_LED_REFRESH)
                 {
                     lastTemp = temp;
 
