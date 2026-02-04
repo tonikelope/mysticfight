@@ -42,7 +42,7 @@ HINTERNET g_hSession = NULL;
 HINTERNET g_hConnect = NULL;
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.49";
+const wchar_t* APP_VERSION = L"v2.50";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -1315,9 +1315,6 @@ INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
 // RESOURCE CLEANUP
 // =============================================================
 static void FinalCleanup(HWND hWnd) {
-    static bool cleaned = false;
-    if (cleaned) return;
-    cleaned = true;
 
     Log("[MysticFight] Starting cleaning...");
 
@@ -1439,13 +1436,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         Log("[MysticFight] Windows Shutdown detected...");
         ShutdownBlockReasonCreate(hWnd, L"Releasing MSI Hardware...");
         g_Running = false;
-        FinalCleanup(hWnd);
         ShutdownBlockReasonDestroy(hWnd);
         return TRUE;
     case WM_CLOSE:
     case WM_DESTROY:
         g_Running = false;
-        FinalCleanup(hWnd);
         PostQuitMessage(0);
         return 0;
     }
