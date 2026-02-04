@@ -42,7 +42,7 @@ HINTERNET g_hSession = NULL;
 HINTERNET g_hConnect = NULL;
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.48";
+const wchar_t* APP_VERSION = L"v2.49";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -57,7 +57,7 @@ const ULONGLONG MAIN_LOOP_OFF_DELAY_MS = 1000;   //LEDS OFF
 const ULONGLONG SENSOR_POLL_INTERVAL_MS = 500;  // How often we check the Sensor (Temperature)
 const float SMOOTHING_FACTOR = 0.15f;           // Interpolation speed (0.01 = Slow, 1.0 = Instant).
 
-const ULONGLONG LHM_RETRY_DELAY_MS = 5000;      // Cooldown before retrying WMI connection
+const ULONGLONG LHM_RETRY_DELAY_MS = 5000;      // Cooldown before retrying data source search
 const ULONGLONG RESET_KILL_TASK_WAIT_MS = 2000; // Watchdog: Time to wait after killing processes
 const ULONGLONG RESET_RESTART_TASK_DELAY_MS = 5000; // Watchdog: Time to wait after restarting service
 
@@ -1452,6 +1452,111 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
     return DefWindowProc(hWnd, message, wParam, lParam);
 }
 
+// Dumps all available temperature sensors to the log file
+// Adapts automatically to the active source (WMI or HTTP)
+static void LogAllLHMTemperatureSensors() {
+    Log("[MysticFight] --- DUMPING ALL LHM TEMPERATURE SENSORS ---");
+
+    // 1. WMI DUMP STRATEGY
+    // We try this if we are locked to WMI or if we are still searching/determining
+    if (g_activeSource == DataSource::WMI) {
+        if (g_pSvc) {
+            IEnumWbemClassObjectPtr pEnum = nullptr;
+            HRESULT hr = g_pSvc->ExecQuery(
+                bstr_t("WQL"),
+                bstr_t("SELECT Identifier, Name, Value FROM Sensor WHERE SensorType = 'Temperature'"),
+                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                NULL,
+                &pEnum
+            );
+
+            if (SUCCEEDED(hr) && pEnum) {
+                IWbemClassObjectPtr pObj = nullptr;
+                ULONG uRet = 0;
+                bool foundAny = false;
+
+                while (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uRet) == S_OK) {
+                    _variant_t vtID, vtName, vtVal;
+                    pObj->Get(L"Identifier", 0, &vtID, 0, 0);
+                    pObj->Get(L"Name", 0, &vtName, 0, 0);
+                    pObj->Get(L"Value", 0, &vtVal, 0, 0);
+
+                    float val = 0.0f;
+                    if (vtVal.vt == VT_R4) val = vtVal.fltVal;
+                    else if (vtVal.vt == VT_R8) val = (float)vtVal.dblVal;
+
+                    char buf[LOG_BUFFER_SIZE];
+                    // Corrected format: Starts with [MysticFight]
+                    snprintf(buf, sizeof(buf), "[MysticFight] [WMI] ID: %ls | Name: %ls | Value: %.1f",
+                        (vtID.vt == VT_BSTR ? vtID.bstrVal : L"N/A"),
+                        (vtName.vt == VT_BSTR ? vtName.bstrVal : L"N/A"),
+                        val);
+                    Log(buf);
+                    foundAny = true;
+                }
+                if (foundAny) {
+                    Log("[MysticFight] --- END OF WMI DUMP ---");
+                    return; // If WMI worked, we are done
+                }
+            }
+        }
+    }
+
+    // 2. HTTP DUMP STRATEGY
+    // We try this if WMI returned nothing OR if we are locked to HTTP
+    if (g_activeSource == DataSource::HTTP) {
+        std::string json = FetchLHMJson();
+        if (json.empty()) {
+            Log("[MysticFight] [Dump] HTTP JSON is empty or unreachable.");
+            return;
+        }
+
+        std::string typeKey = "\"Type\":\"Temperature\"";
+        size_t pos = 0;
+        bool foundAny = false;
+
+        while ((pos = json.find(typeKey, pos)) != std::string::npos) {
+            // Find object boundaries
+            size_t blockStart = json.rfind('{', pos);
+            size_t blockEnd = json.find('}', pos);
+
+            if (blockStart != std::string::npos && blockEnd != std::string::npos) {
+                std::string block = json.substr(blockStart, blockEnd - blockStart + 1);
+
+                std::wstring name = ExtractJsonString(block, "Text");
+                std::wstring id = ExtractJsonString(block, "SensorId");
+                std::wstring valStr = ExtractJsonString(block, "Value");
+
+                if (!id.empty()) {
+                    char buf[LOG_BUFFER_SIZE];
+                    memset(buf, 0, sizeof(buf));
+
+                    // 1. Limpiar el valor para convertirlo a float (maneja coma y quita grados)
+                    std::wstring wVal = valStr;
+                    for (auto& c : wVal) if (c == L',') c = L'.';
+                    float valFloat = (float)_wtof(wVal.c_str());
+
+                    // 2. Formatear directamente. %ls para wstring, %.1f para float.
+                    // Usamos swprintf para que no haya quejas de tipos, y luego lo pasamos a char.
+                    wchar_t wBuf[LOG_BUFFER_SIZE];
+                    swprintf(wBuf, LOG_BUFFER_SIZE, L"[MysticFight] [HTTP] ID: %ls | Name: %ls | Value: %.1f",
+                        id.c_str(), name.c_str(), valFloat);
+
+                    // 3. Convertir a ANSI sin warnings (la forma "profesional" de Windows)
+                    WideCharToMultiByte(CP_ACP, 0, wBuf, -1, buf, sizeof(buf), NULL, NULL);
+
+                    Log(buf);
+                    foundAny = true;
+                }
+            }
+            pos = blockEnd;
+        }
+
+        if (foundAny) Log("[MysticFight] --- END OF HTTP DUMP ---");
+        else Log("[MysticFight] [Dump] No temperature sensors found in HTTP stream.");
+    }
+}
+
 // Retrieves CPU Temperature using the active strategy (WMI or HTTP)
 static float GetCPUTempFast() {
     ULONGLONG currentTime = GetTickCount64();
@@ -1521,6 +1626,7 @@ static float GetCPUTempFast() {
             // El fallo estaba aquí: g_pathCached debe ser TRUE para bloquearse en WMI
             if (g_pathCached) {
                 g_activeSource = DataSource::WMI;
+                LogAllLHMTemperatureSensors();
                 Log("[MysticFight] Data Source detected: WMI.");
                 return GetCPUTempFast();
             }
@@ -1540,6 +1646,7 @@ static float GetCPUTempFast() {
             if (temp >= 0.0f) {
                 // SUCCESS: Lock onto HTTP
                 g_activeSource = DataSource::HTTP;
+                LogAllLHMTemperatureSensors();
                 Log("[MysticFight] Data Source detected: HTTP.");
                 g_pSvc = nullptr;
                 g_pLoc = nullptr;
@@ -1571,97 +1678,7 @@ static void SensorThread() {
     CoUninitialize();
 }
 
-// Dumps all available temperature sensors to the log file
-// Adapts automatically to the active source (WMI or HTTP)
-static void LogAllLHMTemperatureSensors() {
-    Log("[MysticFight] --- DUMPING ALL LHM TEMPERATURE SENSORS ---");
 
-    // 1. WMI DUMP STRATEGY
-    // We try this if we are locked to WMI or if we are still searching/determining
-    if (g_activeSource == DataSource::WMI || g_activeSource == DataSource::Searching) {
-        if (g_pSvc) {
-            IEnumWbemClassObjectPtr pEnum = nullptr;
-            HRESULT hr = g_pSvc->ExecQuery(
-                bstr_t("WQL"),
-                bstr_t("SELECT Identifier, Name, Value FROM Sensor WHERE SensorType = 'Temperature'"),
-                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
-                NULL,
-                &pEnum
-            );
-
-            if (SUCCEEDED(hr) && pEnum) {
-                IWbemClassObjectPtr pObj = nullptr;
-                ULONG uRet = 0;
-                bool foundAny = false;
-
-                while (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uRet) == S_OK) {
-                    _variant_t vtID, vtName, vtVal;
-                    pObj->Get(L"Identifier", 0, &vtID, 0, 0);
-                    pObj->Get(L"Name", 0, &vtName, 0, 0);
-                    pObj->Get(L"Value", 0, &vtVal, 0, 0);
-
-                    float val = 0.0f;
-                    if (vtVal.vt == VT_R4) val = vtVal.fltVal;
-                    else if (vtVal.vt == VT_R8) val = (float)vtVal.dblVal;
-
-                    char buf[LOG_BUFFER_SIZE];
-                    // Corrected format: Starts with [MysticFight]
-                    snprintf(buf, sizeof(buf), "[MysticFight] [WMI] ID: %ls | Name: %ls | Value: %.1f",
-                        (vtID.vt == VT_BSTR ? vtID.bstrVal : L"N/A"),
-                        (vtName.vt == VT_BSTR ? vtName.bstrVal : L"N/A"),
-                        val);
-                    Log(buf);
-                    foundAny = true;
-                }
-                if (foundAny) {
-                    Log("[MysticFight] --- END OF WMI DUMP ---");
-                    return; // If WMI worked, we are done
-                }
-            }
-        }
-    }
-
-    // 2. HTTP DUMP STRATEGY
-    // We try this if WMI returned nothing OR if we are locked to HTTP
-    if (g_activeSource == DataSource::HTTP || g_activeSource == DataSource::Searching) {
-        std::string json = FetchLHMJson();
-        if (json.empty()) {
-            Log("[MysticFight] [Dump] HTTP JSON is empty or unreachable.");
-            return;
-        }
-
-        std::string typeKey = "\"Type\":\"Temperature\"";
-        size_t pos = 0;
-        bool foundAny = false;
-
-        while ((pos = json.find(typeKey, pos)) != std::string::npos) {
-            // Find object boundaries
-            size_t blockStart = json.rfind('{', pos);
-            size_t blockEnd = json.find('}', pos);
-
-            if (blockStart != std::string::npos && blockEnd != std::string::npos) {
-                std::string block = json.substr(blockStart, blockEnd - blockStart + 1);
-
-                std::wstring name = ExtractJsonString(block, "Text");
-                std::wstring id = ExtractJsonString(block, "SensorId");
-                std::wstring valStr = ExtractJsonString(block, "Value");
-
-                if (!id.empty()) {
-                    char buf[LOG_BUFFER_SIZE];
-                    // Corrected format: Starts with [MysticFight]
-                    snprintf(buf, sizeof(buf), "[MysticFight] [HTTP] ID: %ls | Name: %ls | Value: %ls",
-                        id.c_str(), name.c_str(), valStr.c_str());
-                    Log(buf);
-                    foundAny = true;
-                }
-            }
-            pos = blockEnd;
-        }
-
-        if (foundAny) Log("[MysticFight] --- END OF HTTP DUMP ---");
-        else Log("[MysticFight] [Dump] No temperature sensors found in HTTP stream.");
-    }
-}
 
 static void ShowNotification(HWND hWnd, HINSTANCE hInstance, const wchar_t* title, const wchar_t* info) {
     NOTIFYICONDATA nid = { sizeof(NOTIFYICONDATA), hWnd, 1, NIF_INFO };
@@ -1957,6 +1974,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     MSG msg = { 0 };
     bool lhmAlive = true;  // Tracks if data source is healthy
     bool firstRun = true;  // Used to snap color instantly on startup (no fade in from black)
+    int status = 0;
+    float lastTemp = -1.0f;
 
     g_hSensorEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
     std::thread sThread(SensorThread);
@@ -2011,30 +2030,47 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 }
             }
         }
+        else if (g_activeSource == DataSource::Searching) {
+            
+            if (lhmAlive) {
+
+                lhmAlive = false;
+                
+                if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrBreath);
+                
+                if (status == 0 && lpMLAPI_SetLedColor) {
+                    status = lpMLAPI_SetLedColor(g_target_device, g_cfg.targetLedIndex, 255, 255, 255);
+                }
+            }
+
+        }
 
         // 3. MAIN LOGIC (Only if LEDs are enabled)
         else if (g_LedsEnabled) {
 
             // =========================================================
             // A. SENSOR POLLING & TARGET CALCULATION
-            // Runs every SENSOR_POLL_INTERVAL_MS (e.g., 500ms)
             // =========================================================
-            if (currentTime - lastSensorReadTime >= SENSOR_POLL_INTERVAL_MS || firstRun) {
+            
+            float rawTemp = g_asyncTemp.load();
 
-                float rawTemp = g_asyncTemp.load();
-                
-                lastSensorReadTime = currentTime;
+            lastSensorReadTime = currentTime;
 
-                if (rawTemp >= 0.0f) {
-                    // RECOVERY: If we were disconnected, restore state
-                    if (!lhmAlive) {
-                        lhmAlive = true;
-                        Log("[MysticFight] Connection established/recovered.");
-                        lastR = RGB_LED_REFRESH;
-                    }
+            if (rawTemp >= 0.0f) {
+                    
+                // RECOVERY: If we were disconnected, restore state
+                if (!lhmAlive) {
+                    lhmAlive = true;
+                    Log("[MysticFight] Connection established/recovered.");
+                    lastR = RGB_LED_REFRESH;
+                }
 
-                    // Round 0.5ºC (50.0, 50.5, 51.0...)
-                    float temp = floorf(rawTemp * 2.0f + 0.5f) / 2.0f;
+                // Round 0.5ºC (50.0, 50.5, 51.0...)
+                float temp = floorf(rawTemp * 2.0f + 0.5f) / 2.0f;
+
+                if (temp != lastTemp)
+                {
+                    lastTemp = temp;
 
                     // --- COLOR MATH (RMS Calculation for Target) ---
                     float ratio = 0.0f;
@@ -2092,50 +2128,47 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     }
                 }
             }
-
+            
             // =========================================================
             // B. INTERPOLATION & RENDER
             // Runs every MAIN_LOOP_DELAY_MS (e.g., 50ms)
             // =========================================================
-            if (lhmAlive) {
-                // 1. Math: Move 'Current' towards 'Target'
+         
+            // 1. Math: Move 'Current' towards 'Target'
                 
-                currR += ((float)targetR - currR) * SMOOTHING_FACTOR;
-                currG += ((float)targetG - currG) * SMOOTHING_FACTOR;
-                currB += ((float)targetB - currB) * SMOOTHING_FACTOR;
+            currR += ((float)targetR - currR) * SMOOTHING_FACTOR;
+            currG += ((float)targetG - currG) * SMOOTHING_FACTOR;
+            currB += ((float)targetB - currB) * SMOOTHING_FACTOR;
                 
-                // 2. Convert Float to Int for Hardware
-                DWORD sendR = (DWORD)currR;
-                DWORD sendG = (DWORD)currG;
-                DWORD sendB = (DWORD)currB;
+            // 2. Convert Float to Int for Hardware
+            DWORD sendR = (DWORD)currR;
+            DWORD sendG = (DWORD)currG;
+            DWORD sendB = (DWORD)currB;
 
-                // 3. Send to MSI SDK (Only if value changed visibly)
-                // FIX: Usamos las variables globales lastR/G/B para coordinar con el Dialog
-                if (sendR != lastR || sendG != lastG || sendB != lastB) {
+            // 3. Send to MSI SDK (Only if value changed visibly)
+            // FIX: Usamos las variables globales lastR/G/B para coordinar con el Dialog
+            if (sendR != lastR || sendG != lastG || sendB != lastB) {
 
-                    int status = 0;
+                // Safety: Ensure we are in 'Steady' mode if we just came from 'Off'
+                if (lastR == RGB_LEDS_OFF || lastR == RGB_LED_REFRESH) {
+                    if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrSteady);
+                }
 
-                    // Safety: Ensure we are in 'Steady' mode if we just came from 'Off'
-                    if (lastR == RGB_LEDS_OFF || lastR == RGB_LED_REFRESH) {
-                        if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrSteady);
-                    }
+                if (status == 0 && lpMLAPI_SetLedColor) {
+                    status = lpMLAPI_SetLedColor(g_target_device, g_cfg.targetLedIndex, sendR, sendG, sendB);
+                }
 
-                    if (status == 0 && lpMLAPI_SetLedColor) {
-                        status = lpMLAPI_SetLedColor(g_target_device, g_cfg.targetLedIndex, sendR, sendG, sendB);
-                    }
-
-                    if (status != 0) {
-                        // If hardware fails, trigger the Watchdog
-                        Log("[MysticFight] SDK SetColor failed. Triggering Reset...");
-                        g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0;
-                    }
-                    else {
-                        // Success: Update tracking (Globals)
-                        lastR = sendR; lastG = sendG; lastB = sendB;
-                    }
+                if (status != 0) {
+                    // If hardware fails, trigger the Watchdog
+                    Log("[MysticFight] SDK SetColor failed. Triggering Reset...");
+                    g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0;
+                }
+                else {
+                    // Success: Update tracking (Globals)
+                    lastR = sendR; lastG = sendG; lastB = sendB;
                 }
             }
-
+            
         } // End g_LedsEnabled
 
         // 4. OFF MODE LOGIC
