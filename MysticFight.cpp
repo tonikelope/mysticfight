@@ -42,7 +42,7 @@ HINTERNET g_hSession = NULL;
 HINTERNET g_hConnect = NULL;
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.50";
+const wchar_t* APP_VERSION = L"v2.52";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -289,6 +289,7 @@ _bstr_t g_cachedSensorPath = L"";
 _bstr_t g_target_device = L"";
 bool g_pathCached = false;
 std::atomic<bool> g_Running = true;
+std::atomic<bool> g_windows_shutdown = false;
 std::atomic<bool> g_LedsEnabled(true);
 
 std::atomic<float> g_asyncTemp(-1.0f);
@@ -1384,7 +1385,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
     case WM_HOTKEY:
         if (wParam == 1) {
             g_LedsEnabled = !g_LedsEnabled;
-            
+
             // Play sound from Resources
             if (g_LedsEnabled) {
                 PlaySound(MAKEINTRESOURCE(IDR_WAV_LIGHTS_ON), GetModuleHandle(NULL),
@@ -1433,11 +1434,12 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         }
         break;
     case WM_QUERYENDSESSION:
-        Log("[MysticFight] Windows Shutdown detected...");
-        ShutdownBlockReasonCreate(hWnd, L"Releasing MSI Hardware...");
-        g_Running = false;
-        ShutdownBlockReasonDestroy(hWnd);
-        return TRUE;
+        if (!g_windows_shutdown) {
+            Log("[MysticFight] Windows Shutdown detected...");
+            g_windows_shutdown = true;
+            g_Running = false;
+        }
+        return FALSE;
     case WM_CLOSE:
     case WM_DESTROY:
         g_Running = false;
@@ -2185,15 +2187,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         MsgWaitForMultipleObjects(0, NULL, FALSE, g_LedsEnabled?(DWORD)MAIN_LOOP_DELAY_MS:(DWORD)MAIN_LOOP_OFF_DELAY_MS, QS_ALLINPUT);
     }
 
+    if (g_windows_shutdown) ShutdownBlockReasonCreate(hWnd, L"Mystic Fight Shutdown...");
+        
     SetEvent(g_hSensorEvent);
 
     if (sThread.joinable()) {
         sThread.join();
     }
 
-    // --- 4. CLEANUP ---
     FinalCleanup(hWnd);
+
     Log("[MysticFight] BYE BYE");
 
+    if (g_windows_shutdown) ShutdownBlockReasonDestroy(hWnd);
+    
     return 0;
 }
