@@ -51,7 +51,7 @@
 // CONSTANTS & MACROS
 // ============================================================================
 
-const wchar_t* APP_VERSION = L"v2.59";
+const wchar_t* APP_VERSION = L"v2.60";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
