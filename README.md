@@ -29,5 +29,5 @@ For this tool to work, you MUST have the following installed/running:
 3. **MSI Mystic Light SDK:** MysticLight_SDK.dll is included inside MysticFight.exe
 4. **LibreHardwareMonitor:** [Download here](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/download/v0.9.4/LibreHardwareMonitor-net472.zip). Must be running (minimized on tray) to provide temperature data via Web Server (You must enable Remote Web Server in LHM options menu). <i>Note: Yes, I know there is a LibreHardwareMonitorLib available, but I don't have the time or inclination to mess around with CLR DLL wrappers such when LHM client works perfectly well for this task, is lightweight and useful for other popular monitoring applications such as RainMeter</i>.
 
-This thing was created using a kind of "semi" vibe coding with Gemini 3 Pro, just as it is. I hope it's useful. I hope it is useful. Carpe diem!
+This thing was created using a kind of "semi" vibe coding with Gemini 3 Pro, just as it is. I hope it is useful. Carpe diem!
 
