@@ -9,14 +9,6 @@
  * system temperature sensors with profile support and background persistence.
  *
  * Author:  tonikelope
- * License: Open Source
- *
- * Key Features:
- * - Multithreaded sensor polling (Non-blocking UI).
- * - MSI Mystic Light SDK integration with crash protection (Mutex).
- * - Persistent HTTP connection management (WinHTTP).
- * - Task Scheduler integration for elevated startup.
- * - Subclassed UI controls for color selection.
  *
  * ============================================================================
  */
@@ -59,53 +51,43 @@
 // CONSTANTS & MACROS
 // ============================================================================
 
-// App Metadata
-const wchar_t* APP_VERSION = L"v2.58";
+const wchar_t* APP_VERSION = L"v2.59";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
 
-// Custom Window Messages
 #define WM_TRAYICON             (WM_USER + 1)
 #define WM_APP_DEVICES_READY    (WM_USER + 5)
 #define WM_APP_SENSORS_READY    (WM_USER + 6)
 
-// Tray Command IDs
 #define ID_TRAY_EXIT            1001
 #define ID_TRAY_CONFIG          2001
 #define ID_TRAY_LOG             3001
 #define ID_TRAY_ABOUT           4001
 
-// Sentinel Values for State Machine
 const DWORD RGB_LED_REFRESH = 999;
 const DWORD RGB_LEDS_OFF = 1000;
 
-// Timing Configuration (ms)
-const ULONGLONG MAIN_LOOP_DELAY_MS = 40;   // ~25 FPS target
-const ULONGLONG MAIN_LOOP_OFF_DELAY_MS = 1000; // Idle poll rate
+const ULONGLONG MAIN_LOOP_DELAY_MS = 40;
+const ULONGLONG MAIN_LOOP_OFF_DELAY_MS = 1000;
 const ULONGLONG SENSOR_POLL_INTERVAL_MS = 500;
 const ULONGLONG LHM_RETRY_DELAY_MS = 5000;
 const ULONGLONG RESET_KILL_TASK_WAIT_MS = 2000;
 const ULONGLONG RESET_RESTART_TASK_DELAY_MS = 5000;
 
-// Network Timeouts (ms)
-const ULONGLONG HTTP_FAST_TIMEOUT = 1000;  // Non-blocking checks
-const ULONGLONG HTTP_NORMAL_TIMEOUT = 60000; // Standard polling
+const ULONGLONG HTTP_FAST_TIMEOUT = 1000;
+const ULONGLONG HTTP_NORMAL_TIMEOUT = 60000;
 
-// Buffer Sizes
 const int HEX_COLOR_LEN = 7;
 const int LOG_BUFFER_SIZE = 512;
 const int SENSOR_ID_LEN = 256;
 
 // ============================================================================
-// DATA STRUCTURES & ENUMS
+// DATA STRUCTURES
 // ============================================================================
 
 enum class DataSource { Searching, HTTP };
 
-/**
- * Represents a single user profile configuration.
- */
 struct Config {
     wchar_t sensorID[SENSOR_ID_LEN];
     wchar_t targetDevice[256];
@@ -119,15 +101,11 @@ struct Config {
     float smoothingFactor;
 };
 
-/**
- * Global application configuration container.
- */
 struct GlobalConfig {
     Config profiles[5];
     int activeProfileIndex;
 };
 
-// Async data containers
 struct SensorFetchResult {
     struct Item { std::wstring name; std::wstring id; };
     std::vector<Item> items;
@@ -139,10 +117,9 @@ struct DeviceFetchResult {
 };
 
 // ============================================================================
-// MSI SDK & COM TYPEDEFS
+// MSI SDK DEFINITIONS
 // ============================================================================
 
-// Function Pointers for Dynamic DLL Loading
 typedef int (*LPMLAPI_Initialize)();
 typedef int (*LPMLAPI_GetDeviceInfo)(SAFEARRAY** pDevType, SAFEARRAY** pLedCount);
 typedef int (*LPMLAPI_GetDeviceNameEx)(BSTR type, DWORD index, BSTR* pDevName);
@@ -152,7 +129,6 @@ typedef int (*LPMLAPI_SetLedStyle)(BSTR type, DWORD index, BSTR style);
 typedef int (*LPMLAPI_SetLedSpeed)(BSTR type, DWORD index, DWORD level);
 typedef int (*LPMLAPI_Release)();
 
-// COM Smart Pointers (Task Scheduler)
 _COM_SMARTPTR_TYPEDEF(ITaskService, __uuidof(ITaskService));
 _COM_SMARTPTR_TYPEDEF(ITaskFolder, __uuidof(ITaskFolder));
 _COM_SMARTPTR_TYPEDEF(IRegisteredTask, __uuidof(IRegisteredTask));
@@ -173,13 +149,10 @@ _COM_SMARTPTR_TYPEDEF(ILogonTrigger, __uuidof(ILogonTrigger));
 
 GlobalConfig g_Global;
 
-// Thread Synchronization
-// NOTE: g_sdkMutex is critical for preventing crashes during SDK calls.
 std::mutex g_cfgMutex;
 std::mutex g_httpMutex;
 std::mutex g_sdkMutex;
 
-// Runtime State
 std::atomic<bool> g_ResetHttp(false);
 std::atomic<DataSource> g_activeSource{ DataSource::Searching };
 std::atomic<bool> g_Running{ true };
@@ -188,31 +161,25 @@ std::atomic<bool> g_LedsEnabled{ true };
 std::atomic<float> g_asyncTemp{ -1.0f };
 _bstr_t g_target_device = L"";
 
-// Event Handles
 HANDLE g_hSensorEvent = NULL;
 HANDLE g_hSourceResolvedEvent = NULL;
-HANDLE g_hMutex = NULL; // Instance mutex
+HANDLE g_hMutex = NULL;
 
-// Network Handles (Persistent)
 HINTERNET g_hSession = NULL;
 HINTERNET g_hConnect = NULL;
 
-// UI Handles
-HWND g_hSettingsDlg = NULL; // Global handle for modeless dialog
+HWND g_hSettingsDlg = NULL;
 
-// Watchdog & Metrics
 ULONGLONG g_ResetTimer = 0;
 bool g_Resetting_sdk = false;
 int g_ResetStage = 0;
 ULONGLONG g_lastDataSourceSearchRetry = 0;
 std::atomic<int> g_httpConnectionDrops{ 0 };
 
-// LED Interpolation State
 std::atomic<DWORD> lastR{ RGB_LED_REFRESH }, lastG{ RGB_LED_REFRESH }, lastB{ RGB_LED_REFRESH };
 std::atomic<float> currR{ -1.0f }, currG{ -1.0f }, currB{ -1.0f };
 std::atomic<float> lastTemp{ -1.0f };
 
-// SDK Data & Function Pointers
 BSTR g_deviceName = NULL;
 HMODULE g_hLibrary = NULL;
 int g_totalLeds = 0;
@@ -236,7 +203,7 @@ void SwitchActiveProfile(HWND hWnd, int index);
 static bool AutoSelectFirstSensor();
 
 // ============================================================================
-// UTILITY SUBSYSTEM
+// UTILITY HELPERS
 // ============================================================================
 
 static void Log(const char* text) {
@@ -254,9 +221,6 @@ static void RunShellNonAdmin(const wchar_t* path) {
     ShellExecuteW(NULL, L"open", L"explorer.exe", path, NULL, SW_SHOWNORMAL);
 }
 
-/**
- * Terminates a process by executable name. Used for Watchdog reset logic.
- */
 static void KillProcessByName(const wchar_t* filename) {
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap == INVALID_HANDLE_VALUE) return;
@@ -294,7 +258,6 @@ static bool IsColorDark(COLORREF col) {
     return brightness < 128.0;
 }
 
-// Helper to safely store strings in UI item data
 static wchar_t* HeapDupString(const wchar_t* src) {
     if (!src) return nullptr;
     size_t size = (wcslen(src) + 1) * sizeof(wchar_t);
@@ -312,7 +275,6 @@ static void ClearComboHeapData(HWND hCombo) {
     SendMessage(hCombo, CB_RESETCONTENT, 0, 0);
 }
 
-// Manual JSON string extraction (avoids external dependencies)
 static std::wstring ExtractJsonString(const std::string& block, const std::string& key) {
     std::string searchKey = "\"" + key + "\":\"";
     size_t start = block.find(searchKey);
@@ -360,13 +322,9 @@ static void forceLEDRefresh() {
 }
 
 // ============================================================================
-// NETWORK & PARSING SUBSYSTEM
+// NETWORK
 // ============================================================================
 
-/**
- * Performs a persistent HTTP GET request using WinHTTP.
- * Handles handle reuse and connection resets automatically.
- */
 static std::string FetchLHMJson(const wchar_t* serverUrl, int timeout) {
     if (!g_Running) return "";
     std::lock_guard<std::mutex> lock(g_httpMutex);
@@ -382,7 +340,6 @@ static std::string FetchLHMJson(const wchar_t* serverUrl, int timeout) {
     bool connectionFailed = false;
 
     if (!g_hSession) {
-        // Direct connection required for localhost (bypass proxy)
         g_hSession = WinHttpOpen(L"MysticFight (Persistent)", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
         if (!g_hSession) return "";
     }
@@ -457,7 +414,7 @@ static float ParseLHMJsonForTemp(const std::string& json, const wchar_t* sensorI
 }
 
 // ============================================================================
-// CONFIGURATION & PERSISTENCE
+// SETTINGS
 // ============================================================================
 
 void SaveSettings() {
@@ -486,10 +443,6 @@ void SaveSettings() {
     }
 }
 
-/**
- * Loads configuration from INI file.
- * Includes Deadlock Prevention Logic: Releases mutex before triggering AutoSelect.
- */
 void LoadSettings() {
     g_Global.activeProfileIndex = GetPrivateProfileIntW(L"Global", L"ActiveProfile", 0, INI_FILE);
     if (g_Global.activeProfileIndex < 0 || g_Global.activeProfileIndex > 4) g_Global.activeProfileIndex = 0;
@@ -533,20 +486,6 @@ void LoadSettings() {
             wcscpy_s(p.targetDevice, L"MSI_MB"); p.targetLedIndex = 0; p.sensorID[0] = L'\0';
         }
     }
-
-    // DEADLOCK PREVENTION: 
-    // Check condition within lock scope, but execute action outside of it.
-    bool runAutoSelect = false;
-    {
-        std::lock_guard<std::mutex> lock(g_cfgMutex);
-        if (wcslen(g_Global.profiles[g_Global.activeProfileIndex].sensorID) == 0) {
-            runAutoSelect = true;
-        }
-    }
-
-    if (runAutoSelect) {
-        AutoSelectFirstSensor();
-    }
 }
 
 static bool AutoSelectFirstSensor() {
@@ -582,7 +521,7 @@ static bool AutoSelectFirstSensor() {
 }
 
 // ============================================================================
-// SYSTEM INTEGRATION (TASK SCHEDULER)
+// SYSTEM
 // ============================================================================
 
 static HRESULT ControlScheduledTask(const wchar_t* taskName, bool start) {
@@ -656,11 +595,11 @@ static void SetStartupTask(bool run) {
 }
 
 // ============================================================================
-// HARDWARE ABSTRACTION LAYER (MSI SDK & SENSORS)
+// HARDWARE (SDK & SENSORS)
 // ============================================================================
 
 static void MSIHwardwareDetection() {
-    std::lock_guard<std::mutex> lock(g_sdkMutex); // Critical: Protect SDK calls
+    std::lock_guard<std::mutex> lock(g_sdkMutex);
     SAFEARRAY* pDevType = nullptr; SAFEARRAY* pLedCount = nullptr;
     if (lpMLAPI_GetDeviceInfo && lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0 && pDevType && pLedCount) {
         BSTR* pTypes = nullptr; void* pCountsRaw = nullptr;
@@ -710,8 +649,6 @@ void AsyncPopulateSensors(HWND hDlg, std::wstring url) {
 static void AsyncPopulateDevices(HWND hDlg) {
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
     DeviceFetchResult* result = new DeviceFetchResult();
-
-    // Critical: Lock SDK while enumerating devices
     {
         std::lock_guard<std::mutex> lock(g_sdkMutex);
         SAFEARRAY* pDevType = nullptr; SAFEARRAY* pLedCount = nullptr;
@@ -733,7 +670,6 @@ static void AsyncPopulateDevices(HWND hDlg) {
             SafeArrayDestroy(pDevType); if (pLedCount) SafeArrayDestroy(pLedCount);
         }
     }
-
     if (IsWindow(hDlg)) { if (!PostMessage(hDlg, WM_APP_DEVICES_READY, 0, (LPARAM)result)) delete result; }
     else delete result;
     CoUninitialize();
@@ -795,14 +731,12 @@ static void SensorThread() {
 }
 
 // ============================================================================
-// UI LOGIC & DIALOG PROCEDURES
+// UI LOGIC
 // ============================================================================
 
 void PopulateAreaList(HWND hDlg, const wchar_t* deviceType) {
     HWND hComboArea = GetDlgItem(hDlg, IDC_COMBO_AREA);
     SendMessage(hComboArea, CB_RESETCONTENT, 0, 0);
-
-    // Critical: Lock SDK while enumerating LEDs
     std::lock_guard<std::mutex> lock(g_sdkMutex);
 
     if (!deviceType || !lpMLAPI_GetLedInfo || !lpMLAPI_GetDeviceInfo) { EnableWindow(hComboArea, FALSE); return; }
@@ -825,16 +759,23 @@ void PopulateAreaList(HWND hDlg, const wchar_t* deviceType) {
 
         if (currentDeviceLedCount <= 0) currentDeviceLedCount = 0;
 
-        for (DWORD i = 0; i < (DWORD)currentDeviceLedCount; i++) {
-            BSTR ledName = nullptr; SAFEARRAY* pStyles = nullptr;
-            if (lpMLAPI_GetLedInfo((BSTR)deviceType, i, &ledName, &pStyles) == 0) {
-                int idx = (int)SendMessageW(hComboArea, CB_ADDSTRING, 0, (LPARAM)(ledName ? ledName : L"Unknown Area"));
-                SendMessage(hComboArea, CB_SETITEMDATA, idx, (LPARAM)i);
-                if (i == (DWORD)g_Global.profiles[g_Global.activeProfileIndex].targetLedIndex) SendMessage(hComboArea, CB_SETCURSEL, idx, 0);
-                if (pStyles) SafeArrayDestroy(pStyles);
-                if (ledName) SysFreeString(ledName);
+        // --- CRITICAL FIX: Convert const wchar_t* to valid BSTR for SDK ---
+        BSTR bstrDevice = SysAllocString(deviceType);
+        if (bstrDevice) {
+            for (DWORD i = 0; i < (DWORD)currentDeviceLedCount; i++) {
+                BSTR ledName = nullptr; SAFEARRAY* pStyles = nullptr;
+                // Pass valid BSTR, not raw pointer cast
+                if (lpMLAPI_GetLedInfo(bstrDevice, i, &ledName, &pStyles) == 0) {
+                    int idx = (int)SendMessageW(hComboArea, CB_ADDSTRING, 0, (LPARAM)(ledName ? ledName : L"Unknown Area"));
+                    SendMessage(hComboArea, CB_SETITEMDATA, idx, (LPARAM)i);
+                    if (i == (DWORD)g_Global.profiles[g_Global.activeProfileIndex].targetLedIndex) SendMessage(hComboArea, CB_SETCURSEL, idx, 0);
+                    if (pStyles) SafeArrayDestroy(pStyles);
+                    if (ledName) SysFreeString(ledName);
+                }
             }
+            SysFreeString(bstrDevice);
         }
+        // ------------------------------------------------------------------
     }
 
     int finalCount = (int)SendMessage(hComboArea, CB_GETCOUNT, 0, 0);
@@ -857,55 +798,49 @@ static void ShowNotification(HWND hWnd, HINSTANCE hInstance, const wchar_t* titl
 }
 
 static void LoadProfileToUI(HWND hDlg, int profileIndex) {
+    if (profileIndex < 0 || profileIndex > 4) return;
     Config& p = g_Global.profiles[profileIndex];
 
-    // Basic controls
     SetDlgItemInt(hDlg, IDC_TEMP_LOW, p.tempLow, TRUE);
     SetDlgItemInt(hDlg, IDC_TEMP_MED, p.tempMed, TRUE);
     SetDlgItemInt(hDlg, IDC_TEMP_HIGH, p.tempHigh, TRUE);
-
     wchar_t hexBuf[10];
     ColorToHex(p.colorLow, hexBuf, 10); SetDlgItemTextW(hDlg, IDC_HEX_LOW, hexBuf);
     ColorToHex(p.colorMed, hexBuf, 10); SetDlgItemTextW(hDlg, IDC_HEX_MED, hexBuf);
     ColorToHex(p.colorHigh, hexBuf, 10); SetDlgItemTextW(hDlg, IDC_HEX_HIGH, hexBuf);
     SetDlgItemTextW(hDlg, IDC_EDIT_LABEL, p.label);
     SetDlgItemTextW(hDlg, IDC_EDIT_SERVER, p.webServerUrl);
-
-    // Advanced Settings
     SendMessage(GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE), CB_SETCURSEL, (p.sensorUpdateMS == 250) ? 0 : (p.sensorUpdateMS == 1000 ? 2 : 1), 0);
     SendMessage(GetDlgItem(hDlg, IDC_COMBO_LED_FPS), CB_SETCURSEL, (p.ledRefreshFPS == 20) ? 1 : (p.ledRefreshFPS == 15 ? 2 : 0), 0);
-
     HWND hSmoothing = GetDlgItem(hDlg, IDC_COMBO_SMOOTHING);
-    if (p.smoothingFactor > 0.9f) SendMessage(hSmoothing, CB_SETCURSEL, 0, 0); // Disabled
-    else if (p.smoothingFactor < 0.1f) SendMessage(hSmoothing, CB_SETCURSEL, 1, 0); // Slow
-    else if (p.smoothingFactor > 0.2f) SendMessage(hSmoothing, CB_SETCURSEL, 3, 0); // Fast
-    else SendMessage(hSmoothing, CB_SETCURSEL, 2, 0); // Normal
+    if (p.smoothingFactor > 0.9f) SendMessage(hSmoothing, CB_SETCURSEL, 0, 0);
+    else if (p.smoothingFactor < 0.1f) SendMessage(hSmoothing, CB_SETCURSEL, 1, 0);
+    else if (p.smoothingFactor > 0.2f) SendMessage(hSmoothing, CB_SETCURSEL, 3, 0);
+    else SendMessage(hSmoothing, CB_SETCURSEL, 2, 0);
 
-    // Device Sync
+    // --- SAFETY FIX FOR COMBOBOX ---
     HWND hComboDev = GetDlgItem(hDlg, IDC_COMBO_DEVICE);
     int devCount = (int)SendMessage(hComboDev, CB_GETCOUNT, 0, 0);
-    for (int i = 0; i < devCount; i++) {
-        wchar_t* devName = (wchar_t*)SendMessage(hComboDev, CB_GETITEMDATA, i, 0);
-        if (devName && devName != (wchar_t*)CB_ERR && wcscmp(devName, p.targetDevice) == 0) {
-            SendMessage(hComboDev, CB_SETCURSEL, i, 0);
-            PopulateAreaList(hDlg, p.targetDevice);
-            break;
+    if (devCount > 0) {
+        int indexToSelect = 0;
+        for (int i = 0; i < devCount; i++) {
+            wchar_t* devName = (wchar_t*)SendMessage(hComboDev, CB_GETITEMDATA, i, 0);
+            if (devName && devName != (wchar_t*)CB_ERR && wcscmp(devName, p.targetDevice) == 0) {
+                indexToSelect = i; PopulateAreaList(hDlg, p.targetDevice); break;
+            }
         }
+        SendMessage(hComboDev, CB_SETCURSEL, indexToSelect, 0);
     }
-    EnableWindow(hComboDev, devCount > 1);
-
-    // Sensor Sync
     HWND hComboSens = GetDlgItem(hDlg, IDC_SENSOR_ID);
     int sensCount = (int)SendMessage(hComboSens, CB_GETCOUNT, 0, 0);
-    for (int i = 0; i < sensCount; i++) {
-        wchar_t* sID = (wchar_t*)SendMessage(hComboSens, CB_GETITEMDATA, i, 0);
-        if (sID && sID != (wchar_t*)CB_ERR && wcscmp(sID, p.sensorID) == 0) {
-            SendMessage(hComboSens, CB_SETCURSEL, i, 0);
-            break;
+    if (sensCount > 0) {
+        int indexToSelect = 0;
+        for (int i = 0; i < sensCount; i++) {
+            wchar_t* sID = (wchar_t*)SendMessage(hComboSens, CB_GETITEMDATA, i, 0);
+            if (sID && sID != (wchar_t*)CB_ERR && wcscmp(sID, p.sensorID) == 0) { indexToSelect = i; break; }
         }
+        SendMessage(hComboSens, CB_SETCURSEL, indexToSelect, 0);
     }
-    EnableWindow(hComboSens, sensCount > 1);
-
     CheckDlgButton(hDlg, IDC_CHK_ACTIVE_PROFILE, (profileIndex == g_Global.activeProfileIndex) ? BST_CHECKED : BST_UNCHECKED);
     InvalidateRect(hDlg, NULL, TRUE);
 }
@@ -913,20 +848,15 @@ static void LoadProfileToUI(HWND hDlg, int profileIndex) {
 static void SaveUIToProfile(HWND hDlg, int profileIndex) {
     if (profileIndex < 0 || profileIndex >= 5) return;
     Config& p = g_Global.profiles[profileIndex];
-
-    // 1. Basic Data
     p.tempLow = GetDlgItemInt(hDlg, IDC_TEMP_LOW, NULL, TRUE);
     p.tempMed = GetDlgItemInt(hDlg, IDC_TEMP_MED, NULL, TRUE);
     p.tempHigh = GetDlgItemInt(hDlg, IDC_TEMP_HIGH, NULL, TRUE);
-
     wchar_t buf[256];
     GetDlgItemTextW(hDlg, IDC_HEX_LOW, buf, 10); p.colorLow = HexToColor(buf);
     GetDlgItemTextW(hDlg, IDC_HEX_MED, buf, 10); p.colorMed = HexToColor(buf);
     GetDlgItemTextW(hDlg, IDC_HEX_HIGH, buf, 10); p.colorHigh = HexToColor(buf);
     GetDlgItemTextW(hDlg, IDC_EDIT_SERVER, p.webServerUrl, 256);
     GetDlgItemTextW(hDlg, IDC_EDIT_LABEL, p.label, 64);
-
-    // 2. MSI Device
     HWND hComboDev = GetDlgItem(hDlg, IDC_COMBO_DEVICE);
     if (IsWindowEnabled(hComboDev)) {
         int idx = (int)SendMessage(hComboDev, CB_GETCURSEL, 0, 0);
@@ -935,8 +865,6 @@ static void SaveUIToProfile(HWND hDlg, int profileIndex) {
             if (val && val != (wchar_t*)CB_ERR) wcscpy_s(p.targetDevice, val);
         }
     }
-
-    // 3. Sensor ID
     HWND hComboSens = GetDlgItem(hDlg, IDC_SENSOR_ID);
     if (IsWindowEnabled(hComboSens)) {
         int idx = (int)SendMessage(hComboSens, CB_GETCURSEL, 0, 0);
@@ -945,14 +873,10 @@ static void SaveUIToProfile(HWND hDlg, int profileIndex) {
             if (val && val != (wchar_t*)CB_ERR) wcscpy_s(p.sensorID, val);
         }
     }
-
-    // 4. Advanced Config
     int idxUpd = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE), CB_GETCURSEL, 0, 0);
     p.sensorUpdateMS = (idxUpd == 0) ? 250 : (idxUpd == 2 ? 1000 : 500);
-
     int idxFPS = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_LED_FPS), CB_GETCURSEL, 0, 0);
     p.ledRefreshFPS = (idxFPS == 1) ? 20 : (idxFPS == 2 ? 15 : 25);
-
     int idxSm = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_GETCURSEL, 0, 0);
     if (idxSm == 0) p.smoothingFactor = 1.0f;
     else if (idxSm == 1) p.smoothingFactor = 0.05f;
@@ -960,13 +884,9 @@ static void SaveUIToProfile(HWND hDlg, int profileIndex) {
     else p.smoothingFactor = 0.15f;
 }
 
-// Global WNDPROC for Edit Control Subclassing
 WNDPROC oldEditProc;
 static COLORREF g_CustomColors[16] = { 0 };
 
-/**
- * Subclass procedure for Edit Controls to enable color picker on click.
- */
 LRESULT CALLBACK ColorEditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_LBUTTONUP) {
         CHOOSECOLOR cc = { 0 }; cc.lStructSize = sizeof(cc); cc.hwndOwner = GetParent(hWnd);
@@ -984,7 +904,6 @@ LRESULT CALLBACK ColorEditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
 INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
     static HBRUSH hBrushLow = NULL, hBrushMed = NULL, hBrushHigh = NULL;
     static int s_currentTab = 0;
-
     switch (message) {
     case WM_APP_DEVICES_READY: {
         DeviceFetchResult* res = reinterpret_cast<DeviceFetchResult*>(lParam);
@@ -1026,12 +945,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         int x = (GetSystemMetrics(SM_CXSCREEN) - (rcDlg.right - rcDlg.left)) / 2;
         int y = (GetSystemMetrics(SM_CYSCREEN) - (rcDlg.bottom - rcDlg.top)) / 2;
         SetWindowPos(hDlg, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE);
-
-        // NOTE: Configuration is NOT loaded here to prevent race conditions.
-        // It is already loaded in WinMain via g_Global.
-
         s_currentTab = g_Global.activeProfileIndex;
-
         HWND hTab = GetDlgItem(hDlg, IDC_TAB_PROFILES);
         if (hTab) {
             TabCtrl_DeleteAllItems(hTab); TCITEMW tie = { 0 }; tie.mask = TCIF_TEXT;
@@ -1048,17 +962,14 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_ADDSTRING, 0, (LPARAM)L"Slow");
         SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_ADDSTRING, 0, (LPARAM)L"Normal");
         SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_ADDSTRING, 0, (LPARAM)L"Fast");
-
         HWND hComboDev = GetDlgItem(hDlg, IDC_COMBO_DEVICE); HWND hComboSens = GetDlgItem(hDlg, IDC_SENSOR_ID);
         SendMessage(hComboDev, CB_RESETCONTENT, 0, 0); SendMessage(hComboSens, CB_RESETCONTENT, 0, 0);
         SendMessage(hComboDev, CB_ADDSTRING, 0, (LPARAM)L"Scanning hardware...");
         SendMessage(hComboSens, CB_ADDSTRING, 0, (LPARAM)L"Fetching sensors...");
         SendMessage(hComboDev, CB_SETCURSEL, 0, 0); SendMessage(hComboSens, CB_SETCURSEL, 0, 0);
         EnableWindow(hComboDev, FALSE); EnableWindow(hComboSens, FALSE);
-
         std::thread(AsyncPopulateDevices, hDlg).detach();
         std::thread(AsyncPopulateSensors, hDlg, std::wstring(g_Global.profiles[s_currentTab].webServerUrl)).detach();
-
         LoadProfileToUI(hDlg, s_currentTab);
         hBrushLow = CreateSolidBrush(g_Global.profiles[s_currentTab].colorLow);
         hBrushMed = CreateSolidBrush(g_Global.profiles[s_currentTab].colorMed);
@@ -1130,7 +1041,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             g_ResetHttp = true; g_asyncTemp = -1.0f; g_activeSource = DataSource::Searching; forceLEDRefresh();
             SetEvent(g_hSensorEvent);
             Log("[MysticFight] Profiles saved and engine restarted.");
-            DestroyWindow(hDlg); // Modeless dialog destroy
+            DestroyWindow(hDlg);
             return TRUE;
         }
         case IDCANCEL: DestroyWindow(hDlg); return TRUE;
@@ -1157,8 +1068,10 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         break;
     }
     case WM_DESTROY:
-        g_hSettingsDlg = NULL; // RESET GLOBAL HANDLE
-        if (hBrushLow) DeleteObject(hBrushLow); if (hBrushMed) DeleteObject(hBrushMed); if (hBrushHigh) DeleteObject(hBrushHigh);
+        g_hSettingsDlg = NULL;
+        if (hBrushLow) { DeleteObject(hBrushLow); hBrushLow = NULL; }
+        if (hBrushMed) { DeleteObject(hBrushMed); hBrushMed = NULL; }
+        if (hBrushHigh) { DeleteObject(hBrushHigh); hBrushHigh = NULL; }
         ClearComboHeapData(GetDlgItem(hDlg, IDC_SENSOR_ID)); ClearComboHeapData(GetDlgItem(hDlg, IDC_COMBO_DEVICE));
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_LOW), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_MED), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
@@ -1222,7 +1135,7 @@ static void FinalCleanup(HWND hWnd) {
     if (g_hLibrary) {
         if (g_deviceName && lpMLAPI_SetLedStyle) {
             _bstr_t bstrOff(L"Off");
-            std::lock_guard<std::mutex> lock(g_sdkMutex); // PROTECT SDK ON EXIT
+            std::lock_guard<std::mutex> lock(g_sdkMutex);
             lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
         }
         if (lpMLAPI_Release) lpMLAPI_Release();
@@ -1291,7 +1204,7 @@ void SwitchActiveProfile(HWND hWnd, int index) {
     g_asyncTemp = -1.0f; g_ResetHttp = true; g_activeSource = DataSource::Searching; forceLEDRefresh();
     wchar_t msg[128];
     {
-        std::lock_guard<std::mutex> lock(g_cfgMutex); // Safe Read
+        std::lock_guard<std::mutex> lock(g_cfgMutex);
         swprintf_s(msg, L"Switched to %ls", g_Global.profiles[g_Global.activeProfileIndex].label);
     }
     ShowNotification(hWnd, GetModuleHandle(NULL), L"MysticFight", msg);
@@ -1299,7 +1212,7 @@ void SwitchActiveProfile(HWND hWnd, int index) {
 }
 
 // ============================================================================
-// ENTRY POINT & CORE LOOP
+// ENTRY POINT
 // ============================================================================
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
@@ -1308,21 +1221,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (FAILED(hr)) { Log("[MysticFight] Critical: COM Initialization failed."); return 1; }
 
-    // Single Instance Check
     g_hMutex = CreateMutexW(NULL, TRUE, L"Global\\MysticFight_Unique_Mutex");
     if (g_hMutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS) {
         if (g_hMutex) { MessageBoxW(NULL, L"MysticFight is already running.", L"Information", MB_OK | MB_ICONINFORMATION); CloseHandle(g_hMutex); }
         CoUninitialize(); return 0;
     }
 
-    // Component Extraction & Loading
     if (!ExtractMSIDLL() || !(g_hLibrary = LoadLibraryW(L"MysticLight_SDK.dll"))) {
         Log("[MysticFight] FATAL: Component preparation failed.");
         MessageBoxW(NULL, L"Critical Error: Required components (DLL) could not be prepared.", L"MysticFight - Error", MB_OK | MB_ICONERROR);
         if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); } CoUninitialize(); return 1;
     }
 
-    // Bind SDK Functions
     lpMLAPI_Initialize = (LPMLAPI_Initialize)GetProcAddress(g_hLibrary, "MLAPI_Initialize");
     lpMLAPI_GetDeviceInfo = (LPMLAPI_GetDeviceInfo)GetProcAddress(g_hLibrary, "MLAPI_GetDeviceInfo");
     lpMLAPI_SetLedColor = (LPMLAPI_SetLedColor)GetProcAddress(g_hLibrary, "MLAPI_SetLedColor");
@@ -1335,7 +1245,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     TrimLogFile();
     char versionMsg[128]; snprintf(versionMsg, sizeof(versionMsg), "[MysticFight] MysticFight %ls started", APP_VERSION); Log(versionMsg);
 
-    // 1. First Run Detection
     bool isFirstRun = (GetFileAttributesW(INI_FILE) == INVALID_FILE_ATTRIBUTES);
 
     LoadSettings();
@@ -1352,7 +1261,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     g_hSourceResolvedEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
     std::thread sThread(SensorThread);
 
-    // 2. SDK Initialization (Timeout Protected)
     ULONGLONG startTime = GetTickCount64(); bool sdkReady = false;
     while (GetTickCount64() - startTime < 5000) {
         if (lpMLAPI_Initialize && lpMLAPI_Initialize() == 0) { sdkReady = true; Log("[MysticFight] SDK Initialized successfully."); break; }
@@ -1368,61 +1276,57 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     MSIHwardwareDetection();
 
-    // 3. Sensor Discovery Wait (Timeout Protected)
-    ULONGLONG elapsed = GetTickCount64() - startTime;
-    WaitForSingleObject(g_hSourceResolvedEvent, (elapsed >= 5000) ? 0 : (5000 - (DWORD)elapsed));
-
-    // 4. Sensor Check
-    if (g_activeSource == DataSource::Searching) {
-        // FATAL only if NOT first run. If first run, proceed to UI for configuration.
-        if (!isFirstRun) {
-            Log("[MysticFight] FATAL: No valid data source (HTTP) found.");
-            MessageBoxW(NULL, L"Fatal Error: No temperature data source found (LibreHardwareMonitor HTTP).\n\nPlease ensure LibreHardwareMonitor is running and the Web Server is active.", L"MysticFight - Startup Error", MB_OK | MB_ICONERROR);
-            g_Running = false; sThread.join(); return 1;
-        }
-    }
-
-    // 5. Intelligent First-Run Configuration
+    // ========================================================================
+    // LOGIC BLOCKING FOR FIRST RUN
+    // ========================================================================
     if (isFirstRun) {
-        // A) Assign detected device
+        bool sensorFound = false;
+
+        while (!sensorFound && g_Running) {
+            if (AutoSelectFirstSensor()) {
+                sensorFound = true;
+                Log("First Run: Sensor detected via LHM HTTP.");
+            }
+            else {
+                int ret = MessageBoxW(NULL, L"Could not find a valid sensor in LibreHardwareMonitor.\n\nEnsure LHM is running and the Web Server is enabled.\n\nRetry?", L"First Run Setup", MB_RETRYCANCEL | MB_ICONWARNING);
+                if (ret == IDCANCEL) {
+                    g_Running = false;
+                    FinalCleanup(NULL);
+                    return 0; // Exit app
+                }
+            }
+        }
+
+        // Apply defaults now that we have data
         if (g_deviceName) {
             std::lock_guard<std::mutex> lock(g_cfgMutex);
             wcscpy_s(g_Global.profiles[g_Global.activeProfileIndex].targetDevice, g_deviceName);
         }
-        // B) Auto-detect sensor
-        AutoSelectFirstSensor();
 
-        // C) Persist defaults immediately
-        SaveSettings();
-        Log("[MysticFight] First Run: Defaults auto-detected and saved to config.ini");
-    }
+        SaveSettings(); // Save immediately
+        Log("First Run: Default settings saved.");
 
-    // Tray Icon Setup
-    NOTIFYICONDATAW nid = { sizeof(NOTIFYICONDATAW), hWnd, 1, NIF_ICON | NIF_MESSAGE | NIF_TIP, WM_TRAYICON };
-    nid.hIcon = wc.hIcon; swprintf_s(nid.szTip, _countof(nid.szTip), L"MysticFight %ls", APP_VERSION); Shell_NotifyIconW(NIM_ADD, &nid);
-
-    // Auto-Open Settings on First Run
-    if (isFirstRun) {
+        // NOW open window
         g_hSettingsDlg = CreateDialogParamW(hInstance, MAKEINTRESOURCEW(IDD_SETTINGS), hWnd, (DLGPROC)SettingsDlgProc, 0);
         ShowWindow(g_hSettingsDlg, SW_SHOW);
     }
+    // ========================================================================
 
-    // Hotkey Registration
-    RegisterHotKey(hWnd, 1, MOD_CONTROL | MOD_SHIFT | MOD_ALT, 0x4C); // Global Toggle
-    RegisterHotKey(hWnd, 101, MOD_CONTROL | MOD_SHIFT | MOD_ALT, '1'); // Profile 1
-    RegisterHotKey(hWnd, 102, MOD_CONTROL | MOD_SHIFT | MOD_ALT, '2'); // Profile 2
-    RegisterHotKey(hWnd, 103, MOD_CONTROL | MOD_SHIFT | MOD_ALT, '3'); // Profile 3
-    RegisterHotKey(hWnd, 104, MOD_CONTROL | MOD_SHIFT | MOD_ALT, '4'); // Profile 4
-    RegisterHotKey(hWnd, 105, MOD_CONTROL | MOD_SHIFT | MOD_ALT, '5'); // Profile 5
+    NOTIFYICONDATAW nid = { sizeof(NOTIFYICONDATAW), hWnd, 1, NIF_ICON | NIF_MESSAGE | NIF_TIP, WM_TRAYICON };
+    nid.hIcon = wc.hIcon; swprintf_s(nid.szTip, _countof(nid.szTip), L"MysticFight %ls", APP_VERSION); Shell_NotifyIconW(NIM_ADD, &nid);
+
+    RegisterHotKey(hWnd, 1, MOD_CONTROL | MOD_SHIFT | MOD_ALT, 0x4C);
+    RegisterHotKey(hWnd, 101, MOD_CONTROL | MOD_SHIFT | MOD_ALT, '1');
+    RegisterHotKey(hWnd, 102, MOD_CONTROL | MOD_SHIFT | MOD_ALT, '2');
+    RegisterHotKey(hWnd, 103, MOD_CONTROL | MOD_SHIFT | MOD_ALT, '3');
+    RegisterHotKey(hWnd, 104, MOD_CONTROL | MOD_SHIFT | MOD_ALT, '4');
+    RegisterHotKey(hWnd, 105, MOD_CONTROL | MOD_SHIFT | MOD_ALT, '5');
     ShowNotification(hWnd, hInstance, windowTitle, L"Let's dance baby");
 
     _bstr_t bstrOff(L"Off"); _bstr_t bstrBreath(L"Breath"); _bstr_t bstrSteady(L"Steady");
     DWORD targetR = 0, targetG = 0, targetB = 0;
     MSG msg = { 0 }; bool lhmAlive = true; bool firstRun = true; int status = 0;
 
-    // ========================================================================
-    // MAIN APPLICATION LOOP
-    // ========================================================================
     while (g_Running) {
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) { g_Running = false; break; }
@@ -1432,9 +1336,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         ULONGLONG currentTime = GetTickCount64();
 
-        // --------------------------------------------------------------------
-        // WATCHDOG & RECOVERY STATE
-        // --------------------------------------------------------------------
         if (g_Resetting_sdk) {
             if (currentTime >= g_ResetTimer) {
                 switch (g_ResetStage) {
@@ -1449,23 +1350,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 }
             }
         }
-        // --------------------------------------------------------------------
-        // NO SIGNAL STATE (Breath Effect)
-        // --------------------------------------------------------------------
         else if (g_activeSource == DataSource::Searching) {
-            if (lhmAlive) {
-                lhmAlive = false;
-                std::lock_guard<std::mutex> lock(g_sdkMutex);
-                if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_target_device, g_Global.profiles[g_Global.activeProfileIndex].targetLedIndex, bstrBreath);
-                if (status == 0 && lpMLAPI_SetLedColor) status = lpMLAPI_SetLedColor(g_target_device, g_Global.profiles[g_Global.activeProfileIndex].targetLedIndex, 255, 255, 255);
+            if (AutoSelectFirstSensor()) {
+                g_activeSource = DataSource::HTTP;
+                SetEvent(g_hSourceResolvedEvent);
+            }
+            else {
+                if (lhmAlive) {
+                    lhmAlive = false;
+                    std::lock_guard<std::mutex> lock(g_sdkMutex);
+                    if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_target_device, g_Global.profiles[g_Global.activeProfileIndex].targetLedIndex, bstrBreath);
+                    if (status == 0 && lpMLAPI_SetLedColor) status = lpMLAPI_SetLedColor(g_target_device, g_Global.profiles[g_Global.activeProfileIndex].targetLedIndex, 255, 255, 255);
+                }
             }
         }
-        // --------------------------------------------------------------------
-        // ACTIVE STATE (Gradient Calculation)
-        // --------------------------------------------------------------------
         else if (g_LedsEnabled) {
             float rawTemp = g_asyncTemp.load();
-
             Config localCfg;
             { std::lock_guard<std::mutex> lock(g_cfgMutex); localCfg = g_Global.profiles[g_Global.activeProfileIndex]; }
 
@@ -1501,7 +1401,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 }
             }
 
-            // Smoothing & Interpolation
             float r = currR.load(); float g = currG.load(); float b = currB.load();
             r += ((float)targetR - r) * localCfg.smoothingFactor;
             g += ((float)targetG - g) * localCfg.smoothingFactor;
@@ -1510,21 +1409,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             DWORD sendR = (DWORD)currR; DWORD sendG = (DWORD)currG; DWORD sendB = (DWORD)currB;
 
             if (sendR != lastR || sendG != lastG || sendB != lastB) {
-                // SDK CALL (Protected)
                 std::lock_guard<std::mutex> sdkLock(g_sdkMutex);
-
                 if (lastR == RGB_LEDS_OFF || lastR == RGB_LED_REFRESH) {
                     if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(localCfg.targetDevice, localCfg.targetLedIndex, bstrSteady);
                 }
                 if (status == 0 && lpMLAPI_SetLedColor) status = lpMLAPI_SetLedColor(localCfg.targetDevice, localCfg.targetLedIndex, sendR, sendG, sendB);
-
                 if (status != 0) { g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0; }
                 else { lastR = sendR; lastG = sendG; lastB = sendB; }
             }
         }
-        // --------------------------------------------------------------------
-        // DISABLED STATE (Lights Off)
-        // --------------------------------------------------------------------
         else {
             if (lastR != RGB_LEDS_OFF) {
                 int status = 0;
@@ -1537,13 +1430,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             }
         }
 
-        // Frame pacing
         DWORD fps = 25;
         { std::lock_guard<std::mutex> lock(g_cfgMutex); fps = g_Global.profiles[g_Global.activeProfileIndex].ledRefreshFPS; }
         MsgWaitForMultipleObjects(0, NULL, FALSE, g_LedsEnabled ? (DWORD)(1000 / fps) : (DWORD)MAIN_LOOP_OFF_DELAY_MS, QS_ALLINPUT);
     }
 
-    // Cleanup
     if (g_windows_shutdown) ShutdownBlockReasonCreate(hWnd, L"Mystic Fight Shutdown...");
     if (g_hConnect) WinHttpCloseHandle(g_hConnect); if (g_hSession) WinHttpCloseHandle(g_hSession);
     SetEvent(g_hSensorEvent); if (sThread.joinable()) sThread.join();
