@@ -50,7 +50,7 @@
 #define ID_TRAY_ABOUT 4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.61";
+const wchar_t* APP_VERSION = L"v2.62";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -141,14 +141,23 @@ _COM_SMARTPTR_TYPEDEF(ILogonTrigger, __uuidof(ILogonTrigger));
 // GLOBAL STATE VARIABLES
 // =============================================================
 
-// Configuration & Synchronization
+// 1. Definimos la estructura global y RESERVAMOS espacio (sin extern)
 struct GlobalConfig {
     Config profiles[5];
     int activeProfileIndex;
 };
+
+// Aquí es donde creamos el objeto real en memoria
 GlobalConfig g_Global;
-// Macro to maintain compatibility with existing code that uses g_cfg
-#define g_cfg g_Global.profiles[g_Global.activeProfileIndex]
+
+// 2. La función de acceso (inline para que sea rápida como una bala)
+inline Config& GetCfgSafe() {
+    return g_Global.profiles[g_Global.activeProfileIndex];
+}
+
+// 3. La macro que hace que todo tu código antiguo funcione
+#define g_cfg GetCfgSafe()
+
 std::mutex g_cfgMutex;
 std::mutex g_httpMutex;
 std::atomic<bool> g_ResetHttp(false);
@@ -925,6 +934,7 @@ void LoadSettings() {
 
     if (wcslen(g_cfg.sensorID) == 0) {
         AutoSelectFirstSensor();
+        SaveSettings();
     }
 }
 
@@ -1383,38 +1393,53 @@ static bool AutoSelectFirstSensor() {
     }
 
     std::string json = FetchLHMJson(localURL, HTTP_FAST_TIMEOUT);
+    
     if (json.empty()) {
         Log("[MysticFight] Auto-select failed: HTTP connection unavailable.");
         return false;
     }
 
     std::string typeKey = "\"Type\":\"Temperature\"";
+    
     size_t pos = json.find(typeKey);
+    
     if (pos != std::string::npos) {
+        
         size_t blockStart = json.rfind('{', pos);
+        
         size_t blockEnd = json.find('}', pos);
+        
         if (blockStart != std::string::npos && blockEnd != std::string::npos) {
+            
             std::string block = json.substr(blockStart, blockEnd - blockStart + 1);
+            
             std::wstring id = ExtractJsonString(block, "SensorId");
 
             if (!id.empty()) {
+                
                 std::lock_guard<std::mutex> lock(g_cfgMutex);
-                wcscpy_s(g_cfg.sensorID, id.c_str());
-                WritePrivateProfileStringW(L"Settings", L"SensorID", g_cfg.sensorID,
-                    INI_FILE);
+                
+                // --- SOLUCIÓN: RELLENAR TODOS LOS PERFILES VACÍOS ---
+                
+                for (int i = 0; i < 5; i++) {
+                    if (wcslen(g_Global.profiles[i].sensorID) == 0) {
+                        wcscpy_s(g_Global.profiles[i].sensorID, id.c_str());
+                    }
+                }
 
                 char logBuf[LOG_BUFFER_SIZE];
-                snprintf(logBuf, sizeof(logBuf),
-                    "[MysticFight] Auto-selected default sensor (HTTP): %ls",
-                    g_cfg.sensorID);
+                
+                snprintf(logBuf, sizeof(logBuf), "[MysticFight] First run: Auto-assigned sensor %ls to all empty profiles.", id.c_str());
+                
                 Log(logBuf);
+
                 return true;
             }
         }
     }
 
-    Log("[MysticFight] Auto-select failed: No temperature sensors found in HTTP "
-        "JSON.");
+    Log("[MysticFight] Auto-select failed: No temperature sensors founds in LHM JSON RESPONSE");
+
     return false;
 }
 
@@ -2068,33 +2093,29 @@ INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam,
     return (INT_PTR)FALSE;
 }
 
-void SwitchActiveProfile(HWND hWnd, int index) {
-    if (index < 0 || index >= 5)
-        return;
+static void SwitchActiveProfile(HWND hWnd, int index) {
+    if (index < 0 || index >= 5) return;
 
     {
         std::lock_guard<std::mutex> lock(g_cfgMutex);
         g_Global.activeProfileIndex = index;
     }
 
-    // Persist the change
     SaveSettings();
 
-    // Reset state to force immediate sensor/LHM discovery on next poll
-    g_asyncTemp = -1.0f;
-    g_ResetHttp = true;
+    // RESET PARANOICO DE ESTADO
+    g_lastDataSourceSearchRetry = 0; // Fuerza búsqueda inmediata
+    g_ResetHttp = true;             // Cierra sockets antiguos
     g_activeSource = DataSource::Searching;
+    g_asyncTemp = -1.0f;
+
+    ResetEvent(g_hSourceResolvedEvent);
     forceLEDRefresh();
 
-    // Notify user via tray balcony
+    // Notificación
     wchar_t msg[128];
     swprintf_s(msg, L"Switched to %ls", g_cfg.label);
     ShowNotification(hWnd, GetModuleHandle(NULL), L"MysticFight", msg);
-
-    char logMsg[128];
-    snprintf(logMsg, sizeof(logMsg),
-        "[MysticFight] Hotkey triggered: Switched to Profile %d", index + 1);
-    Log(logMsg);
 }
 
 // =============================================================
