@@ -8,7 +8,7 @@
  * and MSI Mystic Light SDK. It dynamically adjusts RGB lighting based on
  * system temperature sensors with profile support and background persistence.
  *
- * Author:  tonikelope
+ * Architecture: Synchronous UI with threaded sensor polling.
  *
  * ============================================================================
  */
@@ -56,25 +56,23 @@ const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
 
+// UI & Tray Identifiers
 #define WM_TRAYICON             (WM_USER + 1)
-#define WM_APP_DEVICES_READY    (WM_USER + 5)
-#define WM_APP_SENSORS_READY    (WM_USER + 6)
-
 #define ID_TRAY_EXIT            1001
 #define ID_TRAY_CONFIG          2001
 #define ID_TRAY_LOG             3001
 #define ID_TRAY_ABOUT           4001
 
-const DWORD RGB_LED_REFRESH = 999;
-const DWORD RGB_LEDS_OFF = 1000;
+// Logic Sentinels
+const DWORD RGB_LED_REFRESH = 999;  // Signals a mandatory style refresh
+const DWORD RGB_LEDS_OFF = 1000; // Signals hardware is in OFF state
 
-const ULONGLONG MAIN_LOOP_DELAY_MS = 40;
+// Timings
 const ULONGLONG MAIN_LOOP_OFF_DELAY_MS = 1000;
 const ULONGLONG SENSOR_POLL_INTERVAL_MS = 500;
 const ULONGLONG LHM_RETRY_DELAY_MS = 5000;
 const ULONGLONG RESET_KILL_TASK_WAIT_MS = 2000;
 const ULONGLONG RESET_RESTART_TASK_DELAY_MS = 5000;
-
 const ULONGLONG HTTP_FAST_TIMEOUT = 1000;
 const ULONGLONG HTTP_NORMAL_TIMEOUT = 60000;
 
@@ -86,7 +84,10 @@ const int SENSOR_ID_LEN = 256;
 // DATA STRUCTURES
 // ============================================================================
 
-enum class DataSource { Searching, HTTP };
+enum class DataSource {
+    Searching,
+    HTTP
+};
 
 struct Config {
     wchar_t sensorID[SENSOR_ID_LEN];
@@ -106,16 +107,6 @@ struct GlobalConfig {
     int activeProfileIndex;
 };
 
-struct SensorFetchResult {
-    struct Item { std::wstring name; std::wstring id; };
-    std::vector<Item> items;
-};
-
-struct DeviceFetchResult {
-    struct Item { std::wstring friendlyName; std::wstring internalName; };
-    std::vector<Item> items;
-};
-
 // ============================================================================
 // MSI SDK DEFINITIONS
 // ============================================================================
@@ -129,6 +120,7 @@ typedef int (*LPMLAPI_SetLedStyle)(BSTR type, DWORD index, BSTR style);
 typedef int (*LPMLAPI_SetLedSpeed)(BSTR type, DWORD index, DWORD level);
 typedef int (*LPMLAPI_Release)();
 
+// COM Smart Pointers for Task Scheduler
 _COM_SMARTPTR_TYPEDEF(ITaskService, __uuidof(ITaskService));
 _COM_SMARTPTR_TYPEDEF(ITaskFolder, __uuidof(ITaskFolder));
 _COM_SMARTPTR_TYPEDEF(IRegisteredTask, __uuidof(IRegisteredTask));
@@ -148,10 +140,11 @@ _COM_SMARTPTR_TYPEDEF(ILogonTrigger, __uuidof(ILogonTrigger));
 // ============================================================================
 
 GlobalConfig g_Global;
+// Macro for backward compatibility
+#define g_cfg g_Global.profiles[g_Global.activeProfileIndex]
 
 std::mutex g_cfgMutex;
 std::mutex g_httpMutex;
-std::mutex g_sdkMutex;
 
 std::atomic<bool> g_ResetHttp(false);
 std::atomic<DataSource> g_activeSource{ DataSource::Searching };
@@ -168,8 +161,6 @@ HANDLE g_hMutex = NULL;
 HINTERNET g_hSession = NULL;
 HINTERNET g_hConnect = NULL;
 
-HWND g_hSettingsDlg = NULL;
-
 ULONGLONG g_ResetTimer = 0;
 bool g_Resetting_sdk = false;
 int g_ResetStage = 0;
@@ -184,6 +175,7 @@ BSTR g_deviceName = NULL;
 HMODULE g_hLibrary = NULL;
 int g_totalLeds = 0;
 
+// SDK Function Pointers
 LPMLAPI_Initialize lpMLAPI_Initialize = nullptr;
 LPMLAPI_GetDeviceInfo lpMLAPI_GetDeviceInfo = nullptr;
 LPMLAPI_SetLedColor lpMLAPI_SetLedColor = nullptr;
@@ -199,6 +191,7 @@ LPMLAPI_GetLedInfo lpMLAPI_GetLedInfo = nullptr;
 static void LoadProfileToUI(HWND hDlg, int profileIndex);
 static void SaveUIToProfile(HWND hDlg, int profileIndex);
 void PopulateAreaList(HWND hDlg, const wchar_t* deviceType);
+void PopulateSensorList(HWND hDlg, const wchar_t* webServerUrl = nullptr, const wchar_t* currentTargetID = nullptr);
 void SwitchActiveProfile(HWND hWnd, int index);
 static bool AutoSelectFirstSensor();
 
@@ -322,11 +315,40 @@ static void forceLEDRefresh() {
 }
 
 // ============================================================================
-// NETWORK
+// RESOURCE EXTRACTION (Restored)
+// ============================================================================
+
+static bool ExtractMSIDLL() {
+    wchar_t szPath[MAX_PATH];
+    GetModuleFileNameW(NULL, szPath, MAX_PATH);
+    wchar_t* lastSlash = wcsrchr(szPath, L'\\');
+    if (lastSlash) *(lastSlash + 1) = L'\0';
+
+    std::wstring dllPath = std::wstring(szPath) + L"MysticLight_SDK.dll";
+    if (GetFileAttributesW(dllPath.c_str()) != INVALID_FILE_ATTRIBUTES) return true;
+
+    HMODULE hModule = GetModuleHandle(NULL);
+    HRSRC hRes = FindResourceW(hModule, (LPCWSTR)MAKEINTRESOURCE(IDR_MSI_DLL), L"BINARY");
+    if (!hRes) return false;
+
+    HGLOBAL hData = LoadResource(hModule, hRes);
+    DWORD size = SizeofResource(hModule, hRes);
+    void* pData = LockResource(hData);
+
+    HANDLE hFile = CreateFileW(dllPath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return false;
+
+    DWORD written;
+    bool success = WriteFile(hFile, pData, size, &written, NULL);
+    CloseHandle(hFile);
+    return success;
+}
+
+// ============================================================================
+// HTTP & NETWORK LOGIC
 // ============================================================================
 
 static std::string FetchLHMJson(const wchar_t* serverUrl, int timeout) {
-    if (!g_Running) return "";
     std::lock_guard<std::mutex> lock(g_httpMutex);
 
     if (g_ResetHttp) {
@@ -340,7 +362,7 @@ static std::string FetchLHMJson(const wchar_t* serverUrl, int timeout) {
     bool connectionFailed = false;
 
     if (!g_hSession) {
-        g_hSession = WinHttpOpen(L"MysticFight (Persistent)", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        g_hSession = WinHttpOpen(L"MysticFight (Persistent)", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
         if (!g_hSession) return "";
     }
 
@@ -413,9 +435,232 @@ static float ParseLHMJsonForTemp(const std::string& json, const wchar_t* sensorI
     catch (...) { return -1.0f; }
 }
 
+static void LogAllLHMTemperatureSensors() {
+    Log("[MysticFight] --- DUMPING ALL LHM TEMPERATURE SENSORS ---");
+    wchar_t localURL[256];
+    {
+        std::lock_guard<std::mutex> lock(g_cfgMutex);
+        memcpy(localURL, g_cfg.webServerUrl, sizeof(g_cfg.webServerUrl));
+    }
+    std::string json = FetchLHMJson(localURL, HTTP_FAST_TIMEOUT);
+    if (!json.empty()) {
+        std::string typeKey = "\"Type\":\"Temperature\"";
+        size_t pos = 0; bool foundAny = false;
+        while ((pos = json.find(typeKey, pos)) != std::string::npos) {
+            size_t blockStart = json.rfind('{', pos); size_t blockEnd = json.find('}', pos);
+            if (blockStart != std::string::npos && blockEnd != std::string::npos) {
+                std::string block = json.substr(blockStart, blockEnd - blockStart + 1);
+                std::wstring name = ExtractJsonString(block, "Text");
+                std::wstring id = ExtractJsonString(block, "SensorId");
+                std::wstring valStr = ExtractJsonString(block, "Value");
+                if (!id.empty()) {
+                    std::wstring wVal = valStr; for (auto& c : wVal) if (c == L',') c = L'.';
+                    float valFloat = (float)_wtof(wVal.c_str());
+                    char buf[LOG_BUFFER_SIZE]; wchar_t wBuf[LOG_BUFFER_SIZE];
+                    swprintf(wBuf, LOG_BUFFER_SIZE, L"[MysticFight] [HTTP] ID: %ls | Name: %ls | Value: %.1f", id.c_str(), name.c_str(), valFloat);
+                    WideCharToMultiByte(CP_ACP, 0, wBuf, -1, buf, sizeof(buf), NULL, NULL);
+                    Log(buf); foundAny = true;
+                }
+            }
+            pos = blockEnd;
+        }
+        if (foundAny) Log("[MysticFight] --- END OF HTTP DUMP ---");
+    }
+}
+
 // ============================================================================
-// SETTINGS
+// SENSOR THREAD LOGIC (Restored)
 // ============================================================================
+
+static float GetCPUTempFast() {
+    ULONGLONG currentTime = GetTickCount64();
+    float temp = -1.0f;
+    wchar_t localSensorID[256]; wchar_t localURL[256];
+    {
+        std::lock_guard<std::mutex> lock(g_cfgMutex);
+        memcpy(localSensorID, g_cfg.sensorID, sizeof(g_cfg.sensorID));
+        memcpy(localURL, g_cfg.webServerUrl, sizeof(g_cfg.webServerUrl));
+    }
+
+    if (g_activeSource == DataSource::HTTP) {
+        std::string json = FetchLHMJson(localURL, HTTP_NORMAL_TIMEOUT);
+        if (json.empty()) {
+            g_httpConnectionDrops++;
+            if (g_httpConnectionDrops >= 2) {
+                Log("[MysticFight] HTTP connection lost for 2 consecutive polls. Resetting to SEARCH mode.");
+                g_activeSource = DataSource::Searching; g_httpConnectionDrops = 0;
+            }
+            return -1.0f;
+        }
+        g_httpConnectionDrops = 0;
+        temp = ParseLHMJsonForTemp(json, localSensorID);
+        return temp;
+    }
+    else {
+        if (currentTime - g_lastDataSourceSearchRetry <= LHM_RETRY_DELAY_MS) return -1.0f;
+        g_lastDataSourceSearchRetry = currentTime;
+        Log("[MysticFight] Attempting HTTP data source discovery...");
+        std::string json = FetchLHMJson(localURL, HTTP_NORMAL_TIMEOUT);
+        if (!json.empty()) {
+            g_activeSource = DataSource::HTTP;
+            Log("[MysticFight] Data Source detected: HTTP.");
+            SetEvent(g_hSourceResolvedEvent);
+            temp = ParseLHMJsonForTemp(json, localSensorID);
+            if (temp >= 0.0f) { LogAllLHMTemperatureSensors(); return temp; }
+            return -1.0f;
+        }
+    }
+    return -1.0f;
+}
+
+static void SensorThread() {
+    while (g_Running) {
+        if (g_LedsEnabled) {
+            g_asyncTemp = GetCPUTempFast();
+        }
+        DWORD waitMs = INFINITE;
+        if (g_LedsEnabled) {
+            std::lock_guard<std::mutex> lock(g_cfgMutex);
+            waitMs = (DWORD)g_cfg.sensorUpdateMS;
+        }
+        WaitForSingleObject(g_hSensorEvent, waitMs);
+    }
+}
+
+// ============================================================================
+// HARDWARE DETECTION (Restored)
+// ============================================================================
+
+static void MSIHwardwareDetection() {
+    SAFEARRAY* pDevType = nullptr; SAFEARRAY* pLedCount = nullptr;
+    if (lpMLAPI_GetDeviceInfo && lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0 && pDevType && pLedCount) {
+        BSTR* pTypes = nullptr; void* pCountsRaw = nullptr;
+        VARTYPE vtCount; SafeArrayGetVartype(pLedCount, &vtCount);
+        if (SUCCEEDED(SafeArrayAccessData(pDevType, (void**)&pTypes)) && SUCCEEDED(SafeArrayAccessData(pLedCount, &pCountsRaw))) {
+            long lBound, uBound; SafeArrayGetLBound(pDevType, 1, &lBound); SafeArrayGetUBound(pDevType, 1, &uBound);
+            if ((uBound - lBound + 1) > 0 && pTypes != nullptr && pTypes[0] != nullptr) {
+                if (g_deviceName) SysFreeString(g_deviceName);
+                g_deviceName = SysAllocString(pTypes[0]);
+                g_totalLeds = GetIntFromSafeArray(pCountsRaw, vtCount, 0);
+                BSTR friendlyName = NULL;
+                if (lpMLAPI_GetDeviceNameEx) lpMLAPI_GetDeviceNameEx(g_deviceName, 0, &friendlyName);
+                char devInfo[LOG_BUFFER_SIZE];
+                snprintf(devInfo, sizeof(devInfo), "[MysticFight] %ls (Type: %ls) | Logical Areas: %d", (friendlyName ? friendlyName : L"Unknown Device"), g_deviceName, g_totalLeds);
+                Log(devInfo);
+                if (friendlyName) SysFreeString(friendlyName);
+
+                Log("[MysticFight] Listing styles per area...");
+                for (DWORD i = 0; i < (DWORD)g_totalLeds; i++) {
+                    BSTR ledName = nullptr; SAFEARRAY* pStyles = nullptr;
+                    if (lpMLAPI_GetLedInfo(g_deviceName, i, &ledName, &pStyles) == 0) {
+                        char ledLine[LOG_BUFFER_SIZE]; snprintf(ledLine, sizeof(ledLine), "    [INDEX %lu] LED: %ls", i, (ledName ? ledName : L"Unknown"));
+                        Log(ledLine);
+                        if (pStyles) SafeArrayDestroy(pStyles);
+                        if (ledName) SysFreeString(ledName);
+                    }
+                }
+            }
+            SafeArrayUnaccessData(pDevType); SafeArrayUnaccessData(pLedCount);
+        }
+        SafeArrayDestroy(pDevType); SafeArrayDestroy(pLedCount);
+    }
+}
+
+// ============================================================================
+// TASK SCHEDULER & CONFIG LOGIC
+// ============================================================================
+
+static HRESULT ControlScheduledTask(const wchar_t* taskName, bool start) {
+    try {
+        ITaskServicePtr pService;
+        HRESULT hr = pService.CreateInstance(__uuidof(TaskScheduler), NULL, CLSCTX_INPROC_SERVER);
+        if (FAILED(hr)) return hr;
+        pService->Connect(_variant_t(), _variant_t(), _variant_t(), _variant_t());
+        ITaskFolderPtr pRootFolder;
+        pService->GetFolder(_bstr_t(L"\\"), &pRootFolder);
+        IRegisteredTaskPtr pTask;
+        hr = pRootFolder->GetTask(_bstr_t(taskName), &pTask);
+        if (FAILED(hr)) return hr;
+        if (start) { IRunningTaskPtr pRunningTask; return pTask->Run(_variant_t(), &pRunningTask); }
+        else { return pTask->Stop(0); }
+    }
+    catch (const _com_error& e) { return e.Error(); }
+}
+
+static bool ValidStartupTaskExists() {
+    wchar_t szCurrentPath[MAX_PATH];
+    if (GetModuleFileNameW(NULL, szCurrentPath, MAX_PATH) == 0) return false;
+    try {
+        ITaskServicePtr pService;
+        HRESULT hr = pService.CreateInstance(__uuidof(TaskScheduler), NULL, CLSCTX_INPROC_SERVER);
+        if (FAILED(hr)) return false;
+        hr = pService->Connect(_variant_t(), _variant_t(), _variant_t(), _variant_t());
+        if (FAILED(hr)) return false;
+        ITaskFolderPtr pRootFolder;
+        if (FAILED(pService->GetFolder(_bstr_t(L"\\"), &pRootFolder))) return false;
+        IRegisteredTaskPtr pRegisteredTask;
+        if (FAILED(pRootFolder->GetTask(_bstr_t(TASK_NAME), &pRegisteredTask))) return false;
+        ITaskDefinitionPtr pDefinition;
+        if (FAILED(pRegisteredTask->get_Definition(&pDefinition))) return false;
+        IActionCollectionPtr pActions;
+        if (FAILED(pDefinition->get_Actions(&pActions))) return false;
+        IActionPtr pAction;
+        if (FAILED(pActions->get_Item(1, &pAction))) return false;
+        IExecActionPtr pExecAction = pAction;
+        if (pExecAction == nullptr) return false;
+        BSTR bstrPath = NULL;
+        if (SUCCEEDED(pExecAction->get_Path(&bstrPath))) {
+            bool match = (_wcsicmp(szCurrentPath, bstrPath) == 0);
+            SysFreeString(bstrPath);
+            return match;
+        }
+    }
+    catch (const _com_error&) { return false; }
+    return false;
+}
+
+static void SetStartupTask(bool run) {
+    wchar_t szPath[MAX_PATH], szDir[MAX_PATH];
+    if (GetModuleFileNameW(NULL, szPath, MAX_PATH) == 0) return;
+    if (run && ValidStartupTaskExists()) return;
+    wcscpy_s(szDir, szPath);
+    wchar_t* lastSlash = wcsrchr(szDir, L'\\');
+    if (lastSlash) *lastSlash = L'\0';
+    try {
+        ITaskServicePtr pService;
+        HRESULT hr = pService.CreateInstance(__uuidof(TaskScheduler), NULL, CLSCTX_INPROC_SERVER);
+        if (FAILED(hr)) throw _com_error(hr);
+        pService->Connect(_variant_t(), _variant_t(), _variant_t(), _variant_t());
+        ITaskFolderPtr pRootFolder;
+        pService->GetFolder(_bstr_t(L"\\"), &pRootFolder);
+        hr = pRootFolder->DeleteTask(_bstr_t(TASK_NAME), 0);
+        if (SUCCEEDED(hr)) Log("[MysticFight] Startup task removed");
+        if (!run) return;
+        ITaskDefinitionPtr pTask; pService->NewTask(0, &pTask);
+        IPrincipalPtr pPrincipal; pTask->get_Principal(&pPrincipal);
+        if (pPrincipal != nullptr) { pPrincipal->put_RunLevel(TASK_RUNLEVEL_HIGHEST); pPrincipal->put_LogonType(TASK_LOGON_INTERACTIVE_TOKEN); }
+        ITaskSettingsPtr pSettings; pTask->get_Settings(&pSettings);
+        if (pSettings != nullptr) {
+            pSettings->put_StartWhenAvailable(VARIANT_TRUE); pSettings->put_DisallowStartIfOnBatteries(VARIANT_FALSE);
+            pSettings->put_StopIfGoingOnBatteries(VARIANT_FALSE); pSettings->put_ExecutionTimeLimit(_bstr_t(L"PT0S"));
+            pSettings->put_AllowHardTerminate(VARIANT_TRUE);
+        }
+        ITriggerCollectionPtr pTriggers; pTask->get_Triggers(&pTriggers);
+        ITriggerPtr pTrigger; pTriggers->Create(TASK_TRIGGER_LOGON, &pTrigger);
+        ILogonTriggerPtr pLogonTrigger = pTrigger;
+        if (pLogonTrigger != nullptr) { pLogonTrigger->put_Delay(_bstr_t(L"PT30S")); }
+        IActionCollectionPtr pActions; pTask->get_Actions(&pActions);
+        IActionPtr pAction; pActions->Create(TASK_ACTION_EXEC, &pAction);
+        IExecActionPtr pExecAction = pAction;
+        if (pExecAction != nullptr) { pExecAction->put_Path(_bstr_t(szPath)); pExecAction->put_WorkingDirectory(_bstr_t(szDir)); }
+        IRegisteredTaskPtr pRegisteredTask;
+        pRootFolder->RegisterTaskDefinition(_bstr_t(TASK_NAME), pTask, TASK_CREATE_OR_UPDATE, _variant_t(), _variant_t(), TASK_LOGON_INTERACTIVE_TOKEN, _variant_t(L""), &pRegisteredTask);
+        Log("[MysticFight] New Startup task created");
+    }
+    catch (const _com_error& e) {
+        char buffer[256]; snprintf(buffer, sizeof(buffer), "[MysticFight] TaskScheduler ERROR: HRESULT 0x%08X", (unsigned int)e.Error()); Log(buffer);
+    }
+}
 
 void SaveSettings() {
     std::lock_guard<std::mutex> lock(g_cfgMutex);
@@ -434,13 +679,42 @@ void SaveSettings() {
         WritePrivateProfileStringW(section.c_str(), L"TempLow", std::to_wstring(p.tempLow).c_str(), INI_FILE);
         WritePrivateProfileStringW(section.c_str(), L"TempMed", std::to_wstring(p.tempMed).c_str(), INI_FILE);
         WritePrivateProfileStringW(section.c_str(), L"TempHigh", std::to_wstring(p.tempHigh).c_str(), INI_FILE);
-        wchar_t hL[10], hM[10], hH[10];
-        ColorToHex(p.colorLow, hL, 10); ColorToHex(p.colorMed, hM, 10); ColorToHex(p.colorHigh, hH, 10);
+        wchar_t hL[10], hM[10], hH[10]; ColorToHex(p.colorLow, hL, 10); ColorToHex(p.colorMed, hM, 10); ColorToHex(p.colorHigh, hH, 10);
         WritePrivateProfileStringW(section.c_str(), L"ColorLow", hL, INI_FILE);
         WritePrivateProfileStringW(section.c_str(), L"ColorMed", hM, INI_FILE);
         WritePrivateProfileStringW(section.c_str(), L"ColorHigh", hH, INI_FILE);
         WritePrivateProfileStringW(section.c_str(), L"WebServerUrl", p.webServerUrl, INI_FILE);
     }
+}
+
+static bool AutoSelectFirstSensor() {
+    wchar_t localURL[256];
+    {
+        std::lock_guard<std::mutex> lock(g_cfgMutex);
+        memcpy(localURL, g_cfg.webServerUrl, sizeof(g_cfg.webServerUrl));
+    }
+    std::string json = FetchLHMJson(localURL, HTTP_FAST_TIMEOUT);
+    if (json.empty()) { Log("[MysticFight] Auto-select failed: HTTP connection unavailable."); return false; }
+    std::string typeKey = "\"Type\":\"Temperature\"";
+    size_t pos = json.find(typeKey);
+    if (pos != std::string::npos) {
+        size_t blockStart = json.rfind('{', pos);
+        size_t blockEnd = json.find('}', pos);
+        if (blockStart != std::string::npos && blockEnd != std::string::npos) {
+            std::string block = json.substr(blockStart, blockEnd - blockStart + 1);
+            std::wstring id = ExtractJsonString(block, "SensorId");
+            if (!id.empty()) {
+                std::lock_guard<std::mutex> lock(g_cfgMutex);
+                wcscpy_s(g_cfg.sensorID, id.c_str());
+                WritePrivateProfileStringW(L"Settings", L"SensorID", g_cfg.sensorID, INI_FILE);
+                char logBuf[LOG_BUFFER_SIZE]; snprintf(logBuf, sizeof(logBuf), "[MysticFight] Auto-selected default sensor (HTTP): %ls", g_cfg.sensorID);
+                Log(logBuf);
+                return true;
+            }
+        }
+    }
+    Log("[MysticFight] Auto-select failed: No temperature sensors found in HTTP JSON.");
+    return false;
 }
 
 void LoadSettings() {
@@ -455,29 +729,23 @@ void LoadSettings() {
         p.tempHigh = GetPrivateProfileIntW(section.c_str(), L"TempHigh", 90, INI_FILE);
         GetPrivateProfileStringW(section.c_str(), L"TargetDevice", L"MSI_MB", p.targetDevice, 256, INI_FILE);
         p.targetLedIndex = GetPrivateProfileIntW(section.c_str(), L"TargetLedIndex", 0, INI_FILE);
-
         wchar_t hL[10], hM[10], hH[10];
         GetPrivateProfileStringW(section.c_str(), L"ColorLow", L"#00FF00", hL, 10, INI_FILE);
         GetPrivateProfileStringW(section.c_str(), L"ColorMed", L"#FFFF00", hM, 10, INI_FILE);
         GetPrivateProfileStringW(section.c_str(), L"ColorHigh", L"#FF0000", hH, 10, INI_FILE);
         p.colorLow = HexToColor(hL); p.colorMed = HexToColor(hM); p.colorHigh = HexToColor(hH);
-
         GetPrivateProfileStringW(section.c_str(), L"SensorID", L"", p.sensorID, SENSOR_ID_LEN, INI_FILE);
         GetPrivateProfileStringW(section.c_str(), L"WebServerUrl", L"http://localhost:8085", p.webServerUrl, 256, INI_FILE);
-
         wchar_t defLabel[64]; swprintf_s(defLabel, L"Profile %d", i + 1);
         GetPrivateProfileStringW(section.c_str(), L"Label", defLabel, p.label, 64, INI_FILE);
         if (wcslen(p.label) == 0) wcscpy_s(p.label, defLabel);
-
         p.sensorUpdateMS = GetPrivateProfileIntW(section.c_str(), L"SensorUpdateMS", 500, INI_FILE);
         p.ledRefreshFPS = GetPrivateProfileIntW(section.c_str(), L"LedRefreshFPS", 25, INI_FILE);
         wchar_t sfBuf[32]; GetPrivateProfileStringW(section.c_str(), L"SmoothingFactor", L"0.150", sfBuf, 32, INI_FILE);
         p.smoothingFactor = (float)_wtof(sfBuf);
-
         if (p.colorLow == 0 && p.colorMed == 0 && p.colorHigh == 0) {
             p.colorLow = RGB(0, 255, 0); p.colorMed = RGB(255, 255, 0); p.colorHigh = RGB(255, 0, 0);
         }
-
         bool invalid = false;
         if (p.tempLow < 0 || p.tempHigh > 110 || p.tempLow >= p.tempMed || p.tempMed >= p.tempHigh || wcslen(p.targetDevice) == 0 || p.targetLedIndex < 0 || p.targetLedIndex > 255) invalid = true;
         if (invalid) {
@@ -486,259 +754,102 @@ void LoadSettings() {
             wcscpy_s(p.targetDevice, L"MSI_MB"); p.targetLedIndex = 0; p.sensorID[0] = L'\0';
         }
     }
+    if (wcslen(g_cfg.sensorID) == 0) AutoSelectFirstSensor();
 }
 
-static bool AutoSelectFirstSensor() {
-    wchar_t localURL[256];
-    {
-        std::lock_guard<std::mutex> lock(g_cfgMutex);
-        memcpy(localURL, g_Global.profiles[g_Global.activeProfileIndex].webServerUrl, sizeof(g_Global.profiles[0].webServerUrl));
+static void LoadProfileToUI(HWND hDlg, int profileIndex) {
+    Config& p = g_Global.profiles[profileIndex];
+    SetDlgItemInt(hDlg, IDC_TEMP_LOW, p.tempLow, TRUE);
+    SetDlgItemInt(hDlg, IDC_TEMP_MED, p.tempMed, TRUE);
+    SetDlgItemInt(hDlg, IDC_TEMP_HIGH, p.tempHigh, TRUE);
+    wchar_t hexBuf[10];
+    ColorToHex(p.colorLow, hexBuf, 10); SetDlgItemTextW(hDlg, IDC_HEX_LOW, hexBuf);
+    ColorToHex(p.colorMed, hexBuf, 10); SetDlgItemTextW(hDlg, IDC_HEX_MED, hexBuf);
+    ColorToHex(p.colorHigh, hexBuf, 10); SetDlgItemTextW(hDlg, IDC_HEX_HIGH, hexBuf);
+    SetDlgItemTextW(hDlg, IDC_EDIT_LABEL, p.label);
+    HWND hSensorUpdate = GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE);
+    if (p.sensorUpdateMS == 250) SendMessage(hSensorUpdate, CB_SETCURSEL, 0, 0);
+    else if (p.sensorUpdateMS == 1000) SendMessage(hSensorUpdate, CB_SETCURSEL, 2, 0);
+    else SendMessage(hSensorUpdate, CB_SETCURSEL, 1, 0);
+    HWND hLedFPS = GetDlgItem(hDlg, IDC_COMBO_LED_FPS);
+    if (p.ledRefreshFPS == 20) SendMessage(hLedFPS, CB_SETCURSEL, 1, 0);
+    else if (p.ledRefreshFPS == 15) SendMessage(hLedFPS, CB_SETCURSEL, 2, 0);
+    else SendMessage(hLedFPS, CB_SETCURSEL, 0, 0);
+    HWND hSmoothing = GetDlgItem(hDlg, IDC_COMBO_SMOOTHING);
+    if (p.smoothingFactor > 0.9f) SendMessage(hSmoothing, CB_SETCURSEL, 0, 0);
+    else if (p.smoothingFactor < 0.1f) SendMessage(hSmoothing, CB_SETCURSEL, 1, 0);
+    else if (p.smoothingFactor > 0.2f) SendMessage(hSmoothing, CB_SETCURSEL, 3, 0);
+    else SendMessage(hSmoothing, CB_SETCURSEL, 2, 0);
+    SetDlgItemTextW(hDlg, IDC_EDIT_SERVER, p.webServerUrl);
+    int devCount = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_GETCOUNT, 0, 0);
+    for (int i = 0; i < devCount; i++) {
+        wchar_t* devName = (wchar_t*)SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_GETITEMDATA, i, 0);
+        if (devName && wcscmp(devName, p.targetDevice) == 0) { SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_SETCURSEL, i, 0); break; }
     }
-    std::string json = FetchLHMJson(localURL, HTTP_FAST_TIMEOUT);
-    if (json.empty()) { Log("[MysticFight] Auto-select failed: HTTP connection unavailable."); return false; }
-
-    std::string typeKey = "\"Type\":\"Temperature\"";
-    size_t pos = json.find(typeKey);
-    if (pos != std::string::npos) {
-        size_t blockStart = json.rfind('{', pos);
-        size_t blockEnd = json.find('}', pos);
-        if (blockStart != std::string::npos && blockEnd != std::string::npos) {
-            std::string block = json.substr(blockStart, blockEnd - blockStart + 1);
-            std::wstring id = ExtractJsonString(block, "SensorId");
-            if (!id.empty()) {
-                std::lock_guard<std::mutex> lock(g_cfgMutex);
-                wcscpy_s(g_Global.profiles[g_Global.activeProfileIndex].sensorID, id.c_str());
-                WritePrivateProfileStringW(L"Settings", L"SensorID", g_Global.profiles[g_Global.activeProfileIndex].sensorID, INI_FILE);
-                char logBuf[LOG_BUFFER_SIZE];
-                snprintf(logBuf, sizeof(logBuf), "[MysticFight] Auto-selected default sensor (HTTP): %ls", g_Global.profiles[g_Global.activeProfileIndex].sensorID);
-                Log(logBuf);
-                return true;
-            }
-        }
+    PopulateAreaList(hDlg, p.targetDevice);
+    int areaCount = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_AREA), CB_GETCOUNT, 0, 0);
+    for (int i = 0; i < areaCount; i++) {
+        int idx = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_AREA), CB_GETITEMDATA, i, 0);
+        if (idx == p.targetLedIndex) { SendMessage(GetDlgItem(hDlg, IDC_COMBO_AREA), CB_SETCURSEL, i, 0); break; }
     }
-    Log("[MysticFight] Auto-select failed: No temperature sensors found in HTTP JSON.");
-    return false;
+    PopulateSensorList(hDlg, p.webServerUrl, p.sensorID);
+    int sensCount = (int)SendMessage(GetDlgItem(hDlg, IDC_SENSOR_ID), CB_GETCOUNT, 0, 0);
+    bool foundSens = false;
+    for (int i = 0; i < sensCount; i++) {
+        wchar_t* sID = (wchar_t*)SendMessage(GetDlgItem(hDlg, IDC_SENSOR_ID), CB_GETITEMDATA, i, 0);
+        if (sID && wcscmp(sID, p.sensorID) == 0) { SendMessage(GetDlgItem(hDlg, IDC_SENSOR_ID), CB_SETCURSEL, i, 0); foundSens = true; break; }
+    }
+    if (!foundSens && sensCount > 0) SendMessage(GetDlgItem(hDlg, IDC_SENSOR_ID), CB_SETCURSEL, 0, 0);
+    CheckDlgButton(hDlg, IDC_CHK_ACTIVE_PROFILE, (profileIndex == g_Global.activeProfileIndex) ? BST_CHECKED : BST_UNCHECKED);
+    InvalidateRect(GetDlgItem(hDlg, IDC_HEX_LOW), NULL, TRUE);
+    InvalidateRect(GetDlgItem(hDlg, IDC_HEX_MED), NULL, TRUE);
+    InvalidateRect(GetDlgItem(hDlg, IDC_HEX_HIGH), NULL, TRUE);
 }
 
-// ============================================================================
-// SYSTEM
-// ============================================================================
-
-static HRESULT ControlScheduledTask(const wchar_t* taskName, bool start) {
-    try {
-        ITaskServicePtr pService;
-        HRESULT hr = pService.CreateInstance(__uuidof(TaskScheduler), NULL, CLSCTX_INPROC_SERVER);
-        if (FAILED(hr)) return hr;
-        pService->Connect(_variant_t(), _variant_t(), _variant_t(), _variant_t());
-        ITaskFolderPtr pRootFolder; pService->GetFolder(_bstr_t(L"\\"), &pRootFolder);
-        IRegisteredTaskPtr pTask; hr = pRootFolder->GetTask(_bstr_t(taskName), &pTask);
-        if (FAILED(hr)) return hr;
-        if (start) { IRunningTaskPtr pRunningTask; return pTask->Run(_variant_t(), &pRunningTask); }
-        else { return pTask->Stop(0); }
+static void SaveUIToProfile(HWND hDlg, int profileIndex) {
+    Config& p = g_Global.profiles[profileIndex];
+    p.tempLow = GetDlgItemInt(hDlg, IDC_TEMP_LOW, NULL, TRUE);
+    p.tempMed = GetDlgItemInt(hDlg, IDC_TEMP_MED, NULL, TRUE);
+    p.tempHigh = GetDlgItemInt(hDlg, IDC_TEMP_HIGH, NULL, TRUE);
+    wchar_t buf[256];
+    GetDlgItemTextW(hDlg, IDC_HEX_LOW, buf, 10); p.colorLow = HexToColor(buf);
+    GetDlgItemTextW(hDlg, IDC_HEX_MED, buf, 10); p.colorMed = HexToColor(buf);
+    GetDlgItemTextW(hDlg, IDC_HEX_HIGH, buf, 10); p.colorHigh = HexToColor(buf);
+    GetDlgItemTextW(hDlg, IDC_EDIT_SERVER, p.webServerUrl, 256);
+    int idxDev = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_GETCURSEL, 0, 0);
+    if (idxDev != CB_ERR) {
+        wchar_t* devName = (wchar_t*)SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_GETITEMDATA, idxDev, 0);
+        if (devName) wcscpy_s(p.targetDevice, devName);
     }
-    catch (const _com_error& e) { return e.Error(); }
+    int idxArea = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_AREA), CB_GETCURSEL, 0, 0);
+    if (idxArea != CB_ERR) {
+        p.targetLedIndex = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_AREA), CB_GETITEMDATA, idxArea, 0);
+    }
+    int idxSens = (int)SendMessage(GetDlgItem(hDlg, IDC_SENSOR_ID), CB_GETCURSEL, 0, 0);
+    if (idxSens != CB_ERR) {
+        wchar_t* sID = (wchar_t*)SendMessage(GetDlgItem(hDlg, IDC_SENSOR_ID), CB_GETITEMDATA, idxSens, 0);
+        if (sID) wcscpy_s(p.sensorID, sID);
+    }
+    GetDlgItemTextW(hDlg, IDC_EDIT_LABEL, p.label, 64);
+    int idxSensor = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE), CB_GETCURSEL, 0, 0);
+    if (idxSensor == 0) p.sensorUpdateMS = 250; else if (idxSensor == 2) p.sensorUpdateMS = 1000; else p.sensorUpdateMS = 500;
+    int idxFPS = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_LED_FPS), CB_GETCURSEL, 0, 0);
+    if (idxFPS == 1) p.ledRefreshFPS = 20; else if (idxFPS == 2) p.ledRefreshFPS = 15; else p.ledRefreshFPS = 25;
+    int idxSmooth = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_GETCURSEL, 0, 0);
+    if (idxSmooth == 0) p.smoothingFactor = 1.0f; else if (idxSmooth == 1) p.smoothingFactor = 0.05f; else if (idxSmooth == 3) p.smoothingFactor = 0.4f; else p.smoothingFactor = 0.15f;
 }
 
-static bool ValidStartupTaskExists() {
-    wchar_t szCurrentPath[MAX_PATH]; if (GetModuleFileNameW(NULL, szCurrentPath, MAX_PATH) == 0) return false;
-    try {
-        ITaskServicePtr pService; HRESULT hr = pService.CreateInstance(__uuidof(TaskScheduler), NULL, CLSCTX_INPROC_SERVER);
-        if (FAILED(hr)) return false;
-        hr = pService->Connect(_variant_t(), _variant_t(), _variant_t(), _variant_t()); if (FAILED(hr)) return false;
-        ITaskFolderPtr pRootFolder; if (FAILED(pService->GetFolder(_bstr_t(L"\\"), &pRootFolder))) return false;
-        IRegisteredTaskPtr pRegisteredTask; if (FAILED(pRootFolder->GetTask(_bstr_t(TASK_NAME), &pRegisteredTask))) return false;
-        ITaskDefinitionPtr pDefinition; if (FAILED(pRegisteredTask->get_Definition(&pDefinition))) return false;
-        IActionCollectionPtr pActions; if (FAILED(pDefinition->get_Actions(&pActions))) return false;
-        IActionPtr pAction; if (FAILED(pActions->get_Item(1, &pAction))) return false;
-        IExecActionPtr pExecAction = pAction; if (pExecAction == nullptr) return false;
-        BSTR bstrPath = NULL;
-        if (SUCCEEDED(pExecAction->get_Path(&bstrPath))) {
-            bool match = (_wcsicmp(szCurrentPath, bstrPath) == 0); SysFreeString(bstrPath); return match;
-        }
-    }
-    catch (const _com_error&) { return false; } return false;
+static void ShowNotification(HWND hWnd, HINSTANCE hInstance, const wchar_t* title, const wchar_t* info) {
+    NOTIFYICONDATAW nid = { sizeof(NOTIFYICONDATAW), hWnd, 1, NIF_INFO };
+    wcscpy_s(nid.szInfoTitle, _countof(nid.szInfoTitle), title);
+    wcscpy_s(nid.szInfo, _countof(nid.szInfo), info);
+    nid.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON;
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
-
-static void SetStartupTask(bool run) {
-    wchar_t szPath[MAX_PATH], szDir[MAX_PATH]; if (GetModuleFileNameW(NULL, szPath, MAX_PATH) == 0) return;
-    if (run && ValidStartupTaskExists()) return;
-    wcscpy_s(szDir, szPath); wchar_t* lastSlash = wcsrchr(szDir, L'\\'); if (lastSlash) *lastSlash = L'\0';
-    try {
-        ITaskServicePtr pService; HRESULT hr = pService.CreateInstance(__uuidof(TaskScheduler), NULL, CLSCTX_INPROC_SERVER);
-        if (FAILED(hr)) throw _com_error(hr);
-        pService->Connect(_variant_t(), _variant_t(), _variant_t(), _variant_t());
-        ITaskFolderPtr pRootFolder; pService->GetFolder(_bstr_t(L"\\"), &pRootFolder);
-        hr = pRootFolder->DeleteTask(_bstr_t(TASK_NAME), 0);
-        if (SUCCEEDED(hr)) Log("[MysticFight] Startup task removed");
-        if (!run) return;
-        ITaskDefinitionPtr pTask; pService->NewTask(0, &pTask);
-        IPrincipalPtr pPrincipal; pTask->get_Principal(&pPrincipal);
-        if (pPrincipal != nullptr) { pPrincipal->put_RunLevel(TASK_RUNLEVEL_HIGHEST); pPrincipal->put_LogonType(TASK_LOGON_INTERACTIVE_TOKEN); }
-        ITaskSettingsPtr pSettings; pTask->get_Settings(&pSettings);
-        if (pSettings != nullptr) {
-            pSettings->put_StartWhenAvailable(VARIANT_TRUE); pSettings->put_DisallowStartIfOnBatteries(VARIANT_FALSE);
-            pSettings->put_StopIfGoingOnBatteries(VARIANT_FALSE); pSettings->put_ExecutionTimeLimit(_bstr_t(L"PT0S"));
-            pSettings->put_AllowHardTerminate(VARIANT_TRUE);
-        }
-        ITriggerCollectionPtr pTriggers; pTask->get_Triggers(&pTriggers);
-        ITriggerPtr pTrigger; pTriggers->Create(TASK_TRIGGER_LOGON, &pTrigger);
-        ILogonTriggerPtr pLogonTrigger = pTrigger; if (pLogonTrigger != nullptr) { pLogonTrigger->put_Delay(_bstr_t(L"PT30S")); }
-        IActionCollectionPtr pActions; pTask->get_Actions(&pActions);
-        IActionPtr pAction; pActions->Create(TASK_ACTION_EXEC, &pAction);
-        IExecActionPtr pExecAction = pAction;
-        if (pExecAction != nullptr) { pExecAction->put_Path(_bstr_t(szPath)); pExecAction->put_WorkingDirectory(_bstr_t(szDir)); }
-        IRegisteredTaskPtr pRegisteredTask;
-        pRootFolder->RegisterTaskDefinition(_bstr_t(TASK_NAME), pTask, TASK_CREATE_OR_UPDATE, _variant_t(), _variant_t(), TASK_LOGON_INTERACTIVE_TOKEN, _variant_t(L""), &pRegisteredTask);
-        Log("[MysticFight] New Startup task created");
-    }
-    catch (const _com_error& e) { char buffer[256]; snprintf(buffer, sizeof(buffer), "[MysticFight] TaskScheduler ERROR: HRESULT 0x%08X", (unsigned int)e.Error()); Log(buffer); }
-}
-
-// ============================================================================
-// HARDWARE (SDK & SENSORS)
-// ============================================================================
-
-static void MSIHwardwareDetection() {
-    std::lock_guard<std::mutex> lock(g_sdkMutex);
-    SAFEARRAY* pDevType = nullptr; SAFEARRAY* pLedCount = nullptr;
-    if (lpMLAPI_GetDeviceInfo && lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0 && pDevType && pLedCount) {
-        BSTR* pTypes = nullptr; void* pCountsRaw = nullptr;
-        VARTYPE vtCount; SafeArrayGetVartype(pLedCount, &vtCount);
-        if (SUCCEEDED(SafeArrayAccessData(pDevType, (void**)&pTypes)) && SUCCEEDED(SafeArrayAccessData(pLedCount, &pCountsRaw))) {
-            long lBound, uBound; SafeArrayGetLBound(pDevType, 1, &lBound); SafeArrayGetUBound(pDevType, 1, &uBound);
-            long count = uBound - lBound + 1;
-            if (count > 0 && pTypes != nullptr && pTypes[0] != nullptr) {
-                if (g_deviceName) SysFreeString(g_deviceName);
-                g_deviceName = SysAllocString(pTypes[0]);
-                g_totalLeds = GetIntFromSafeArray(pCountsRaw, vtCount, 0);
-                BSTR friendlyName = NULL;
-                if (lpMLAPI_GetDeviceNameEx) lpMLAPI_GetDeviceNameEx(g_deviceName, 0, &friendlyName);
-                char devInfo[LOG_BUFFER_SIZE];
-                snprintf(devInfo, sizeof(devInfo), "[MysticFight] %ls (Type: %ls) | Logical Areas: %d", (friendlyName ? friendlyName : L"Unknown Device"), g_deviceName, g_totalLeds);
-                Log(devInfo);
-                if (friendlyName) SysFreeString(friendlyName);
-            }
-        }
-        SafeArrayUnaccessData(pDevType); SafeArrayUnaccessData(pLedCount);
-    }
-    SafeArrayDestroy(pDevType); SafeArrayDestroy(pLedCount);
-}
-
-void AsyncPopulateSensors(HWND hDlg, std::wstring url) {
-    CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    SensorFetchResult* result = new SensorFetchResult();
-    std::string json = FetchLHMJson(url.c_str(), 1500);
-    if (!json.empty()) {
-        std::string typeKey = "\"Type\":\"Temperature\""; size_t pos = 0;
-        while ((pos = json.find(typeKey, pos)) != std::string::npos) {
-            size_t blockEnd = json.find('}', pos); size_t blockStart = json.rfind('{', pos);
-            if (blockEnd != std::string::npos && blockStart != std::string::npos) {
-                std::string block = json.substr(blockStart, blockEnd - blockStart + 1);
-                std::wstring name = ExtractJsonString(block, "Text");
-                std::wstring id = ExtractJsonString(block, "SensorId");
-                if (!name.empty() && !id.empty()) result->items.push_back({ name, id });
-            }
-            pos = blockEnd;
-        }
-    }
-    if (IsWindow(hDlg)) { if (!PostMessage(hDlg, WM_APP_SENSORS_READY, 0, (LPARAM)result)) delete result; }
-    else delete result;
-    CoUninitialize();
-}
-
-static void AsyncPopulateDevices(HWND hDlg) {
-    CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    DeviceFetchResult* result = new DeviceFetchResult();
-    {
-        std::lock_guard<std::mutex> lock(g_sdkMutex);
-        SAFEARRAY* pDevType = nullptr; SAFEARRAY* pLedCount = nullptr;
-        if (lpMLAPI_GetDeviceInfo && lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0 && pDevType) {
-            BSTR* pTypes = nullptr;
-            if (SUCCEEDED(SafeArrayAccessData(pDevType, (void**)&pTypes))) {
-                long lBound, uBound; SafeArrayGetLBound(pDevType, 1, &lBound); SafeArrayGetUBound(pDevType, 1, &uBound);
-                long count = uBound - lBound + 1;
-                for (long i = 0; i < count; i++) {
-                    BSTR typeInternal = pTypes[i]; BSTR friendlyNameBstr = NULL;
-                    if (lpMLAPI_GetDeviceNameEx) lpMLAPI_GetDeviceNameEx(typeInternal, i, &friendlyNameBstr);
-                    DeviceFetchResult::Item item; item.internalName = std::wstring(typeInternal);
-                    item.friendlyName = friendlyNameBstr ? std::wstring(friendlyNameBstr) : std::wstring(typeInternal);
-                    result->items.push_back(item);
-                    if (friendlyNameBstr) SysFreeString(friendlyNameBstr);
-                }
-                SafeArrayUnaccessData(pDevType);
-            }
-            SafeArrayDestroy(pDevType); if (pLedCount) SafeArrayDestroy(pLedCount);
-        }
-    }
-    if (IsWindow(hDlg)) { if (!PostMessage(hDlg, WM_APP_DEVICES_READY, 0, (LPARAM)result)) delete result; }
-    else delete result;
-    CoUninitialize();
-}
-
-static float GetCPUTempFast() {
-    ULONGLONG currentTime = GetTickCount64();
-    float temp = -1.0f;
-    wchar_t localSensorID[256]; wchar_t localURL[256];
-    {
-        std::lock_guard<std::mutex> lock(g_cfgMutex);
-        memcpy(localSensorID, g_Global.profiles[g_Global.activeProfileIndex].sensorID, sizeof(localSensorID));
-        memcpy(localURL, g_Global.profiles[g_Global.activeProfileIndex].webServerUrl, sizeof(localURL));
-    }
-
-    if (g_activeSource == DataSource::HTTP) {
-        std::string json = FetchLHMJson(localURL, HTTP_NORMAL_TIMEOUT);
-        if (json.empty()) {
-            g_httpConnectionDrops++;
-            if (g_httpConnectionDrops >= 2) {
-                Log("[MysticFight] HTTP connection lost. Resetting to SEARCH mode.");
-                g_activeSource = DataSource::Searching; g_httpConnectionDrops = 0;
-            }
-            return -1.0f;
-        }
-        g_httpConnectionDrops = 0;
-        temp = ParseLHMJsonForTemp(json, localSensorID);
-        return temp;
-    }
-    else {
-        if (currentTime - g_lastDataSourceSearchRetry <= LHM_RETRY_DELAY_MS) return -1.0f;
-        g_lastDataSourceSearchRetry = currentTime;
-        std::string json = FetchLHMJson(localURL, HTTP_NORMAL_TIMEOUT);
-        if (!json.empty()) {
-            g_activeSource = DataSource::HTTP;
-            char msg[512];
-            snprintf(msg, sizeof(msg), "[MysticFight] Data Source detected: HTTP | Monitoring Sensor: %ls", localSensorID);
-            Log(msg);
-            SetEvent(g_hSourceResolvedEvent);
-            temp = ParseLHMJsonForTemp(json, localSensorID);
-            return (temp >= 0.0f) ? temp : -1.0f;
-        }
-    }
-    return -1.0f;
-}
-
-static void SensorThread() {
-    CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    while (g_Running) {
-        if (g_LedsEnabled) g_asyncTemp = GetCPUTempFast();
-        DWORD waitMs = INFINITE;
-        if (g_LedsEnabled) {
-            std::lock_guard<std::mutex> lock(g_cfgMutex);
-            waitMs = (DWORD)g_Global.profiles[g_Global.activeProfileIndex].sensorUpdateMS;
-        }
-        WaitForSingleObject(g_hSensorEvent, waitMs);
-    }
-    CoUninitialize();
-}
-
-// ============================================================================
-// UI LOGIC
-// ============================================================================
 
 void PopulateAreaList(HWND hDlg, const wchar_t* deviceType) {
     HWND hComboArea = GetDlgItem(hDlg, IDC_COMBO_AREA);
     SendMessage(hComboArea, CB_RESETCONTENT, 0, 0);
-    std::lock_guard<std::mutex> lock(g_sdkMutex);
-
     if (!deviceType || !lpMLAPI_GetLedInfo || !lpMLAPI_GetDeviceInfo) { EnableWindow(hComboArea, FALSE); return; }
 
     SAFEARRAY* pDevType = nullptr; SAFEARRAY* pLedCount = nullptr;
@@ -759,23 +870,21 @@ void PopulateAreaList(HWND hDlg, const wchar_t* deviceType) {
 
         if (currentDeviceLedCount <= 0) currentDeviceLedCount = 0;
 
-        // --- CRITICAL FIX: Convert const wchar_t* to valid BSTR for SDK ---
+        // --- CRITICAL FIX: ALLOCATE BSTR ---
         BSTR bstrDevice = SysAllocString(deviceType);
         if (bstrDevice) {
             for (DWORD i = 0; i < (DWORD)currentDeviceLedCount; i++) {
                 BSTR ledName = nullptr; SAFEARRAY* pStyles = nullptr;
-                // Pass valid BSTR, not raw pointer cast
                 if (lpMLAPI_GetLedInfo(bstrDevice, i, &ledName, &pStyles) == 0) {
                     int idx = (int)SendMessageW(hComboArea, CB_ADDSTRING, 0, (LPARAM)(ledName ? ledName : L"Unknown Area"));
                     SendMessage(hComboArea, CB_SETITEMDATA, idx, (LPARAM)i);
-                    if (i == (DWORD)g_Global.profiles[g_Global.activeProfileIndex].targetLedIndex) SendMessage(hComboArea, CB_SETCURSEL, idx, 0);
+                    if (i == (DWORD)g_cfg.targetLedIndex) SendMessage(hComboArea, CB_SETCURSEL, idx, 0);
                     if (pStyles) SafeArrayDestroy(pStyles);
                     if (ledName) SysFreeString(ledName);
                 }
             }
             SysFreeString(bstrDevice);
         }
-        // ------------------------------------------------------------------
     }
 
     int finalCount = (int)SendMessage(hComboArea, CB_GETCOUNT, 0, 0);
@@ -789,100 +898,80 @@ void PopulateAreaList(HWND hDlg, const wchar_t* deviceType) {
     }
 }
 
-static void ShowNotification(HWND hWnd, HINSTANCE hInstance, const wchar_t* title, const wchar_t* info) {
-    NOTIFYICONDATAW nid = { sizeof(NOTIFYICONDATAW), hWnd, 1, NIF_INFO };
-    wcscpy_s(nid.szInfoTitle, _countof(nid.szInfoTitle), title);
-    wcscpy_s(nid.szInfo, _countof(nid.szInfo), info);
-    nid.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON;
-    Shell_NotifyIconW(NIM_MODIFY, &nid);
+void PopulateDeviceList(HWND hDlg) {
+    HWND hComboDev = GetDlgItem(hDlg, IDC_COMBO_DEVICE);
+    ClearComboHeapData(hComboDev);
+    SAFEARRAY* pDevType = nullptr; SAFEARRAY* pLedCount = nullptr;
+
+    if (lpMLAPI_GetDeviceInfo && lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0) {
+        BSTR* pTypes = nullptr; SafeArrayAccessData(pDevType, (void**)&pTypes);
+        long lBound, uBound; SafeArrayGetLBound(pDevType, 1, &lBound); SafeArrayGetUBound(pDevType, 1, &uBound);
+        long count = uBound - lBound + 1;
+        for (long i = 0; i < count; i++) {
+            BSTR typeInternal = pTypes[i];
+            BSTR friendlyName = NULL;
+            if (lpMLAPI_GetDeviceNameEx) lpMLAPI_GetDeviceNameEx(typeInternal, i, &friendlyName);
+            wchar_t* pSafeStr = HeapDupString(typeInternal);
+            int idx = (int)SendMessageW(hComboDev, CB_ADDSTRING, 0, (LPARAM)(friendlyName ? friendlyName : typeInternal));
+            if (idx != CB_ERR) {
+                void* oldData = (void*)SendMessage(hComboDev, CB_GETITEMDATA, idx, 0);
+                if (oldData && oldData != (void*)CB_ERR) HeapFree(GetProcessHeap(), 0, oldData);
+                SendMessage(hComboDev, CB_SETITEMDATA, idx, (LPARAM)pSafeStr);
+                if (wcscmp(typeInternal, g_cfg.targetDevice) == 0) SendMessage(hComboDev, CB_SETCURSEL, idx, 0);
+            }
+            else { HeapFree(GetProcessHeap(), 0, pSafeStr); }
+            if (friendlyName) SysFreeString(friendlyName);
+        }
+        SafeArrayUnaccessData(pDevType); SafeArrayDestroy(pDevType); SafeArrayDestroy(pLedCount);
+        if (SendMessage(hComboDev, CB_GETCURSEL, 0, 0) == CB_ERR && SendMessage(hComboDev, CB_GETCOUNT, 0, 0) > 0) SendMessage(hComboDev, CB_SETCURSEL, 0, 0);
+        int finalCount = (int)SendMessage(hComboDev, CB_GETCOUNT, 0, 0);
+        if (finalCount <= 1) { if (finalCount == 1) SendMessage(hComboDev, CB_SETCURSEL, 0, 0); EnableWindow(hComboDev, FALSE); }
+        else { if (SendMessage(hComboDev, CB_GETCURSEL, 0, 0) == CB_ERR) SendMessage(hComboDev, CB_SETCURSEL, 0, 0); EnableWindow(hComboDev, TRUE); }
+    }
+    else { EnableWindow(hComboDev, FALSE); Log("[MysticFight] SDK Error or No MSI Devices found."); }
 }
 
-static void LoadProfileToUI(HWND hDlg, int profileIndex) {
-    if (profileIndex < 0 || profileIndex > 4) return;
-    Config& p = g_Global.profiles[profileIndex];
-
-    SetDlgItemInt(hDlg, IDC_TEMP_LOW, p.tempLow, TRUE);
-    SetDlgItemInt(hDlg, IDC_TEMP_MED, p.tempMed, TRUE);
-    SetDlgItemInt(hDlg, IDC_TEMP_HIGH, p.tempHigh, TRUE);
-    wchar_t hexBuf[10];
-    ColorToHex(p.colorLow, hexBuf, 10); SetDlgItemTextW(hDlg, IDC_HEX_LOW, hexBuf);
-    ColorToHex(p.colorMed, hexBuf, 10); SetDlgItemTextW(hDlg, IDC_HEX_MED, hexBuf);
-    ColorToHex(p.colorHigh, hexBuf, 10); SetDlgItemTextW(hDlg, IDC_HEX_HIGH, hexBuf);
-    SetDlgItemTextW(hDlg, IDC_EDIT_LABEL, p.label);
-    SetDlgItemTextW(hDlg, IDC_EDIT_SERVER, p.webServerUrl);
-    SendMessage(GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE), CB_SETCURSEL, (p.sensorUpdateMS == 250) ? 0 : (p.sensorUpdateMS == 1000 ? 2 : 1), 0);
-    SendMessage(GetDlgItem(hDlg, IDC_COMBO_LED_FPS), CB_SETCURSEL, (p.ledRefreshFPS == 20) ? 1 : (p.ledRefreshFPS == 15 ? 2 : 0), 0);
-    HWND hSmoothing = GetDlgItem(hDlg, IDC_COMBO_SMOOTHING);
-    if (p.smoothingFactor > 0.9f) SendMessage(hSmoothing, CB_SETCURSEL, 0, 0);
-    else if (p.smoothingFactor < 0.1f) SendMessage(hSmoothing, CB_SETCURSEL, 1, 0);
-    else if (p.smoothingFactor > 0.2f) SendMessage(hSmoothing, CB_SETCURSEL, 3, 0);
-    else SendMessage(hSmoothing, CB_SETCURSEL, 2, 0);
-
-    // --- SAFETY FIX FOR COMBOBOX ---
-    HWND hComboDev = GetDlgItem(hDlg, IDC_COMBO_DEVICE);
-    int devCount = (int)SendMessage(hComboDev, CB_GETCOUNT, 0, 0);
-    if (devCount > 0) {
-        int indexToSelect = 0;
-        for (int i = 0; i < devCount; i++) {
-            wchar_t* devName = (wchar_t*)SendMessage(hComboDev, CB_GETITEMDATA, i, 0);
-            if (devName && devName != (wchar_t*)CB_ERR && wcscmp(devName, p.targetDevice) == 0) {
-                indexToSelect = i; PopulateAreaList(hDlg, p.targetDevice); break;
+void PopulateSensorList(HWND hDlg, const wchar_t* webServerUrl, const wchar_t* currentTargetID) {
+    HWND hCombo = GetDlgItem(hDlg, IDC_SENSOR_ID);
+    ClearComboHeapData(hCombo);
+    wchar_t localTargetID[256];
+    if (currentTargetID) wcscpy_s(localTargetID, currentTargetID);
+    else { std::lock_guard<std::mutex> lock(g_cfgMutex); wcscpy_s(localTargetID, g_cfg.sensorID); }
+    wchar_t localURL[256];
+    if (webServerUrl) wcscpy_s(localURL, webServerUrl);
+    else { std::lock_guard<std::mutex> lock(g_cfgMutex); wcscpy_s(localURL, g_cfg.webServerUrl); }
+    std::string json = FetchLHMJson(localURL, HTTP_FAST_TIMEOUT);
+    if (json.empty()) return;
+    std::string typeKey = "\"Type\":\"Temperature\""; size_t pos = 0; bool foundAny = false;
+    while ((pos = json.find(typeKey, pos)) != std::string::npos) {
+        size_t blockEnd = json.find('}', pos); size_t blockStart = json.rfind('{', pos);
+        if (blockEnd != std::string::npos && blockStart != std::string::npos) {
+            std::string block = json.substr(blockStart, blockEnd - blockStart + 1);
+            std::wstring name = ExtractJsonString(block, "Text");
+            std::wstring id = ExtractJsonString(block, "SensorId");
+            if (!name.empty() && !id.empty()) {
+                if (SendMessage(hCombo, CB_FINDSTRINGEXACT, -1, (LPARAM)name.c_str()) == CB_ERR) {
+                    wchar_t* pSafeStr = HeapDupString(id.c_str());
+                    int idx = (int)SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)name.c_str());
+                    if (idx != CB_ERR) {
+                        SendMessage(hCombo, CB_SETITEMDATA, idx, (LPARAM)pSafeStr);
+                        if (wcscmp(id.c_str(), localTargetID) == 0) { SendMessage(hCombo, CB_SETCURSEL, idx, 0); foundAny = true; }
+                    }
+                    else { HeapFree(GetProcessHeap(), 0, pSafeStr); }
+                }
             }
         }
-        SendMessage(hComboDev, CB_SETCURSEL, indexToSelect, 0);
+        pos = blockEnd;
     }
-    HWND hComboSens = GetDlgItem(hDlg, IDC_SENSOR_ID);
-    int sensCount = (int)SendMessage(hComboSens, CB_GETCOUNT, 0, 0);
-    if (sensCount > 0) {
-        int indexToSelect = 0;
-        for (int i = 0; i < sensCount; i++) {
-            wchar_t* sID = (wchar_t*)SendMessage(hComboSens, CB_GETITEMDATA, i, 0);
-            if (sID && sID != (wchar_t*)CB_ERR && wcscmp(sID, p.sensorID) == 0) { indexToSelect = i; break; }
-        }
-        SendMessage(hComboSens, CB_SETCURSEL, indexToSelect, 0);
-    }
-    CheckDlgButton(hDlg, IDC_CHK_ACTIVE_PROFILE, (profileIndex == g_Global.activeProfileIndex) ? BST_CHECKED : BST_UNCHECKED);
-    InvalidateRect(hDlg, NULL, TRUE);
+    if (!foundAny && SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 0 && SendMessage(hCombo, CB_GETCURSEL, 0, 0) == CB_ERR) SendMessage(hCombo, CB_SETCURSEL, 0, 0);
+    int finalCount = (int)SendMessage(hCombo, CB_GETCOUNT, 0, 0);
+    if (finalCount <= 1) { if (finalCount == 1) SendMessage(hCombo, CB_SETCURSEL, 0, 0); EnableWindow(hCombo, FALSE); }
+    else { if (SendMessage(hCombo, CB_GETCURSEL, 0, 0) == CB_ERR) SendMessage(hCombo, CB_SETCURSEL, 0, 0); EnableWindow(hCombo, TRUE); }
 }
 
-static void SaveUIToProfile(HWND hDlg, int profileIndex) {
-    if (profileIndex < 0 || profileIndex >= 5) return;
-    Config& p = g_Global.profiles[profileIndex];
-    p.tempLow = GetDlgItemInt(hDlg, IDC_TEMP_LOW, NULL, TRUE);
-    p.tempMed = GetDlgItemInt(hDlg, IDC_TEMP_MED, NULL, TRUE);
-    p.tempHigh = GetDlgItemInt(hDlg, IDC_TEMP_HIGH, NULL, TRUE);
-    wchar_t buf[256];
-    GetDlgItemTextW(hDlg, IDC_HEX_LOW, buf, 10); p.colorLow = HexToColor(buf);
-    GetDlgItemTextW(hDlg, IDC_HEX_MED, buf, 10); p.colorMed = HexToColor(buf);
-    GetDlgItemTextW(hDlg, IDC_HEX_HIGH, buf, 10); p.colorHigh = HexToColor(buf);
-    GetDlgItemTextW(hDlg, IDC_EDIT_SERVER, p.webServerUrl, 256);
-    GetDlgItemTextW(hDlg, IDC_EDIT_LABEL, p.label, 64);
-    HWND hComboDev = GetDlgItem(hDlg, IDC_COMBO_DEVICE);
-    if (IsWindowEnabled(hComboDev)) {
-        int idx = (int)SendMessage(hComboDev, CB_GETCURSEL, 0, 0);
-        if (idx != CB_ERR) {
-            wchar_t* val = (wchar_t*)SendMessage(hComboDev, CB_GETITEMDATA, idx, 0);
-            if (val && val != (wchar_t*)CB_ERR) wcscpy_s(p.targetDevice, val);
-        }
-    }
-    HWND hComboSens = GetDlgItem(hDlg, IDC_SENSOR_ID);
-    if (IsWindowEnabled(hComboSens)) {
-        int idx = (int)SendMessage(hComboSens, CB_GETCURSEL, 0, 0);
-        if (idx != CB_ERR) {
-            wchar_t* val = (wchar_t*)SendMessage(hComboSens, CB_GETITEMDATA, idx, 0);
-            if (val && val != (wchar_t*)CB_ERR) wcscpy_s(p.sensorID, val);
-        }
-    }
-    int idxUpd = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE), CB_GETCURSEL, 0, 0);
-    p.sensorUpdateMS = (idxUpd == 0) ? 250 : (idxUpd == 2 ? 1000 : 500);
-    int idxFPS = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_LED_FPS), CB_GETCURSEL, 0, 0);
-    p.ledRefreshFPS = (idxFPS == 1) ? 20 : (idxFPS == 2 ? 15 : 25);
-    int idxSm = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_GETCURSEL, 0, 0);
-    if (idxSm == 0) p.smoothingFactor = 1.0f;
-    else if (idxSm == 1) p.smoothingFactor = 0.05f;
-    else if (idxSm == 3) p.smoothingFactor = 0.4f;
-    else p.smoothingFactor = 0.15f;
-}
+// ============================================================================
+// WINDOW PROCEDURES
+// ============================================================================
 
 WNDPROC oldEditProc;
 static COLORREF g_CustomColors[16] = { 0 };
@@ -905,28 +994,6 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
     static HBRUSH hBrushLow = NULL, hBrushMed = NULL, hBrushHigh = NULL;
     static int s_currentTab = 0;
     switch (message) {
-    case WM_APP_DEVICES_READY: {
-        DeviceFetchResult* res = reinterpret_cast<DeviceFetchResult*>(lParam);
-        HWND hCombo = GetDlgItem(hDlg, IDC_COMBO_DEVICE); ClearComboHeapData(hCombo);
-        for (const auto& item : res->items) {
-            wchar_t* pSafe = HeapDupString(item.internalName.c_str());
-            int idx = (int)SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)item.friendlyName.c_str());
-            if (idx != CB_ERR) SendMessage(hCombo, CB_SETITEMDATA, idx, (LPARAM)pSafe); else HeapFree(GetProcessHeap(), 0, pSafe);
-        }
-        EnableWindow(hCombo, (SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 1));
-        LoadProfileToUI(hDlg, s_currentTab); delete res; return TRUE;
-    }
-    case WM_APP_SENSORS_READY: {
-        SensorFetchResult* res = reinterpret_cast<SensorFetchResult*>(lParam);
-        HWND hCombo = GetDlgItem(hDlg, IDC_SENSOR_ID); ClearComboHeapData(hCombo);
-        for (const auto& item : res->items) {
-            wchar_t* pSafe = HeapDupString(item.id.c_str());
-            int idx = (int)SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)item.name.c_str());
-            if (idx != CB_ERR) SendMessage(hCombo, CB_SETITEMDATA, idx, (LPARAM)pSafe); else HeapFree(GetProcessHeap(), 0, pSafe);
-        }
-        EnableWindow(hCombo, (SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 1));
-        LoadProfileToUI(hDlg, s_currentTab); delete res; return TRUE;
-    }
     case WM_CTLCOLOREDIT: {
         HDC hdc = (HDC)wParam; HWND hCtrl = (HWND)lParam; int id = GetDlgCtrlID(hCtrl); HBRUSH hSelectedBrush = NULL;
         if (id == IDC_HEX_LOW) hSelectedBrush = hBrushLow; if (id == IDC_HEX_MED) hSelectedBrush = hBrushMed; if (id == IDC_HEX_HIGH) hSelectedBrush = hBrushHigh;
@@ -945,31 +1012,27 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         int x = (GetSystemMetrics(SM_CXSCREEN) - (rcDlg.right - rcDlg.left)) / 2;
         int y = (GetSystemMetrics(SM_CYSCREEN) - (rcDlg.bottom - rcDlg.top)) / 2;
         SetWindowPos(hDlg, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE);
-        s_currentTab = g_Global.activeProfileIndex;
+        LoadSettings();
         HWND hTab = GetDlgItem(hDlg, IDC_TAB_PROFILES);
         if (hTab) {
             TabCtrl_DeleteAllItems(hTab); TCITEMW tie = { 0 }; tie.mask = TCIF_TEXT;
             for (int i = 0; i < 5; i++) { tie.pszText = g_Global.profiles[i].label; SendMessage(hTab, TCM_INSERTITEMW, i, (LPARAM)&tie); }
-            TabCtrl_SetCurSel(hTab, s_currentTab);
         }
-        SendMessage(GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE), CB_ADDSTRING, 0, (LPARAM)L"250 ms");
-        SendMessage(GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE), CB_ADDSTRING, 0, (LPARAM)L"500 ms");
-        SendMessage(GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE), CB_ADDSTRING, 0, (LPARAM)L"1000 ms");
-        SendMessage(GetDlgItem(hDlg, IDC_COMBO_LED_FPS), CB_ADDSTRING, 0, (LPARAM)L"25 FPS");
-        SendMessage(GetDlgItem(hDlg, IDC_COMBO_LED_FPS), CB_ADDSTRING, 0, (LPARAM)L"20 FPS");
-        SendMessage(GetDlgItem(hDlg, IDC_COMBO_LED_FPS), CB_ADDSTRING, 0, (LPARAM)L"15 FPS");
-        SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_ADDSTRING, 0, (LPARAM)L"Disabled");
-        SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_ADDSTRING, 0, (LPARAM)L"Slow");
-        SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_ADDSTRING, 0, (LPARAM)L"Normal");
-        SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_ADDSTRING, 0, (LPARAM)L"Fast");
-        HWND hComboDev = GetDlgItem(hDlg, IDC_COMBO_DEVICE); HWND hComboSens = GetDlgItem(hDlg, IDC_SENSOR_ID);
-        SendMessage(hComboDev, CB_RESETCONTENT, 0, 0); SendMessage(hComboSens, CB_RESETCONTENT, 0, 0);
-        SendMessage(hComboDev, CB_ADDSTRING, 0, (LPARAM)L"Scanning hardware...");
-        SendMessage(hComboSens, CB_ADDSTRING, 0, (LPARAM)L"Fetching sensors...");
-        SendMessage(hComboDev, CB_SETCURSEL, 0, 0); SendMessage(hComboSens, CB_SETCURSEL, 0, 0);
-        EnableWindow(hComboDev, FALSE); EnableWindow(hComboSens, FALSE);
-        std::thread(AsyncPopulateDevices, hDlg).detach();
-        std::thread(AsyncPopulateSensors, hDlg, std::wstring(g_Global.profiles[s_currentTab].webServerUrl)).detach();
+        HWND hSensorUpdate = GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE);
+        SendMessage(hSensorUpdate, CB_ADDSTRING, 0, (LPARAM)L"250 ms");
+        SendMessage(hSensorUpdate, CB_ADDSTRING, 0, (LPARAM)L"500 ms");
+        SendMessage(hSensorUpdate, CB_ADDSTRING, 0, (LPARAM)L"1000 ms");
+        HWND hLedFPS = GetDlgItem(hDlg, IDC_COMBO_LED_FPS);
+        SendMessage(hLedFPS, CB_ADDSTRING, 0, (LPARAM)L"25 FPS");
+        SendMessage(hLedFPS, CB_ADDSTRING, 0, (LPARAM)L"20 FPS");
+        SendMessage(hLedFPS, CB_ADDSTRING, 0, (LPARAM)L"15 FPS");
+        HWND hSmoothing = GetDlgItem(hDlg, IDC_COMBO_SMOOTHING);
+        SendMessage(hSmoothing, CB_ADDSTRING, 0, (LPARAM)L"Disabled");
+        SendMessage(hSmoothing, CB_ADDSTRING, 0, (LPARAM)L"Slow");
+        SendMessage(hSmoothing, CB_ADDSTRING, 0, (LPARAM)L"Normal");
+        SendMessage(hSmoothing, CB_ADDSTRING, 0, (LPARAM)L"Fast");
+        s_currentTab = g_Global.activeProfileIndex; TabCtrl_SetCurSel(hTab, s_currentTab);
+        PopulateDeviceList(hDlg);
         LoadProfileToUI(hDlg, s_currentTab);
         hBrushLow = CreateSolidBrush(g_Global.profiles[s_currentTab].colorLow);
         hBrushMed = CreateSolidBrush(g_Global.profiles[s_currentTab].colorMed);
@@ -987,13 +1050,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         LPNMHDR pnm = (LPNMHDR)lParam;
         if (pnm->idFrom == IDC_TAB_PROFILES && pnm->code == TCN_SELCHANGE) {
             SaveUIToProfile(hDlg, s_currentTab);
-            int oldTab = s_currentTab; s_currentTab = TabCtrl_GetCurSel(pnm->hwndFrom);
-            if (wcscmp(g_Global.profiles[oldTab].webServerUrl, g_Global.profiles[s_currentTab].webServerUrl) != 0) {
-                HWND hCS = GetDlgItem(hDlg, IDC_SENSOR_ID); EnableWindow(hCS, FALSE);
-                SendMessage(hCS, CB_RESETCONTENT, 0, 0); SendMessage(hCS, CB_ADDSTRING, 0, (LPARAM)L"Fetching sensors...");
-                SendMessage(hCS, CB_SETCURSEL, 0, 0);
-                std::thread(AsyncPopulateSensors, hDlg, std::wstring(g_Global.profiles[s_currentTab].webServerUrl)).detach();
-            }
+            s_currentTab = TabCtrl_GetCurSel(pnm->hwndFrom);
             LoadProfileToUI(hDlg, s_currentTab);
             if (hBrushLow) DeleteObject(hBrushLow); if (hBrushMed) DeleteObject(hBrushMed); if (hBrushHigh) DeleteObject(hBrushHigh);
             hBrushLow = CreateSolidBrush(g_Global.profiles[s_currentTab].colorLow);
@@ -1014,14 +1071,14 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             int idx = (int)SendMessage((HWND)lParam, CB_GETCURSEL, 0, 0);
             if (idx != CB_ERR) {
                 wchar_t* devType = (wchar_t*)SendMessage((HWND)lParam, CB_GETITEMDATA, idx, 0);
-                if (devType && devType != (wchar_t*)CB_ERR) PopulateAreaList(hDlg, devType);
+                if (devType) PopulateAreaList(hDlg, devType);
             }
             return TRUE;
         }
-        if (code == EN_CHANGE && (id == IDC_HEX_LOW || id == IDC_HEX_MED || id == IDC_HEX_HIGH)) {
-            wchar_t hexBuf[10]; GetDlgItemTextW(hDlg, id, hexBuf, 10);
-            if (IsValidHex(hexBuf)) {
-                COLORREF newCol = HexToColor(hexBuf); HBRUSH newBrush = CreateSolidBrush(newCol);
+        if (code == EN_CHANGE) {
+            wchar_t buf[10]; GetDlgItemTextW(hDlg, id, buf, 10);
+            if (IsValidHex(buf)) {
+                COLORREF newCol = HexToColor(buf); HBRUSH newBrush = CreateSolidBrush(newCol);
                 if (id == IDC_HEX_LOW) { if (hBrushLow) DeleteObject(hBrushLow); hBrushLow = newBrush; }
                 else if (id == IDC_HEX_MED) { if (hBrushMed) DeleteObject(hBrushMed); hBrushMed = newBrush; }
                 else if (id == IDC_HEX_HIGH) { if (hBrushHigh) DeleteObject(hBrushHigh); hBrushHigh = newBrush; }
@@ -1037,14 +1094,11 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                 MessageBoxW(hDlg, L"Invalid temperature range in current profile.", L"Error", MB_ICONWARNING); return TRUE;
             }
             SetStartupTask(IsDlgButtonChecked(hDlg, IDC_CHK_STARTUP) == BST_CHECKED);
-            SaveSettings();
-            g_ResetHttp = true; g_asyncTemp = -1.0f; g_activeSource = DataSource::Searching; forceLEDRefresh();
+            SaveSettings(); g_ResetHttp = true; g_asyncTemp = -1.0f; g_activeSource = DataSource::Searching; forceLEDRefresh();
             SetEvent(g_hSensorEvent);
-            Log("[MysticFight] Profiles saved and engine restarted.");
-            DestroyWindow(hDlg);
-            return TRUE;
+            EndDialog(hDlg, IDOK); return TRUE;
         }
-        case IDCANCEL: DestroyWindow(hDlg); return TRUE;
+        case IDCANCEL: EndDialog(hDlg, IDCANCEL); return TRUE;
         case IDC_BTN_RESET:
             SetDlgItemInt(hDlg, IDC_TEMP_LOW, 50, TRUE); SetDlgItemInt(hDlg, IDC_TEMP_MED, 70, TRUE); SetDlgItemInt(hDlg, IDC_TEMP_HIGH, 90, TRUE);
             SetDlgItemTextW(hDlg, IDC_HEX_LOW, L"#00FF00"); SetDlgItemTextW(hDlg, IDC_HEX_MED, L"#FFFF00"); SetDlgItemTextW(hDlg, IDC_HEX_HIGH, L"#FF0000");
@@ -1053,30 +1107,25 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             SendMessage(hDlg, WM_COMMAND, MAKEWPARAM(IDC_HEX_HIGH, EN_CHANGE), (LPARAM)GetDlgItem(hDlg, IDC_HEX_HIGH));
             return TRUE;
         case IDC_BTN_RESET_ADVANCED:
-            SendMessage(GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE), CB_SETCURSEL, 1, 0);
-            SendMessage(GetDlgItem(hDlg, IDC_COMBO_LED_FPS), CB_SETCURSEL, 0, 0);
-            SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_SETCURSEL, 2, 0);
+            SendMessage(GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE), CB_SETCURSEL, 1, 0); SendMessage(GetDlgItem(hDlg, IDC_COMBO_LED_FPS), CB_SETCURSEL, 0, 0); SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_SETCURSEL, 2, 0);
             return TRUE;
         case IDC_EDIT_LABEL:
             if (code == EN_CHANGE) {
                 wchar_t newLabel[64]; GetDlgItemTextW(hDlg, IDC_EDIT_LABEL, newLabel, 64);
                 HWND hTab = GetDlgItem(hDlg, IDC_TAB_PROFILES);
-                if (hTab) { TCITEMW tie = { TCIF_TEXT }; tie.pszText = newLabel; SendMessage(hTab, TCM_SETITEMW, s_currentTab, (LPARAM)&tie); }
+                if (hTab) { int curTab = TabCtrl_GetCurSel(hTab); if (curTab != -1) { TCITEMW tie = { 0 }; tie.mask = TCIF_TEXT; tie.pszText = newLabel; SendMessage(hTab, TCM_SETITEMW, curTab, (LPARAM)&tie); } }
             }
             return TRUE;
         }
         break;
     }
     case WM_DESTROY:
-        g_hSettingsDlg = NULL;
-        if (hBrushLow) { DeleteObject(hBrushLow); hBrushLow = NULL; }
-        if (hBrushMed) { DeleteObject(hBrushMed); hBrushMed = NULL; }
-        if (hBrushHigh) { DeleteObject(hBrushHigh); hBrushHigh = NULL; }
+        if (hBrushLow) DeleteObject(hBrushLow); if (hBrushMed) DeleteObject(hBrushMed); if (hBrushHigh) DeleteObject(hBrushHigh);
         ClearComboHeapData(GetDlgItem(hDlg, IDC_SENSOR_ID)); ClearComboHeapData(GetDlgItem(hDlg, IDC_COMBO_DEVICE));
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_LOW), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_MED), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_HIGH), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
-        return 0;
+        break;
     }
     return (INT_PTR)FALSE;
 }
@@ -1095,7 +1144,8 @@ INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
         SetDlgItemTextW(hDlg, IDC_ABOUT_VERSION, versionStr.c_str());
         HFONT hFont = (HFONT)SendMessage(GetDlgItem(hDlg, IDC_GITHUB_LINK), WM_GETFONT, 0, 0);
         LOGFONT lf; GetObject(hFont, sizeof(LOGFONT), &lf); lf.lfUnderline = TRUE;
-        hFontLink = CreateFontIndirect(&lf); SendMessage(GetDlgItem(hDlg, IDC_GITHUB_LINK), WM_SETFONT, (WPARAM)hFontLink, TRUE);
+        hFontLink = CreateFontIndirect(&lf);
+        SendMessage(GetDlgItem(hDlg, IDC_GITHUB_LINK), WM_SETFONT, (WPARAM)hFontLink, TRUE);
         return (INT_PTR)TRUE;
     }
     case WM_CTLCOLORSTATIC:
@@ -1107,9 +1157,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
         if ((HWND)wParam == GetDlgItem(hDlg, IDC_GITHUB_LINK)) { SetCursor(LoadCursor(NULL, IDC_HAND)); return TRUE; }
         break;
     case WM_COMMAND:
-        if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
-            if (hFontLink) { DeleteObject(hFontLink); hFontLink = NULL; } EndDialog(hDlg, LOWORD(wParam)); return (INT_PTR)TRUE;
-        }
+        if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) { if (hFontLink) { DeleteObject(hFontLink); hFontLink = NULL; } EndDialog(hDlg, LOWORD(wParam)); return (INT_PTR)TRUE; }
         if (LOWORD(wParam) == IDC_GITHUB_LINK) RunShellNonAdmin(L"https://github.com/tonikelope/MysticFight");
         break;
     case WM_DESTROY: if (hFontLink) { DeleteObject(hFontLink); hFontLink = NULL; } break;
@@ -1117,28 +1165,21 @@ INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
     return (INT_PTR)FALSE;
 }
 
-static bool ExtractMSIDLL() {
-    wchar_t szPath[MAX_PATH]; GetModuleFileNameW(NULL, szPath, MAX_PATH);
-    wchar_t* lastSlash = wcsrchr(szPath, L'\\'); if (lastSlash) *(lastSlash + 1) = L'\0';
-    std::wstring dllPath = std::wstring(szPath) + L"MysticLight_SDK.dll";
-    if (GetFileAttributesW(dllPath.c_str()) != INVALID_FILE_ATTRIBUTES) return true;
-    HMODULE hModule = GetModuleHandle(NULL);
-    HRSRC hRes = FindResourceW(hModule, (LPCWSTR)MAKEINTRESOURCE(IDR_MSI_DLL), L"BINARY"); if (!hRes) return false;
-    HGLOBAL hData = LoadResource(hModule, hRes); DWORD size = SizeofResource(hModule, hRes); void* pData = LockResource(hData);
-    HANDLE hFile = CreateFileW(dllPath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) return false;
-    DWORD written; bool success = WriteFile(hFile, pData, size, &written, NULL); CloseHandle(hFile); return success;
+void SwitchActiveProfile(HWND hWnd, int index) {
+    if (index < 0 || index >= 5) return;
+    { std::lock_guard<std::mutex> lock(g_cfgMutex); g_Global.activeProfileIndex = index; }
+    SaveSettings();
+    g_asyncTemp = -1.0f; g_ResetHttp = true; g_activeSource = DataSource::Searching; forceLEDRefresh();
+    wchar_t msg[128]; swprintf_s(msg, L"Switched to %ls", g_cfg.label);
+    ShowNotification(hWnd, GetModuleHandle(NULL), L"MysticFight", msg);
+    char logMsg[128]; snprintf(logMsg, sizeof(logMsg), "[MysticFight] Hotkey triggered: Switched to Profile %d", index + 1); Log(logMsg);
 }
 
 static void FinalCleanup(HWND hWnd) {
     Log("[MysticFight] Starting cleaning...");
     if (g_hLibrary) {
-        if (g_deviceName && lpMLAPI_SetLedStyle) {
-            _bstr_t bstrOff(L"Off");
-            std::lock_guard<std::mutex> lock(g_sdkMutex);
-            lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
-        }
-        if (lpMLAPI_Release) lpMLAPI_Release();
+        if (g_deviceName && lpMLAPI_SetLedStyle) { _bstr_t bstrOff(L"Off"); lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff); Log("[MysticFight] LEDs power off"); }
+        if (lpMLAPI_Release) { lpMLAPI_Release(); Log("[MysticFight] MSI SDK Released"); }
         FreeLibrary(g_hLibrary); g_hLibrary = NULL;
     }
     if (g_deviceName) { SysFreeString(g_deviceName); g_deviceName = NULL; }
@@ -1147,9 +1188,16 @@ static void FinalCleanup(HWND hWnd) {
         UnregisterHotKey(hWnd, 1); UnregisterHotKey(hWnd, 101); UnregisterHotKey(hWnd, 102); UnregisterHotKey(hWnd, 103);
     }
     if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); g_hMutex = NULL; }
-    CoUninitialize(); CloseHandle(g_hSensorEvent);
+    CoUninitialize();
+    if (g_hConnect) { WinHttpCloseHandle(g_hConnect); g_hConnect = NULL; }
+    if (g_hSession) { WinHttpCloseHandle(g_hSession); g_hSession = NULL; }
+    CloseHandle(g_hSensorEvent);
     Log("[MysticFight] Cleaning finished.");
 }
+
+// ============================================================================
+// MAIN LOOP & ENTRY POINT
+// ============================================================================
 
 static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
@@ -1171,53 +1219,26 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                 InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, ID_TRAY_LOG, L"View Debug Log");
                 InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
                 InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, ID_TRAY_EXIT, L"Exit MysticFight");
-                SetForegroundWindow(hWnd);
-                TrackPopupMenu(hMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, curPoint.x, curPoint.y, 0, hWnd, NULL);
-                DestroyMenu(hMenu);
+                SetForegroundWindow(hWnd); TrackPopupMenu(hMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, curPoint.x, curPoint.y, 0, hWnd, NULL); DestroyMenu(hMenu);
             }
         }
         break;
     case WM_COMMAND:
         if (LOWORD(wParam) == ID_TRAY_EXIT) g_Running = false;
-        if (LOWORD(wParam) == ID_TRAY_LOG) { wchar_t p[MAX_PATH]; GetFullPathNameW(LOG_FILENAME, MAX_PATH, p, NULL); RunShellNonAdmin(p); }
-        if (LOWORD(wParam) == ID_TRAY_CONFIG) {
-            if (!IsWindow(g_hSettingsDlg)) {
-                g_hSettingsDlg = CreateDialogParamW(GetModuleHandle(NULL), MAKEINTRESOURCEW(IDD_SETTINGS), hWnd, (DLGPROC)SettingsDlgProc, 0);
-                ShowWindow(g_hSettingsDlg, SW_SHOW);
-            }
-            else SetForegroundWindow(g_hSettingsDlg);
-        }
-        if (LOWORD(wParam) == ID_TRAY_ABOUT) DialogBoxParamW(GetModuleHandle(NULL), MAKEINTRESOURCEW(IDD_ABOUT), hWnd, (DLGPROC)AboutDlgProc, 0);
+        if (LOWORD(wParam) == ID_TRAY_LOG) { wchar_t fullLogPath[MAX_PATH]; GetFullPathNameW(LOG_FILENAME, MAX_PATH, fullLogPath, NULL); RunShellNonAdmin(fullLogPath); }
+        if (LOWORD(wParam) == ID_TRAY_CONFIG) { DialogBoxParamW(GetModuleHandle(NULL), MAKEINTRESOURCEW(IDD_SETTINGS), hWnd, (DLGPROC)SettingsDlgProc, 0); }
+        if (LOWORD(wParam) == ID_TRAY_ABOUT) { DialogBoxParamW(GetModuleHandle(NULL), MAKEINTRESOURCEW(IDD_ABOUT), hWnd, (DLGPROC)AboutDlgProc, 0); }
         break;
     case WM_QUERYENDSESSION:
-        if (!g_windows_shutdown) { Log("[MysticFight] Shutdown detected..."); g_windows_shutdown = true; g_Running = false; }
+        if (!g_windows_shutdown) { Log("[MysticFight] Windows Shutdown detected..."); g_windows_shutdown = true; g_Running = false; }
         return FALSE;
     case WM_CLOSE: case WM_DESTROY: g_Running = false; PostQuitMessage(0); return 0;
     }
     return DefWindowProc(hWnd, message, wParam, lParam);
 }
 
-void SwitchActiveProfile(HWND hWnd, int index) {
-    if (index < 0 || index >= 5) return;
-    { std::lock_guard<std::mutex> lock(g_cfgMutex); g_Global.activeProfileIndex = index; }
-    SaveSettings();
-    g_asyncTemp = -1.0f; g_ResetHttp = true; g_activeSource = DataSource::Searching; forceLEDRefresh();
-    wchar_t msg[128];
-    {
-        std::lock_guard<std::mutex> lock(g_cfgMutex);
-        swprintf_s(msg, L"Switched to %ls", g_Global.profiles[g_Global.activeProfileIndex].label);
-    }
-    ShowNotification(hWnd, GetModuleHandle(NULL), L"MysticFight", msg);
-    char logMsg[128]; snprintf(logMsg, sizeof(logMsg), "[MysticFight] Hotkey triggered: Switched to Profile %d", index + 1); Log(logMsg);
-}
-
-// ============================================================================
-// ENTRY POINT
-// ============================================================================
-
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS); SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
     HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (FAILED(hr)) { Log("[MysticFight] Critical: COM Initialization failed."); return 1; }
 
@@ -1246,9 +1267,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     char versionMsg[128]; snprintf(versionMsg, sizeof(versionMsg), "[MysticFight] MysticFight %ls started", APP_VERSION); Log(versionMsg);
 
     bool isFirstRun = (GetFileAttributesW(INI_FILE) == INVALID_FILE_ATTRIBUTES);
+    LoadSettings(); g_target_device = g_cfg.targetDevice;
 
-    LoadSettings();
-    g_target_device = g_Global.profiles[g_Global.activeProfileIndex].targetDevice;
+    wchar_t hL[10], hM[10], hH[10]; ColorToHex(g_cfg.colorLow, hL, 10); ColorToHex(g_cfg.colorMed, hM, 10); ColorToHex(g_cfg.colorHigh, hH, 10);
+    char startupCfg[LOG_BUFFER_SIZE]; snprintf(startupCfg, sizeof(startupCfg), "[MysticFight] Config Loaded - Device: %ls | LED Area index: %d | Sensor: %ls | Low: %dºC (%ls) | Med: %dºC (%ls) | High: %dºC (%ls)", g_cfg.targetDevice, g_cfg.targetLedIndex, g_cfg.sensorID, g_cfg.tempLow, hL, g_cfg.tempMed, hM, g_cfg.tempHigh, hH); Log(startupCfg);
 
     wchar_t windowTitle[100]; swprintf_s(windowTitle, L"MysticFight %ls (by tonikelope)", APP_VERSION);
     WNDCLASSW wc = { 0 }; wc.lpfnWndProc = WndProc; wc.hInstance = hInstance; wc.lpszClassName = L"MysticFight_Class";
@@ -1256,64 +1278,43 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     RegisterClassW(&wc);
     HWND hWnd = CreateWindowExW(0, wc.lpszClassName, windowTitle, 0, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
 
-    Log("[MysticFight] Initializing MSI SDK and HTTP Sensor Thread...");
+    Log("[MysticFight] Initializing MSI SDK and HTTP Sensor Thread (Parallel Startup)...");
     g_hSensorEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
     g_hSourceResolvedEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
     std::thread sThread(SensorThread);
 
     ULONGLONG startTime = GetTickCount64(); bool sdkReady = false;
     while (GetTickCount64() - startTime < 5000) {
-        if (lpMLAPI_Initialize && lpMLAPI_Initialize() == 0) { sdkReady = true; Log("[MysticFight] SDK Initialized successfully."); break; }
+        if (lpMLAPI_Initialize && lpMLAPI_Initialize() == 0) { sdkReady = true; Log("[MysticFight] SDK Initialized successfully at startup"); break; }
         Sleep(500);
     }
 
     if (!sdkReady) {
-        Log("[MysticFight] FATAL: MSI SDK Initialization failed.");
-        MessageBoxW(NULL, L"The MSI Mystic Light SDK is not responding.\n\nPlease ensure MSI Center is installed or not blocking access.", L"MysticFight - SDK Error", MB_OK | MB_ICONERROR);
+        Log("[MysticFight] FATAL: MSI SDK Initialization failed after timeout.");
+        MessageBoxW(NULL, L"The MSI Mystic Light SDK is not responding.\n\nPlease ensure MSI Center and Mystic Light are installed correctly.", L"MysticFight - SDK Error", MB_OK | MB_ICONERROR);
+        if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); g_hMutex = NULL; }
         g_Running = false; SetEvent(g_hSensorEvent); if (sThread.joinable()) sThread.join();
-        if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); } CoUninitialize(); return 1;
+        if (g_hSensorEvent) CloseHandle(g_hSensorEvent); if (g_hSourceResolvedEvent) CloseHandle(g_hSourceResolvedEvent);
+        CoUninitialize(); return 1;
     }
 
-    MSIHwardwareDetection();
+    if (sdkReady) MSIHwardwareDetection();
+    ULONGLONG elapsed = GetTickCount64() - startTime; DWORD waitTime = (elapsed >= 5000) ? 0 : (5000 - (DWORD)elapsed);
+    WaitForSingleObject(g_hSourceResolvedEvent, waitTime);
 
-    // ========================================================================
-    // LOGIC BLOCKING FOR FIRST RUN
-    // ========================================================================
-    if (isFirstRun) {
-        bool sensorFound = false;
-
-        while (!sensorFound && g_Running) {
-            if (AutoSelectFirstSensor()) {
-                sensorFound = true;
-                Log("First Run: Sensor detected via LHM HTTP.");
-            }
-            else {
-                int ret = MessageBoxW(NULL, L"Could not find a valid sensor in LibreHardwareMonitor.\n\nEnsure LHM is running and the Web Server is enabled.\n\nRetry?", L"First Run Setup", MB_RETRYCANCEL | MB_ICONWARNING);
-                if (ret == IDCANCEL) {
-                    g_Running = false;
-                    FinalCleanup(NULL);
-                    return 0; // Exit app
-                }
-            }
-        }
-
-        // Apply defaults now that we have data
-        if (g_deviceName) {
-            std::lock_guard<std::mutex> lock(g_cfgMutex);
-            wcscpy_s(g_Global.profiles[g_Global.activeProfileIndex].targetDevice, g_deviceName);
-        }
-
-        SaveSettings(); // Save immediately
-        Log("First Run: Default settings saved.");
-
-        // NOW open window
-        g_hSettingsDlg = CreateDialogParamW(hInstance, MAKEINTRESOURCEW(IDD_SETTINGS), hWnd, (DLGPROC)SettingsDlgProc, 0);
-        ShowWindow(g_hSettingsDlg, SW_SHOW);
+    if (g_activeSource == DataSource::Searching) {
+        Log("[MysticFight] FATAL: No valid data source (HTTP) found during startup timeout.");
+        MessageBoxW(NULL, L"Fatal Error: No temperature data source found (LibreHardwareMonitor HTTP).\n\nPlease ensure the Web Server is enabled in LHM options and use the default settings (0.0.0.0 and port 8085).", L"MysticFight - Startup Error", MB_OK | MB_ICONERROR);
+        g_Running = false; SetEvent(g_hSensorEvent); sThread.join(); return 1;
     }
-    // ========================================================================
+
+    if (isFirstRun) SaveSettings();
 
     NOTIFYICONDATAW nid = { sizeof(NOTIFYICONDATAW), hWnd, 1, NIF_ICON | NIF_MESSAGE | NIF_TIP, WM_TRAYICON };
-    nid.hIcon = wc.hIcon; swprintf_s(nid.szTip, _countof(nid.szTip), L"MysticFight %ls", APP_VERSION); Shell_NotifyIconW(NIM_ADD, &nid);
+    nid.hIcon = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_ICON1), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
+    swprintf_s(nid.szTip, _countof(nid.szTip), L"MysticFight %ls (by tonikelope)", APP_VERSION); Shell_NotifyIconW(NIM_ADD, &nid);
+
+    if (isFirstRun) DialogBoxParamW(hInstance, MAKEINTRESOURCEW(IDD_SETTINGS), hWnd, (DLGPROC)SettingsDlgProc, 0);
 
     RegisterHotKey(hWnd, 1, MOD_CONTROL | MOD_SHIFT | MOD_ALT, 0x4C);
     RegisterHotKey(hWnd, 101, MOD_CONTROL | MOD_SHIFT | MOD_ALT, '1');
@@ -1330,113 +1331,78 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     while (g_Running) {
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) { g_Running = false; break; }
-            if (!g_hSettingsDlg || !IsDialogMessage(g_hSettingsDlg, &msg)) { TranslateMessage(&msg); DispatchMessage(&msg); }
+            TranslateMessage(&msg); DispatchMessage(&msg);
         }
         if (!g_Running) break;
-
         ULONGLONG currentTime = GetTickCount64();
 
         if (g_Resetting_sdk) {
             if (currentTime >= g_ResetTimer) {
                 switch (g_ResetStage) {
-                case 0: ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", false); KillProcessByName(L"LEDKeeper2.exe"); g_ResetTimer = currentTime + RESET_KILL_TASK_WAIT_MS; g_ResetStage = 1; break;
-                case 1: ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", true); g_ResetTimer = currentTime + RESET_RESTART_TASK_DELAY_MS; g_ResetStage = 2; break;
-                case 2: if (lpMLAPI_Initialize && lpMLAPI_Initialize() == 0) {
-                    MSIHwardwareDetection();
-                    std::lock_guard<std::mutex> lock(g_sdkMutex);
-                    if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
-                }
-                      g_ResetTimer = currentTime + RESET_RESTART_TASK_DELAY_MS; g_Resetting_sdk = false; forceLEDRefresh(); break;
+                case 0: Log("[MysticFight] Reset Stage 0: Cleaning MSI..."); ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", false); KillProcessByName(L"LEDKeeper2.exe"); g_ResetTimer = currentTime + RESET_KILL_TASK_WAIT_MS; g_ResetStage = 1; break;
+                case 1: Log("[MysticFight] Reset Stage 1: Restarting MSI..."); ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", true); g_ResetTimer = currentTime + RESET_RESTART_TASK_DELAY_MS; g_ResetStage = 2; break;
+                case 2: Log("[MysticFight] Reset Stage 2: Re-initializing SDK..."); if (lpMLAPI_Initialize && lpMLAPI_Initialize() == 0) { MSIHwardwareDetection(); if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady); } g_ResetTimer = currentTime + RESET_RESTART_TASK_DELAY_MS; g_Resetting_sdk = false; forceLEDRefresh(); break;
                 }
             }
         }
         else if (g_activeSource == DataSource::Searching) {
-            if (AutoSelectFirstSensor()) {
-                g_activeSource = DataSource::HTTP;
-                SetEvent(g_hSourceResolvedEvent);
-            }
-            else {
-                if (lhmAlive) {
-                    lhmAlive = false;
-                    std::lock_guard<std::mutex> lock(g_sdkMutex);
-                    if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_target_device, g_Global.profiles[g_Global.activeProfileIndex].targetLedIndex, bstrBreath);
-                    if (status == 0 && lpMLAPI_SetLedColor) status = lpMLAPI_SetLedColor(g_target_device, g_Global.profiles[g_Global.activeProfileIndex].targetLedIndex, 255, 255, 255);
-                }
+            if (lhmAlive) {
+                lhmAlive = false;
+                if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrBreath);
+                if (status == 0 && lpMLAPI_SetLedColor) status = lpMLAPI_SetLedColor(g_target_device, g_cfg.targetLedIndex, 255, 255, 255);
             }
         }
         else if (g_LedsEnabled) {
             float rawTemp = g_asyncTemp.load();
-            Config localCfg;
-            { std::lock_guard<std::mutex> lock(g_cfgMutex); localCfg = g_Global.profiles[g_Global.activeProfileIndex]; }
-
             if (rawTemp >= 0.0f) {
-                if (!lhmAlive) { lhmAlive = true; forceLEDRefresh(); }
+                if (!lhmAlive) { lhmAlive = true; Log("[MysticFight] Connection established/recovered."); forceLEDRefresh(); }
                 float temp = floorf(rawTemp * 2.0f + 0.5f) / 2.0f;
                 if (temp != lastTemp) {
                     lastTemp = temp;
                     float ratio = 0.0f; COLORREF c1 = 0, c2 = 0;
-                    if (temp <= (float)localCfg.tempLow) {
-                        targetR = GetRValue(localCfg.colorLow); targetG = GetGValue(localCfg.colorLow); targetB = GetBValue(localCfg.colorLow);
-                    }
-                    else if (temp < (float)localCfg.tempMed) {
-                        ratio = (temp - (float)localCfg.tempLow) / ((float)localCfg.tempMed - (float)localCfg.tempLow);
+                    if (temp <= (float)g_cfg.tempLow) { targetR = GetRValue(g_cfg.colorLow); targetG = GetGValue(g_cfg.colorLow); targetB = GetBValue(g_cfg.colorLow); }
+                    else if (temp < (float)g_cfg.tempMed) {
+                        ratio = (temp - (float)g_cfg.tempLow) / ((float)g_cfg.tempMed - (float)g_cfg.tempLow);
                         if (ratio < 0.0f) ratio = 0.0f; if (ratio > 1.0f) ratio = 1.0f;
-                        c1 = localCfg.colorLow; c2 = localCfg.colorMed;
+                        c1 = g_cfg.colorLow; c2 = g_cfg.colorMed;
                         targetR = (DWORD)sqrt((double)GetRValue(c1) * GetRValue(c1) * (1.0 - ratio) + (double)GetRValue(c2) * GetRValue(c2) * ratio);
                         targetG = (DWORD)sqrt((double)GetGValue(c1) * GetGValue(c1) * (1.0 - ratio) + (double)GetGValue(c2) * GetGValue(c2) * ratio);
                         targetB = (DWORD)sqrt((double)GetBValue(c1) * GetBValue(c1) * (1.0 - ratio) + (double)GetBValue(c2) * GetBValue(c2) * ratio);
                     }
-                    else if (temp < (float)localCfg.tempHigh) {
-                        ratio = (temp - (float)localCfg.tempMed) / ((float)localCfg.tempHigh - (float)localCfg.tempMed);
+                    else if (temp < (float)g_cfg.tempHigh) {
+                        ratio = (temp - (float)g_cfg.tempMed) / ((float)g_cfg.tempHigh - (float)g_cfg.tempMed);
                         if (ratio < 0.0f) ratio = 0.0f; if (ratio > 1.0f) ratio = 1.0f;
-                        c1 = localCfg.colorMed; c2 = localCfg.colorHigh;
+                        c1 = g_cfg.colorMed; c2 = g_cfg.colorHigh;
                         targetR = (DWORD)sqrt((double)GetRValue(c1) * GetRValue(c1) * (1.0 - ratio) + (double)GetRValue(c2) * GetRValue(c2) * ratio);
                         targetG = (DWORD)sqrt((double)GetGValue(c1) * GetGValue(c1) * (1.0 - ratio) + (double)GetGValue(c2) * GetGValue(c2) * ratio);
                         targetB = (DWORD)sqrt((double)GetBValue(c1) * GetBValue(c1) * (1.0 - ratio) + (double)GetBValue(c2) * GetBValue(c2) * ratio);
                     }
-                    else {
-                        targetR = GetRValue(localCfg.colorHigh); targetG = GetGValue(localCfg.colorHigh); targetB = GetBValue(localCfg.colorHigh);
-                    }
+                    else { targetR = GetRValue(g_cfg.colorHigh); targetG = GetGValue(g_cfg.colorHigh); targetB = GetBValue(g_cfg.colorHigh); }
                     if (firstRun) { currR = (float)targetR; currG = (float)targetG; currB = (float)targetB; firstRun = false; }
                 }
             }
-
             float r = currR.load(); float g = currG.load(); float b = currB.load();
-            r += ((float)targetR - r) * localCfg.smoothingFactor;
-            g += ((float)targetG - g) * localCfg.smoothingFactor;
-            b += ((float)targetB - b) * localCfg.smoothingFactor;
+            r += ((float)targetR - r) * g_cfg.smoothingFactor; g += ((float)targetG - g) * g_cfg.smoothingFactor; b += ((float)targetB - b) * g_cfg.smoothingFactor;
             currR.store(r); currG.store(g); currB.store(b);
             DWORD sendR = (DWORD)currR; DWORD sendG = (DWORD)currG; DWORD sendB = (DWORD)currB;
-
             if (sendR != lastR || sendG != lastG || sendB != lastB) {
-                std::lock_guard<std::mutex> sdkLock(g_sdkMutex);
-                if (lastR == RGB_LEDS_OFF || lastR == RGB_LED_REFRESH) {
-                    if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(localCfg.targetDevice, localCfg.targetLedIndex, bstrSteady);
-                }
-                if (status == 0 && lpMLAPI_SetLedColor) status = lpMLAPI_SetLedColor(localCfg.targetDevice, localCfg.targetLedIndex, sendR, sendG, sendB);
-                if (status != 0) { g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0; }
+                if (lastR == RGB_LEDS_OFF || lastR == RGB_LED_REFRESH) { if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrSteady); }
+                if (status == 0 && lpMLAPI_SetLedColor) status = lpMLAPI_SetLedColor(g_target_device, g_cfg.targetLedIndex, sendR, sendG, sendB);
+                if (status != 0) { Log("[MysticFight] SDK SetColor failed. Triggering Reset..."); g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0; }
                 else { lastR = sendR; lastG = sendG; lastB = sendB; }
             }
         }
         else {
             if (lastR != RGB_LEDS_OFF) {
-                int status = 0;
-                {
-                    std::lock_guard<std::mutex> lock(g_sdkMutex);
-                    if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
-                }
+                int status = 0; if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
                 if (status != 0) { g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0; }
-                else lastR = RGB_LEDS_OFF;
+                else { lastR = RGB_LEDS_OFF; }
             }
         }
-
-        DWORD fps = 25;
-        { std::lock_guard<std::mutex> lock(g_cfgMutex); fps = g_Global.profiles[g_Global.activeProfileIndex].ledRefreshFPS; }
-        MsgWaitForMultipleObjects(0, NULL, FALSE, g_LedsEnabled ? (DWORD)(1000 / fps) : (DWORD)MAIN_LOOP_OFF_DELAY_MS, QS_ALLINPUT);
+        MsgWaitForMultipleObjects(0, NULL, FALSE, g_LedsEnabled ? (DWORD)(1000 / g_cfg.ledRefreshFPS) : (DWORD)MAIN_LOOP_OFF_DELAY_MS, QS_ALLINPUT);
     }
 
     if (g_windows_shutdown) ShutdownBlockReasonCreate(hWnd, L"Mystic Fight Shutdown...");
-    if (g_hConnect) WinHttpCloseHandle(g_hConnect); if (g_hSession) WinHttpCloseHandle(g_hSession);
     SetEvent(g_hSensorEvent); if (sThread.joinable()) sThread.join();
     FinalCleanup(hWnd); Log("[MysticFight] BYE BYE");
     if (g_windows_shutdown) ShutdownBlockReasonDestroy(hWnd);
