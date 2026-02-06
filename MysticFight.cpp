@@ -55,7 +55,7 @@
 #define ID_TRAY_ABOUT       4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.65";
+const wchar_t* APP_VERSION = L"v2.66";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -269,6 +269,20 @@ static bool EnableDebugPrivilege() {
     bool result = AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), NULL, NULL);
     CloseHandle(hToken);
     return result && (GetLastError() == ERROR_SUCCESS);
+}
+
+static void ShowNotification(HWND hWnd, const wchar_t* title, const wchar_t* info, DWORD iconType = NIIF_USER) {
+    // NIF_INFO indica que queremos mostrar un globo de notificación
+    NOTIFYICONDATAW nid = { sizeof(NOTIFYICONDATAW), hWnd, 1, NIF_INFO };
+
+    wcsncpy_s(nid.szInfoTitle, title, _TRUNCATE);
+    wcsncpy_s(nid.szInfo, info, _TRUNCATE);
+
+    // NIIF_USER usa el icono de la propia aplicación
+    // NIIF_LARGE_ICON lo hace ver moderno en Windows 10/11
+    nid.dwInfoFlags = iconType | NIIF_LARGE_ICON;
+
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
 static void KillProcessByName(const wchar_t* filename) {
@@ -1375,12 +1389,7 @@ static void SwitchActiveProfile(HWND hWnd, int index) {
     wchar_t msg[128];
     swprintf_s(msg, L"Switched to %ls", g_cfg.label);
 
-    // Manual forward notification helper call (embedded here for safety)
-    NOTIFYICONDATAW nid = { sizeof(NOTIFYICONDATAW), hWnd, 1, NIF_INFO };
-    wcscpy_s(nid.szInfoTitle, _countof(nid.szInfoTitle), L"MysticFight");
-    wcscpy_s(nid.szInfo, _countof(nid.szInfo), msg);
-    nid.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON;
-    Shell_NotifyIconW(NIM_MODIFY, &nid);
+    ShowNotification(hWnd, L"MysticFight", msg);
 }
 
 
@@ -1790,15 +1799,6 @@ INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
     return (INT_PTR)FALSE;
 }
 
-static void ShowNotification(HWND hWnd, HINSTANCE hInstance, const wchar_t* title, const wchar_t* info) {
-    NOTIFYICONDATAW nid = { sizeof(NOTIFYICONDATAW), hWnd, 1, NIF_INFO };
-    wcscpy_s(nid.szInfoTitle, _countof(nid.szInfoTitle), title);
-    wcscpy_s(nid.szInfo, _countof(nid.szInfo), info);
-    nid.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON;
-    Shell_NotifyIconW(NIM_MODIFY, &nid);
-}
-
-
 // ============================================================================
 // FINAL CLEANUP & MAIN WINDOW
 // ============================================================================
@@ -1842,8 +1842,14 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
     case WM_HOTKEY:
         if (wParam == 1) {
             g_LedsEnabled = !g_LedsEnabled;
-            if (g_LedsEnabled) PlaySound(MAKEINTRESOURCE(IDR_WAV_LIGHTS_ON), GetModuleHandle(NULL), SND_RESOURCE | SND_ASYNC);
-            else PlaySound(MAKEINTRESOURCE(IDR_WAV_LIGHTS_OFF), GetModuleHandle(NULL), SND_RESOURCE | SND_ASYNC);
+            
+            wchar_t msg[128];
+            swprintf_s(msg, L"Lights %ls", g_LedsEnabled?L"ON":L"OFF");
+            
+            ShowNotification(hWnd, L"MysticFight", msg);
+            
+            PlaySound(MAKEINTRESOURCE(g_LedsEnabled?IDR_WAV_LIGHTS_ON: IDR_WAV_LIGHTS_OFF), GetModuleHandle(NULL), SND_RESOURCE | SND_ASYNC);
+            
             SetEvent(g_hSensorEvent);
             lastR = RGB_LED_REFRESH;
         }
@@ -1991,7 +1997,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         if (isFirstRun) DialogBoxParamW(hInstance, MAKEINTRESOURCEW(IDD_SETTINGS), hWnd, (DLGPROC)SettingsDlgProc, 0);
 
         RegisterAppHotkeys(hWnd);
-        ShowNotification(hWnd, hInstance, windowTitle, L"Let's dance baby");
+
+        ShowNotification(hWnd, windowTitle, L"Let's dance baby");
 
         // --- Main Loop State ---
         _bstr_t bstrOff(L"Off");
