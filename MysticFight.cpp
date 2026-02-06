@@ -55,7 +55,7 @@
 #define ID_TRAY_ABOUT       4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.64";
+const wchar_t* APP_VERSION = L"v2.65";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -2007,6 +2007,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         // MAIN APPLICATION LOOP
         // ============================================================================
         while (g_Running) {
+            Config cfgLocal;
+            {
+                std::lock_guard<std::mutex> lock(g_cfgMutex);
+                cfgLocal = g_cfg; // Copia rápida de la estructura
+            }
+
+            _bstr_t bstrDevice(cfgLocal.targetDevice);
+
             while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
                 if (msg.message == WM_QUIT) { g_Running = false; break; }
                 TranslateMessage(&msg); DispatchMessage(&msg);
@@ -2033,7 +2041,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     case 2: // Re-Init
                         if (lpMLAPI_Initialize && lpMLAPI_Initialize() == 0) {
                             MSIHwardwareDetection();
-                            if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(g_deviceName, 0, bstrSteady);
+                            if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrSteady);
                         }
                         g_ResetTimer = currentTime + RESET_RESTART_TASK_DELAY_MS;
                         g_Resetting_sdk = false;
@@ -2046,8 +2054,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             else if (g_activeSource == DataSource::Searching) {
                 if (lhmAlive) {
                     lhmAlive = false;
-                    if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrBreath);
-                    if (status == 0 && lpMLAPI_SetLedColor) status = lpMLAPI_SetLedColor(g_target_device, g_cfg.targetLedIndex, 255, 255, 255);
+                    if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrBreath);
+                    if (status == 0 && lpMLAPI_SetLedColor) status = lpMLAPI_SetLedColor(bstrDevice, cfgLocal.targetLedIndex, 255, 255, 255);
                 }
             }
             // Normal Operation
@@ -2063,40 +2071,30 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                         float ratio = 0.0f;
                         COLORREF c1 = 0, c2 = 0;
 
-                        if (temp <= (float)g_cfg.tempLow) {
-                            targetR = GetRValue(g_cfg.colorLow); targetG = GetGValue(g_cfg.colorLow); targetB = GetBValue(g_cfg.colorLow);
+                        if (temp <= (float)cfgLocal.tempLow) {
+                            targetR = GetRValue(cfgLocal.colorLow); targetG = GetGValue(cfgLocal.colorLow); targetB = GetBValue(cfgLocal.colorLow);
                         }
-                        else if (temp < (float)g_cfg.tempMed) {
+                        else if (temp < (float)cfgLocal.tempMed) {
                             
-                            float range = ((float)g_cfg.tempMed - (float)g_cfg.tempLow);
+                            float range = ((float)cfgLocal.tempMed - (float)cfgLocal.tempLow);
                             
-                            if (range <= 0.001f) {
-                                ratio = 0.0f;
-                            }
-                            else {
-                                ratio = (temp - (float)g_cfg.tempLow) / range;
-                            }
+                            ratio = range>0.0f?(temp - (float)cfgLocal.tempLow) / range:0.0f;
                             
                             if (ratio < 0.0f) ratio = 0.0f; if (ratio > 1.0f) ratio = 1.0f;
 
-                            c1 = g_cfg.colorLow; c2 = g_cfg.colorMed;
+                            c1 = cfgLocal.colorLow; c2 = cfgLocal.colorMed;
                         }
-                        else if (temp < (float)g_cfg.tempHigh) {
-                            float range = ((float)g_cfg.tempHigh - (float)g_cfg.tempMed);
+                        else if (temp < (float)cfgLocal.tempHigh) {
+                            float range = ((float)cfgLocal.tempHigh - (float)cfgLocal.tempMed);
                             
-                            if (range <= 0.001f) {
-                                ratio = 0.0f;
-                            }
-                            else {
-                                ratio = (temp - (float)g_cfg.tempMed) / range;
-                            }
-                            
+                            ratio = range>0.0f?(temp - (float)cfgLocal.tempMed) / range:0.0f;
                             
                             if (ratio < 0.0f) ratio = 0.0f; if (ratio > 1.0f) ratio = 1.0f;
-                            c1 = g_cfg.colorMed; c2 = g_cfg.colorHigh;
+
+                            c1 = cfgLocal.colorMed; c2 = cfgLocal.colorHigh;
                         }
                         else {
-                            targetR = GetRValue(g_cfg.colorHigh); targetG = GetGValue(g_cfg.colorHigh); targetB = GetBValue(g_cfg.colorHigh);
+                            targetR = GetRValue(cfgLocal.colorHigh); targetG = GetGValue(cfgLocal.colorHigh); targetB = GetBValue(cfgLocal.colorHigh);
                         }
 
                         if (c1 != 0 || c2 != 0) {
@@ -2111,18 +2109,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 }
 
                 float r = currR.load(); float g = currG.load(); float b = currB.load();
-                r += ((float)targetR - r) * g_cfg.smoothingFactor;
-                g += ((float)targetG - g) * g_cfg.smoothingFactor;
-                b += ((float)targetB - b) * g_cfg.smoothingFactor;
+                r += ((float)targetR - r) * cfgLocal.smoothingFactor;
+                g += ((float)targetG - g) * cfgLocal.smoothingFactor;
+                b += ((float)targetB - b) * cfgLocal.smoothingFactor;
                 currR.store(r); currG.store(g); currB.store(b);
 
                 DWORD sendR = (DWORD)currR, sendG = (DWORD)currG, sendB = (DWORD)currB;
 
                 if (sendR != lastR || sendG != lastG || sendB != lastB) {
                     if (lastR == RGB_LEDS_OFF || lastR == RGB_LED_REFRESH) {
-                        if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_target_device, g_cfg.targetLedIndex, bstrSteady);
+                        if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrSteady);
                     }
-                    if (status == 0 && lpMLAPI_SetLedColor) status = lpMLAPI_SetLedColor(g_target_device, g_cfg.targetLedIndex, sendR, sendG, sendB);
+                    if (status == 0 && lpMLAPI_SetLedColor) status = lpMLAPI_SetLedColor(bstrDevice, cfgLocal.targetLedIndex, sendR, sendG, sendB);
 
                     if (status != 0) { g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0; }
                     else { lastR = sendR; lastG = sendG; lastB = sendB; }
@@ -2136,7 +2134,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     else lastR = RGB_LEDS_OFF;
                 }
             }
-            MsgWaitForMultipleObjects(0, NULL, FALSE, g_LedsEnabled ? (DWORD)(1000 / g_cfg.ledRefreshFPS) : (DWORD)MAIN_LOOP_OFF_DELAY_MS, QS_ALLINPUT);
+            MsgWaitForMultipleObjects(0, NULL, FALSE, g_LedsEnabled ? (DWORD)(1000 / cfgLocal.ledRefreshFPS) : (DWORD)MAIN_LOOP_OFF_DELAY_MS, QS_ALLINPUT);
         }
 
         if (g_windows_shutdown) ShutdownBlockReasonCreate(hWnd, L"Mystic Fight Shutdown...");
