@@ -2014,6 +2014,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         // MAIN APPLICATION LOOP
         // ============================================================================
         while (g_Running) {
+            
+
+            while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+                if (msg.message == WM_QUIT) { g_Running = false; break; }
+                TranslateMessage(&msg); DispatchMessage(&msg);
+            }
+            if (!g_Running) break;
+
             Config cfgLocal;
             {
                 std::lock_guard<std::mutex> lock(g_cfgMutex);
@@ -2021,12 +2029,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             }
 
             _bstr_t bstrDevice(cfgLocal.targetDevice);
-
-            while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
-                if (msg.message == WM_QUIT) { g_Running = false; break; }
-                TranslateMessage(&msg); DispatchMessage(&msg);
-            }
-            if (!g_Running) break;
 
             ULONGLONG currentTime = GetTickCount64();
 
