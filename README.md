@@ -19,7 +19,7 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * **Customizable Temperature and Colors Thresholds:** RMS interpolation.
 * **5 profiles settings:** Use `Ctrl + Alt + Shift + 1-5` to change between profiles.
 * **Night-Mode with Global Hotkey:** `Ctrl + Alt + Shift + L` to power-off/on LEDs instantly.
-  <p align="center"><img src="mf_settings2.png" /></p>
+  <p align="center"><img src="mf_settings3.png" /></p>
   
 ## ⚠️ Requirements
 For this tool to work, you MUST have the following installed/running:
