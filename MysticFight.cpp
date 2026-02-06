@@ -1,6 +1,6 @@
 ﻿/**
  * MysticFight - RGB Control & Hardware Monitor Integration
- * Author: tonikelope (and Gemini 3 Pro)
+ * Author: tonikelope (and Gemini)
  */
 
 #include "resource.h"
