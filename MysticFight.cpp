@@ -55,7 +55,7 @@
 #define ID_TRAY_ABOUT       4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.66";
+const wchar_t* APP_VERSION = L"v2.67";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -454,6 +454,8 @@ static std::wstring ExtractJsonString(const std::string& block, const std::strin
 
 static std::string FetchLHMJson(const wchar_t* serverUrl, int timeout) {
     std::lock_guard<std::mutex> lock(g_httpMutex);
+
+    if (!g_Running) return "";
 
     if (g_ResetHttp) {
         if (g_hConnect) { WinHttpCloseHandle(g_hConnect); g_hConnect = NULL; }
@@ -1915,6 +1917,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     HWND hWnd = NULL;
+    std::thread sThread;
 
     try {
         // --- Component Extraction ---
@@ -1956,7 +1959,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         Log("[MysticFight] Initializing MSI SDK and HTTP Sensor Thread...");
         g_hSensorEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
         g_hSourceResolvedEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
-        std::thread sThread(SensorThread);
+        sThread = std::thread(SensorThread);
 
         ULONGLONG startTime = GetTickCount64();
         bool sdkReady = false;
@@ -2146,9 +2149,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             MsgWaitForMultipleObjects(0, NULL, FALSE, g_LedsEnabled ? (DWORD)(1000 / cfgLocal.ledRefreshFPS) : (DWORD)MAIN_LOOP_OFF_DELAY_MS, QS_ALLINPUT);
         }
 
-        if (g_windows_shutdown) ShutdownBlockReasonCreate(hWnd, L"Mystic Fight Shutdown...");
-        SetEvent(g_hSensorEvent);
-        if (sThread.joinable()) sThread.join();
+        
 
     }
     catch (const std::exception& e) {
@@ -2160,7 +2161,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         MessageBoxW(NULL, L"An unknown critical error occurred.", L"MysticFight Crash", MB_OK | MB_ICONERROR);
     }
 
+    if (g_windows_shutdown) ShutdownBlockReasonCreate(hWnd, L"Mystic Fight Shutdown...");
+    
+    SetEvent(g_hSensorEvent);
+
+    {
+        std::lock_guard<std::mutex> lock(g_httpMutex);
+        if (g_hConnect) { WinHttpCloseHandle(g_hConnect); g_hConnect = NULL; }
+        if (g_hSession) { WinHttpCloseHandle(g_hSession); g_hSession = NULL; }
+    }
+
+    if (sThread.joinable()) sThread.join();
+
     FinalCleanup(hWnd);
+
     if (g_windows_shutdown) ShutdownBlockReasonDestroy(hWnd);
 
     return 0;
