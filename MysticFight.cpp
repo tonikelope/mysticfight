@@ -55,7 +55,7 @@
 #define ID_TRAY_ABOUT       4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.67";
+const wchar_t* APP_VERSION = L"v2.68";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -2160,6 +2160,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         Log("[MysticFight] CRITICAL UNKNOWN EXCEPTION occurred.");
         MessageBoxW(NULL, L"An unknown critical error occurred.", L"MysticFight Crash", MB_OK | MB_ICONERROR);
     }
+
+    g_Running = false;
 
     if (g_windows_shutdown) ShutdownBlockReasonCreate(hWnd, L"Mystic Fight Shutdown...");
     
