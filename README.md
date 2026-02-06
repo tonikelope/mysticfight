@@ -2,7 +2,7 @@
 
 <img src="rgb.png" width="64" height="64" align="right" />
 
-MSI Mystic Light CPU Temperature Profile Replacement.
+MSI Mystic Light Temperature Profile Replacement.
 
 ## ❓ Why MysticFight?
 Let's be honest: the official **Mystic Light** software is often unreliable, and "fails more than a fairground shotgun". 
