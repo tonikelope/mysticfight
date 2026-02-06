@@ -55,7 +55,7 @@
 #define ID_TRAY_ABOUT       4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.63";
+const wchar_t* APP_VERSION = L"v2.64";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -254,7 +254,27 @@ static void RunShellNonAdmin(const wchar_t* path) {
     ShellExecuteW(NULL, L"open", L"explorer.exe", path, NULL, SW_SHOWNORMAL);
 }
 
+static bool EnableDebugPrivilege() {
+    HANDLE hToken;
+    LUID luid;
+    TOKEN_PRIVILEGES tp;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) return false;
+    if (!LookupPrivilegeValue(NULL, SE_DEBUG_NAME, &luid)) { CloseHandle(hToken); return false; }
+
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Luid = luid;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+    bool result = AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), NULL, NULL);
+    CloseHandle(hToken);
+    return result && (GetLastError() == ERROR_SUCCESS);
+}
+
 static void KillProcessByName(const wchar_t* filename) {
+    // Ensure we have the "power" active
+    EnableDebugPrivilege();
+
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap == INVALID_HANDLE_VALUE) return;
 
@@ -264,10 +284,24 @@ static void KillProcessByName(const wchar_t* filename) {
     if (Process32FirstW(hSnap, &pe)) {
         do {
             if (_wcsicmp(pe.szExeFile, filename) == 0) {
+                // We ask for TERMINATE rights
                 HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
                 if (hProc) {
-                    TerminateProcess(hProc, 1);
+                    if (TerminateProcess(hProc, 1)) {
+                        char buf[128];
+                        snprintf(buf, sizeof(buf), "[Watchdog] Successfully terminated: %ls", filename);
+                        Log(buf);
+                    }
+                    else {
+                        Log("[Watchdog] Found process but TerminateProcess failed.");
+                    }
                     CloseHandle(hProc);
+                }
+                else {
+                    DWORD err = GetLastError();
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "[Watchdog] OpenProcess failed for %ls (Error: %lu)", filename, err);
+                    Log(buf);
                 }
             }
         } while (Process32NextW(hSnap, &pe));
@@ -602,38 +636,53 @@ static bool AutoSelectFirstSensor() {
     return false;
 }
 
-void LoadSettings() {
+// ============================================================================
+// CONFIGURATION LOADER
+// ============================================================================
+static void LoadSettings() {
+    // 1. Load Global Settings
     g_Global.activeProfileIndex = GetPrivateProfileIntW(L"Global", L"ActiveProfile", 0, INI_FILE);
-    if (g_Global.activeProfileIndex < 0 || g_Global.activeProfileIndex > 4) g_Global.activeProfileIndex = 0;
+    if (g_Global.activeProfileIndex < 0 || g_Global.activeProfileIndex > 4) {
+        g_Global.activeProfileIndex = 0;
+    }
 
+    // 2. Load Profiles (0 to 4)
     for (int i = 0; i < 5; i++) {
         std::wstring section = L"Settings";
         if (i > 0) section += L"_" + std::to_wstring(i);
 
         Config& p = g_Global.profiles[i];
 
+        // Temperature Thresholds
         p.tempLow = GetPrivateProfileIntW(section.c_str(), L"TempLow", 50, INI_FILE);
         p.tempMed = GetPrivateProfileIntW(section.c_str(), L"TempMed", 70, INI_FILE);
         p.tempHigh = GetPrivateProfileIntW(section.c_str(), L"TempHigh", 90, INI_FILE);
 
+        // Hardware Targets
         GetPrivateProfileStringW(section.c_str(), L"TargetDevice", L"MSI_MB", p.targetDevice, 256, INI_FILE);
         p.targetLedIndex = GetPrivateProfileIntW(section.c_str(), L"TargetLedIndex", 0, INI_FILE);
 
+        // Colors (Hex String -> COLORREF)
         wchar_t hL[10], hM[10], hH[10];
         GetPrivateProfileStringW(section.c_str(), L"ColorLow", L"#00FF00", hL, 10, INI_FILE);
         GetPrivateProfileStringW(section.c_str(), L"ColorMed", L"#FFFF00", hM, 10, INI_FILE);
         GetPrivateProfileStringW(section.c_str(), L"ColorHigh", L"#FF0000", hH, 10, INI_FILE);
+
         p.colorLow = HexToColor(hL);
         p.colorMed = HexToColor(hM);
         p.colorHigh = HexToColor(hH);
 
+        // Data Source
         GetPrivateProfileStringW(section.c_str(), L"SensorID", L"", p.sensorID, SENSOR_ID_LEN, INI_FILE);
         GetPrivateProfileStringW(section.c_str(), L"WebServerUrl", L"http://localhost:8085", p.webServerUrl, 256, INI_FILE);
 
-        wchar_t defLabel[64]; swprintf_s(defLabel, L"Profile %d", i + 1);
+        // UI Label
+        wchar_t defLabel[64];
+        swprintf_s(defLabel, L"Profile %d", i + 1);
         GetPrivateProfileStringW(section.c_str(), L"Label", defLabel, p.label, 64, INI_FILE);
         if (wcslen(p.label) == 0) wcscpy_s(p.label, defLabel);
 
+        // Advanced Settings
         p.sensorUpdateMS = GetPrivateProfileIntW(section.c_str(), L"SensorUpdateMS", 500, INI_FILE);
         p.ledRefreshFPS = GetPrivateProfileIntW(section.c_str(), L"LedRefreshFPS", 25, INI_FILE);
 
@@ -641,7 +690,7 @@ void LoadSettings() {
         GetPrivateProfileStringW(section.c_str(), L"SmoothingFactor", L"0.150", sfBuf, 32, INI_FILE);
         p.smoothingFactor = (float)_wtof(sfBuf);
 
-        // Validation
+        // Safety Validation
         if (p.colorLow == 0 && p.colorMed == 0 && p.colorHigh == 0) {
             p.colorLow = RGB(0, 255, 0); p.colorMed = RGB(255, 255, 0); p.colorHigh = RGB(255, 0, 0);
         }
@@ -650,18 +699,31 @@ void LoadSettings() {
         }
     }
 
+    // 3. Auto-Assign Sensor if missing (First Run)
     if (wcslen(g_cfg.sensorID) == 0) {
         AutoSelectFirstSensor();
         SaveSettings();
     }
 
-    WORD defMod = GetHotkeyForUI(MOD_CONTROL | MOD_SHIFT | MOD_ALT, 0);
-    g_Global.hotkeys.toggleLEDs = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Toggle", MAKEWORD(0x4C, HIBYTE(defMod)), INI_FILE);
-    g_Global.hotkeys.profile1 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile1", MAKEWORD('1', HIBYTE(defMod)), INI_FILE);
-    g_Global.hotkeys.profile2 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile2", MAKEWORD('2', HIBYTE(defMod)), INI_FILE);
-    g_Global.hotkeys.profile3 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile3", MAKEWORD('3', HIBYTE(defMod)), INI_FILE);
-    g_Global.hotkeys.profile4 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile4", MAKEWORD('4', HIBYTE(defMod)), INI_FILE);
-    g_Global.hotkeys.profile5 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile5", MAKEWORD('5', HIBYTE(defMod)), INI_FILE);
+    // 4. Load Hotkeys (Robust Default Handling)
+    // Default Modifier: Ctrl + Shift + Alt
+    BYTE defMod = HOTKEYF_CONTROL | HOTKEYF_SHIFT | HOTKEYF_ALT;
+
+    // Read from INI (returns 0 if not found)
+    g_Global.hotkeys.toggleLEDs = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Toggle", 0, INI_FILE);
+    g_Global.hotkeys.profile1 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile1", 0, INI_FILE);
+    g_Global.hotkeys.profile2 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile2", 0, INI_FILE);
+    g_Global.hotkeys.profile3 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile3", 0, INI_FILE);
+    g_Global.hotkeys.profile4 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile4", 0, INI_FILE);
+    g_Global.hotkeys.profile5 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile5", 0, INI_FILE);
+
+    // Apply Defaults if 0 (Missing or Invalid)
+    if (g_Global.hotkeys.toggleLEDs == 0) g_Global.hotkeys.toggleLEDs = MAKEWORD(0x4C, defMod); // 'L'
+    if (g_Global.hotkeys.profile1 == 0) g_Global.hotkeys.profile1 = MAKEWORD('1', defMod);
+    if (g_Global.hotkeys.profile2 == 0) g_Global.hotkeys.profile2 = MAKEWORD('2', defMod);
+    if (g_Global.hotkeys.profile3 == 0) g_Global.hotkeys.profile3 = MAKEWORD('3', defMod);
+    if (g_Global.hotkeys.profile4 == 0) g_Global.hotkeys.profile4 = MAKEWORD('4', defMod);
+    if (g_Global.hotkeys.profile5 == 0) g_Global.hotkeys.profile5 = MAKEWORD('5', defMod);
 }
 
 
@@ -808,77 +870,119 @@ static void SetStartupTask(bool run) {
     }
 }
 
+static void PopulateSensorList(HWND hDlg, const wchar_t* webServerUrl, const wchar_t* currentTargetID) {
+    HWND hCombo = GetDlgItem(hDlg, IDC_SENSOR_ID);
+    ClearComboHeapData(hCombo);
+
+    std::string json = FetchLHMJson(webServerUrl, (int)HTTP_FAST_TIMEOUT);
+    if (json.empty()) {
+        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"LHM Not Found (Port 8085)");
+        EnableWindow(hCombo, FALSE);
+        return;
+    }
+
+    std::string typeKey = "\"Type\":\"Temperature\"";
+    size_t pos = 0;
+    bool idSelected = false;
+
+    while ((pos = json.find(typeKey, pos)) != std::string::npos) {
+        size_t blockStart = json.rfind('{', pos);
+        size_t blockEnd = json.find('}', pos);
+
+        if (blockStart != std::string::npos && blockEnd != std::string::npos) {
+            std::string block = json.substr(blockStart, blockEnd - blockStart + 1);
+            std::wstring name = ExtractJsonString(block, "Text");
+            std::wstring id = ExtractJsonString(block, "SensorId");
+
+            if (!name.empty() && !id.empty()) {
+                wchar_t* pSafeStr = HeapDupString(id.c_str());
+                int idx = (int)SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)name.c_str());
+                if (idx != CB_ERR) {
+                    SendMessage(hCombo, CB_SETITEMDATA, idx, (LPARAM)pSafeStr);
+                    // Select if matches saved profile ID
+                    if (currentTargetID && wcscmp(id.c_str(), currentTargetID) == 0) {
+                        SendMessage(hCombo, CB_SETCURSEL, idx, 0);
+                        idSelected = true;
+                    }
+                }
+                else {
+                    HeapFree(GetProcessHeap(), 0, pSafeStr);
+                }
+            }
+        }
+        pos = blockEnd;
+    }
+
+    if (!idSelected && SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 0) {
+        SendMessage(hCombo, CB_SETCURSEL, 0, 0);
+    }
+
+    EnableWindow(hCombo, SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 1);
+}
+
 
 // ============================================================================
 // UI DATA TRANSFER HELPERS (Ordered to avoid forward declarations)
 // ============================================================================
 
+
+static void PopulateAreaList(HWND hDlg, const wchar_t* deviceType, int targetLedIndex);
+static void PopulateSensorList(HWND hDlg, const wchar_t* webServerUrl, const wchar_t* currentTargetID);
+
+
 static void LoadProfileToUI(HWND hDlg, int profileIndex) {
+    if (profileIndex < 0 || profileIndex >= 5) return;
     Config& p = g_Global.profiles[profileIndex];
 
+    // Basic Data
     SetDlgItemInt(hDlg, IDC_TEMP_LOW, p.tempLow, TRUE);
     SetDlgItemInt(hDlg, IDC_TEMP_MED, p.tempMed, TRUE);
     SetDlgItemInt(hDlg, IDC_TEMP_HIGH, p.tempHigh, TRUE);
-
-    wchar_t hexBuf[10];
-    ColorToHex(p.colorLow, hexBuf, 10);
-    SetDlgItemTextW(hDlg, IDC_HEX_LOW, hexBuf);
-    ColorToHex(p.colorMed, hexBuf, 10);
-    SetDlgItemTextW(hDlg, IDC_HEX_MED, hexBuf);
-    ColorToHex(p.colorHigh, hexBuf, 10);
-    SetDlgItemTextW(hDlg, IDC_HEX_HIGH, hexBuf);
-
     SetDlgItemTextW(hDlg, IDC_EDIT_LABEL, p.label);
+    SetDlgItemTextW(hDlg, IDC_EDIT_SERVER, p.webServerUrl);
 
-    // Sync Advanced Settings
-    HWND hSensorUpdate = GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE);
-    if (p.sensorUpdateMS == 250)       SendMessage(hSensorUpdate, CB_SETCURSEL, 0, 0);
-    else if (p.sensorUpdateMS == 1000) SendMessage(hSensorUpdate, CB_SETCURSEL, 2, 0);
-    else                               SendMessage(hSensorUpdate, CB_SETCURSEL, 1, 0); // 500ms default
+    // Hex Colors
+    wchar_t hexBuf[10];
+    ColorToHex(p.colorLow, hexBuf, 10);  SetDlgItemTextW(hDlg, IDC_HEX_LOW, hexBuf);
+    ColorToHex(p.colorMed, hexBuf, 10);  SetDlgItemTextW(hDlg, IDC_HEX_MED, hexBuf);
+    ColorToHex(p.colorHigh, hexBuf, 10); SetDlgItemTextW(hDlg, IDC_HEX_HIGH, hexBuf);
 
-    HWND hLedFPS = GetDlgItem(hDlg, IDC_COMBO_LED_FPS);
-    if (p.ledRefreshFPS == 20)      SendMessage(hLedFPS, CB_SETCURSEL, 1, 0);
-    else if (p.ledRefreshFPS == 15) SendMessage(hLedFPS, CB_SETCURSEL, 2, 0);
-    else                            SendMessage(hLedFPS, CB_SETCURSEL, 0, 0); // 25 FPS default
-
-    HWND hSmoothing = GetDlgItem(hDlg, IDC_COMBO_SMOOTHING);
-    if (p.smoothingFactor > 0.9f)       SendMessage(hSmoothing, CB_SETCURSEL, 0, 0); // Disabled
-    else if (p.smoothingFactor < 0.1f)  SendMessage(hSmoothing, CB_SETCURSEL, 1, 0); // Slow
-    else if (p.smoothingFactor > 0.2f)  SendMessage(hSmoothing, CB_SETCURSEL, 3, 0); // Fast
-    else                                SendMessage(hSmoothing, CB_SETCURSEL, 2, 0); // Normal
-
-    SendMessage(GetDlgItem(hDlg, IDC_EDIT_SERVER), WM_SETTEXT, 0, (LPARAM)p.webServerUrl);
-
-    // Sync Device Combo
-    int devCount = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_GETCOUNT, 0, 0);
+    // Device Combo Sync
+    HWND hComboDev = GetDlgItem(hDlg, IDC_COMBO_DEVICE);
+    int devCount = (int)SendMessage(hComboDev, CB_GETCOUNT, 0, 0);
     for (int i = 0; i < devCount; i++) {
-        wchar_t* devName = (wchar_t*)SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_GETITEMDATA, i, 0);
+        wchar_t* devName = (wchar_t*)SendMessage(hComboDev, CB_GETITEMDATA, i, 0);
         if (devName && wcscmp(devName, p.targetDevice) == 0) {
-            SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_SETCURSEL, i, 0);
+            SendMessage(hComboDev, CB_SETCURSEL, i, 0);
             break;
         }
     }
 
-    // Restore Area List (handled by caller logic usually, but prepared here)
-    // PopulateAreaList call deferred to prevent circular dependency
+    // Populate Dependent Lists (Areas and Sensors)
+    PopulateAreaList(hDlg, p.targetDevice, p.targetLedIndex);
+    PopulateSensorList(hDlg, p.webServerUrl, p.sensorID);
 
-    // Sync Sensor Selection
-    int sensCount = (int)SendMessage(GetDlgItem(hDlg, IDC_SENSOR_ID), CB_GETCOUNT, 0, 0);
-    bool foundSens = false;
-    for (int i = 0; i < sensCount; i++) {
-        wchar_t* sID = (wchar_t*)SendMessage(GetDlgItem(hDlg, IDC_SENSOR_ID), CB_GETITEMDATA, i, 0);
-        if (sID && wcscmp(sID, p.sensorID) == 0) {
-            SendMessage(GetDlgItem(hDlg, IDC_SENSOR_ID), CB_SETCURSEL, i, 0);
-            foundSens = true;
-            break;
+    // Advanced Combo Sync
+    auto SetComboByVal = [&](int id, int val, std::vector<int> mapping) {
+        HWND hC = GetDlgItem(hDlg, id);
+        for (size_t i = 0; i < mapping.size(); ++i) {
+            if (mapping[i] == val) { SendMessage(hC, CB_SETCURSEL, (WPARAM)i, 0); return; }
         }
-    }
-    if (!foundSens && sensCount > 0) SendMessage(GetDlgItem(hDlg, IDC_SENSOR_ID), CB_SETCURSEL, 0, 0);
+        SendMessage(hC, CB_SETCURSEL, 0, 0);
+        };
+
+    SetComboByVal(IDC_COMBO_SENSOR_UPDATE, p.sensorUpdateMS, { 250, 500, 1000 });
+    SetComboByVal(IDC_COMBO_LED_FPS, p.ledRefreshFPS, { 25, 20, 15 });
+
+    // Smoothing is special (ranges)
+    HWND hSmooth = GetDlgItem(hDlg, IDC_COMBO_SMOOTHING);
+    if (p.smoothingFactor > 0.9f) SendMessage(hSmooth, CB_SETCURSEL, 0, 0);
+    else if (p.smoothingFactor < 0.1f) SendMessage(hSmooth, CB_SETCURSEL, 1, 0);
+    else if (p.smoothingFactor > 0.2f) SendMessage(hSmooth, CB_SETCURSEL, 3, 0);
+    else SendMessage(hSmooth, CB_SETCURSEL, 2, 0);
 
     CheckDlgButton(hDlg, IDC_CHK_ACTIVE_PROFILE, (profileIndex == g_Global.activeProfileIndex) ? BST_CHECKED : BST_UNCHECKED);
-    InvalidateRect(GetDlgItem(hDlg, IDC_HEX_LOW), NULL, TRUE);
-    InvalidateRect(GetDlgItem(hDlg, IDC_HEX_MED), NULL, TRUE);
-    InvalidateRect(GetDlgItem(hDlg, IDC_HEX_HIGH), NULL, TRUE);
+    InvalidateRect(hDlg, NULL, TRUE);
 }
 
 static void SaveUIToProfile(HWND hDlg, int profileIndex) {
@@ -934,65 +1038,94 @@ static void SaveUIToProfile(HWND hDlg, int profileIndex) {
     else p.smoothingFactor = 0.15f;
 }
 
-static void PopulateAreaList(HWND hDlg, const wchar_t* deviceType) {
+static void PopulateAreaList(HWND hDlg, const wchar_t* deviceType, int targetLedIndex) {
     HWND hComboArea = GetDlgItem(hDlg, IDC_COMBO_AREA);
-    SendMessage(hComboArea, CB_RESETCONTENT, 0, 0);
-    if (!deviceType || !lpMLAPI_GetLedInfo || !lpMLAPI_GetDeviceInfo) { EnableWindow(hComboArea, FALSE); return; }
 
-    SAFEARRAY* pDevType = nullptr; SAFEARRAY* pLedCount = nullptr;
+    // Step 1: Standard reset
+    SendMessage(hComboArea, CB_RESETCONTENT, 0, 0);
+
+    if (!deviceType || !lpMLAPI_GetLedInfo || !lpMLAPI_GetDeviceInfo) {
+        EnableWindow(hComboArea, FALSE);
+        return;
+    }
+
+    SAFEARRAY* pDevType = nullptr;
+    SAFEARRAY* pLedCount = nullptr;
     int currentDeviceLedCount = 0;
 
+    // Step 2: Get Device Info to find the LED count for the specific deviceType
     if (lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0 && pDevType && pLedCount) {
-        BSTR* pTypes = nullptr; void* pCountsRaw = nullptr;
-        VARTYPE vtCount; SafeArrayGetVartype(pLedCount, &vtCount);
-        if (SUCCEEDED(SafeArrayAccessData(pDevType, (void**)&pTypes)) && SUCCEEDED(SafeArrayAccessData(pLedCount, &pCountsRaw))) {
-            long lBound, uBound; SafeArrayGetLBound(pDevType, 1, &lBound); SafeArrayGetUBound(pDevType, 1, &uBound);
+        BSTR* pTypes = nullptr;
+        void* pCountsRaw = nullptr;
+        VARTYPE vtCount;
+        SafeArrayGetVartype(pLedCount, &vtCount);
+
+        if (SUCCEEDED(SafeArrayAccessData(pDevType, (void**)&pTypes)) &&
+            SUCCEEDED(SafeArrayAccessData(pLedCount, &pCountsRaw))) {
+            long lBound, uBound;
+            SafeArrayGetLBound(pDevType, 1, &lBound);
+            SafeArrayGetUBound(pDevType, 1, &uBound);
             long totalDevices = uBound - lBound + 1;
+
             for (long j = 0; j < totalDevices; j++) {
-                if (wcscmp(pTypes[j], deviceType) == 0) { currentDeviceLedCount = GetIntFromSafeArray(pCountsRaw, vtCount, j); break; }
-            }
-            SafeArrayUnaccessData(pDevType); SafeArrayUnaccessData(pLedCount);
-        }
-        SafeArrayDestroy(pDevType); SafeArrayDestroy(pLedCount);
-
-        if (currentDeviceLedCount <= 0) currentDeviceLedCount = 0;
-
-        BSTR bstrDevice = SysAllocString(deviceType);
-        if (bstrDevice) {
-            for (DWORD i = 0; i < (DWORD)currentDeviceLedCount; i++) {
-                BSTR ledName = nullptr; SAFEARRAY* pStyles = nullptr;
-                if (lpMLAPI_GetLedInfo(bstrDevice, i, &ledName, &pStyles) == 0) {
-                    int idx = (int)SendMessageW(hComboArea, CB_ADDSTRING, 0, (LPARAM)(ledName ? ledName : L"Unknown Area"));
-                    SendMessage(hComboArea, CB_SETITEMDATA, idx, (LPARAM)i);
-                    if (i == (DWORD)g_cfg.targetLedIndex) SendMessage(hComboArea, CB_SETCURSEL, idx, 0);
-                    if (pStyles) SafeArrayDestroy(pStyles);
-                    if (ledName) SysFreeString(ledName);
+                if (wcscmp(pTypes[j], deviceType) == 0) {
+                    currentDeviceLedCount = GetIntFromSafeArray(pCountsRaw, vtCount, (int)j);
+                    break;
                 }
             }
-            SysFreeString(bstrDevice);
+            SafeArrayUnaccessData(pDevType);
+            SafeArrayUnaccessData(pLedCount);
         }
+        SafeArrayDestroy(pDevType);
+        SafeArrayDestroy(pLedCount);
     }
 
+    // Step 3: Populate the combo with LED areas
+    if (currentDeviceLedCount > 0) {
+        BSTR bstrDevice = SysAllocString(deviceType);
+        for (DWORD i = 0; i < (DWORD)currentDeviceLedCount; i++) {
+            BSTR ledName = nullptr;
+            SAFEARRAY* pStyles = nullptr;
+            if (lpMLAPI_GetLedInfo(bstrDevice, i, &ledName, &pStyles) == 0) {
+                int idx = (int)SendMessageW(hComboArea, CB_ADDSTRING, 0, (LPARAM)(ledName ? ledName : L"Unknown Area"));
+                SendMessage(hComboArea, CB_SETITEMDATA, idx, (LPARAM)i);
+
+                if (i == (DWORD)targetLedIndex) {
+                    SendMessage(hComboArea, CB_SETCURSEL, idx, 0);
+                }
+
+                if (pStyles) SafeArrayDestroy(pStyles);
+                if (ledName) SysFreeString(ledName);
+            }
+        }
+        SysFreeString(bstrDevice);
+    }
+
+    // Step 4: Final Selection and THE FIX
+    if (SendMessage(hComboArea, CB_GETCURSEL, 0, 0) == CB_ERR && SendMessage(hComboArea, CB_GETCOUNT, 0, 0) > 0) {
+        SendMessage(hComboArea, CB_SETCURSEL, 0, 0);
+    }
+
+    // This is the line: Enable ONLY if there is more than 1 choice
     int finalCount = (int)SendMessage(hComboArea, CB_GETCOUNT, 0, 0);
-    if (finalCount <= 1) {
-        if (finalCount == 1) SendMessage(hComboArea, CB_SETCURSEL, 0, 0);
-        EnableWindow(hComboArea, FALSE);
-    }
-    else {
-        if (SendMessage(hComboArea, CB_GETCURSEL, 0, 0) == CB_ERR) SendMessage(hComboArea, CB_SETCURSEL, 0, 0);
-        EnableWindow(hComboArea, TRUE);
-    }
+    EnableWindow(hComboArea, finalCount > 1);
 }
 
 static void PopulateDeviceList(HWND hDlg) {
     HWND hComboDev = GetDlgItem(hDlg, IDC_COMBO_DEVICE);
+
+    // Step 1: Nuclear cleanup. This frees all heap strings and resets the combo.
     ClearComboHeapData(hComboDev);
 
-    SAFEARRAY* pDevType = nullptr; SAFEARRAY* pLedCount = nullptr;
+    SAFEARRAY* pDevType = nullptr;
+    SAFEARRAY* pLedCount = nullptr;
 
     if (lpMLAPI_GetDeviceInfo && lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0) {
-        BSTR* pTypes = nullptr; SafeArrayAccessData(pDevType, (void**)&pTypes);
-        long lBound, uBound; SafeArrayGetLBound(pDevType, 1, &lBound); SafeArrayGetUBound(pDevType, 1, &uBound);
+        BSTR* pTypes = nullptr;
+        SafeArrayAccessData(pDevType, (void**)&pTypes);
+        long lBound, uBound;
+        SafeArrayGetLBound(pDevType, 1, &lBound);
+        SafeArrayGetUBound(pDevType, 1, &uBound);
         long count = uBound - lBound + 1;
 
         for (long i = 0; i < count; i++) {
@@ -1000,26 +1133,33 @@ static void PopulateDeviceList(HWND hDlg) {
             BSTR friendlyName = NULL;
             if (lpMLAPI_GetDeviceNameEx) lpMLAPI_GetDeviceNameEx(typeInternal, i, &friendlyName);
 
+            // Create the new string in the heap
             wchar_t* pSafeStr = HeapDupString(typeInternal);
             int idx = (int)SendMessageW(hComboDev, CB_ADDSTRING, 0, (LPARAM)(friendlyName ? friendlyName : typeInternal));
+
             if (idx != CB_ERR) {
-                void* oldData = (void*)SendMessage(hComboDev, CB_GETITEMDATA, idx, 0);
-                if (oldData && oldData != (void*)CB_ERR) HeapFree(GetProcessHeap(), 0, oldData);
+                // REDUNDANCY REMOVED: No need to check for oldData here anymore
+                // We just store the new safe pointer.
                 SendMessage(hComboDev, CB_SETITEMDATA, idx, (LPARAM)pSafeStr);
-                if (wcscmp(typeInternal, g_cfg.targetDevice) == 0) SendMessage(hComboDev, CB_SETCURSEL, idx, 0);
+
+                if (wcscmp(typeInternal, g_cfg.targetDevice) == 0)
+                    SendMessage(hComboDev, CB_SETCURSEL, idx, 0);
             }
             else {
+                // If adding the string failed, free the memory to prevent a leak
                 HeapFree(GetProcessHeap(), 0, pSafeStr);
             }
+
             if (friendlyName) SysFreeString(friendlyName);
         }
-        SafeArrayUnaccessData(pDevType); SafeArrayDestroy(pDevType); SafeArrayDestroy(pLedCount);
+        SafeArrayUnaccessData(pDevType);
+        SafeArrayDestroy(pDevType);
+        SafeArrayDestroy(pLedCount);
 
         if (SendMessage(hComboDev, CB_GETCURSEL, 0, 0) == CB_ERR && SendMessage(hComboDev, CB_GETCOUNT, 0, 0) > 0)
             SendMessage(hComboDev, CB_SETCURSEL, 0, 0);
 
-        int finalCount = (int)SendMessage(hComboDev, CB_GETCOUNT, 0, 0);
-        EnableWindow(hComboDev, finalCount > 1);
+        EnableWindow(hComboDev, (int)SendMessage(hComboDev, CB_GETCOUNT, 0, 0) > 1);
     }
     else {
         EnableWindow(hComboDev, FALSE);
@@ -1339,12 +1479,14 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         HWND hCtrl = (HWND)lParam;
         int id = GetDlgCtrlID(hCtrl);
         HBRUSH hSelectedBrush = NULL;
+
         if (id == IDC_HEX_LOW) hSelectedBrush = hBrushLow;
-        if (id == IDC_HEX_MED) hSelectedBrush = hBrushMed;
-        if (id == IDC_HEX_HIGH) hSelectedBrush = hBrushHigh;
+        else if (id == IDC_HEX_MED) hSelectedBrush = hBrushMed;
+        else if (id == IDC_HEX_HIGH) hSelectedBrush = hBrushHigh;
 
         if (hSelectedBrush) {
-            wchar_t buf[10]; GetWindowTextW(hCtrl, buf, 10);
+            wchar_t buf[10];
+            GetWindowTextW(hCtrl, buf, 10);
             if (IsValidHex(buf)) {
                 COLORREF c = HexToColor(buf);
                 SetBkColor(hdc, c);
@@ -1357,19 +1499,24 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
     }
 
     case WM_INITDIALOG: {
+        // Stop hotkeys while configuring to avoid conflicts
         HWND hMainWnd = GetParent(hDlg);
         if (hMainWnd) {
             UnregisterHotKey(hMainWnd, 1);
             for (int i = 101; i <= 105; i++) UnregisterHotKey(hMainWnd, i);
         }
 
+        // Center window
         RECT rcDlg; GetWindowRect(hDlg, &rcDlg);
-        int dwWidth = rcDlg.right - rcDlg.left; int dwHeight = rcDlg.bottom - rcDlg.top;
-        int x = (GetSystemMetrics(SM_CXSCREEN) - dwWidth) / 2; int y = (GetSystemMetrics(SM_CYSCREEN) - dwHeight) / 2;
+        int dwWidth = rcDlg.right - rcDlg.left;
+        int dwHeight = rcDlg.bottom - rcDlg.top;
+        int x = (GetSystemMetrics(SM_CXSCREEN) - dwWidth) / 2;
+        int y = (GetSystemMetrics(SM_CYSCREEN) - dwHeight) / 2;
         SetWindowPos(hDlg, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE);
 
         LoadSettings();
 
+        // 1. Setup Tabs
         HWND hTab = GetDlgItem(hDlg, IDC_TAB_PROFILES);
         if (hTab) {
             TabCtrl_DeleteAllItems(hTab);
@@ -1382,6 +1529,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             SendMessage(hTab, TCM_INSERTITEMW, 5, (LPARAM)&tie);
         }
 
+        // 2. Setup static Combos
         HWND hSensorUpdate = GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE);
         SendMessage(hSensorUpdate, CB_ADDSTRING, 0, (LPARAM)L"250 ms");
         SendMessage(hSensorUpdate, CB_ADDSTRING, 0, (LPARAM)L"500 ms");
@@ -1398,8 +1546,10 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         SendMessage(hSmoothing, CB_ADDSTRING, 0, (LPARAM)L"Normal");
         SendMessage(hSmoothing, CB_ADDSTRING, 0, (LPARAM)L"Fast");
 
+        // 3. Populate HW Device List
         PopulateDeviceList(hDlg);
 
+        // 4. Load Shortcuts UI
         SendDlgItemMessage(hDlg, IDC_HK_TOGGLE, HKM_SETHOTKEY, g_Global.hotkeys.toggleLEDs, 0);
         SendDlgItemMessage(hDlg, IDC_HK_P1, HKM_SETHOTKEY, g_Global.hotkeys.profile1, 0);
         SendDlgItemMessage(hDlg, IDC_HK_P2, HKM_SETHOTKEY, g_Global.hotkeys.profile2, 0);
@@ -1407,6 +1557,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         SendDlgItemMessage(hDlg, IDC_HK_P4, HKM_SETHOTKEY, g_Global.hotkeys.profile4, 0);
         SendDlgItemMessage(hDlg, IDC_HK_P5, HKM_SETHOTKEY, g_Global.hotkeys.profile5, 0);
 
+        // 5. Load Active Profile UI
         s_currentTab = g_Global.activeProfileIndex;
         TabCtrl_SetCurSel(hTab, s_currentTab);
 
@@ -1416,29 +1567,9 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         else {
             ToggleSettingsLayer(hDlg, false);
             LoadProfileToUI(hDlg, s_currentTab);
-            // After loading profile, sync area list based on current selection
-            Config& p = g_Global.profiles[s_currentTab];
-            PopulateAreaList(hDlg, p.targetDevice);
-            // Re-select proper index after population
-            HWND hComboArea = GetDlgItem(hDlg, IDC_COMBO_AREA);
-            int count = (int)SendMessage(hComboArea, CB_GETCOUNT, 0, 0);
-            for (int i = 0; i < count; i++) {
-                if ((int)SendMessage(hComboArea, CB_GETITEMDATA, i, 0) == p.targetLedIndex) {
-                    SendMessage(hComboArea, CB_SETCURSEL, i, 0);
-                    break;
-                }
-            }
-            // Populate sensors
-            HWND hComboSens = GetDlgItem(hDlg, IDC_SENSOR_ID);
-            ClearComboHeapData(hComboSens);
-            // Inline population call or we need to forward declare populate sensor (simpler to keep logic here or move function up)
-            // For code cleanliness, we rely on the generic fetch logic but simplified here:
-            // Actually, PopulateSensorList was removed to avoid forward declaration hell, 
-            // so we implement a quick refresh here using existing helpers if needed, 
-            // or better yet, move PopulateSensorList above SettingsDlgProc.
-            // ... Corrected: moving PopulateSensorList UP.
         }
 
+        // 6. Initialize Brushes and Subclass Edits
         int safeTab = (s_currentTab < 5) ? s_currentTab : 0;
         hBrushLow = CreateSolidBrush(g_Global.profiles[safeTab].colorLow);
         hBrushMed = CreateSolidBrush(g_Global.profiles[safeTab].colorMed);
@@ -1458,14 +1589,16 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         if (pnm->idFrom == IDC_TAB_PROFILES && pnm->code == TCN_SELCHANGE) {
             int newTab = TabCtrl_GetCurSel(pnm->hwndFrom);
 
+            // Save current UI state before switching
             if (s_currentTab >= 0 && s_currentTab <= 4) {
                 SaveUIToProfile(hDlg, s_currentTab);
             }
-            if (s_currentTab == 5) {
+            else if (s_currentTab == 5) {
                 if (!ValidateHotkeys(hDlg)) {
                     TabCtrl_SetCurSel(pnm->hwndFrom, 5);
                     return TRUE;
                 }
+                SaveHotkeysFromUI(hDlg);
             }
 
             s_currentTab = newTab;
@@ -1475,27 +1608,15 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             }
             else {
                 ToggleSettingsLayer(hDlg, false);
-                LoadProfileToUI(hDlg, s_currentTab);
-
-                // Refresh Area List
-                Config& p = g_Global.profiles[s_currentTab];
-                PopulateAreaList(hDlg, p.targetDevice);
-                HWND hComboArea = GetDlgItem(hDlg, IDC_COMBO_AREA);
-                int count = (int)SendMessage(hComboArea, CB_GETCOUNT, 0, 0);
-                for (int i = 0; i < count; i++) {
-                    if ((int)SendMessage(hComboArea, CB_GETITEMDATA, i, 0) == p.targetLedIndex) {
-                        SendMessage(hComboArea, CB_SETCURSEL, i, 0);
-                        break;
-                    }
-                }
-
+                // Update brushes for the new profile colors
                 if (hBrushLow) DeleteObject(hBrushLow);
                 if (hBrushMed) DeleteObject(hBrushMed);
                 if (hBrushHigh) DeleteObject(hBrushHigh);
                 hBrushLow = CreateSolidBrush(g_Global.profiles[s_currentTab].colorLow);
                 hBrushMed = CreateSolidBrush(g_Global.profiles[s_currentTab].colorMed);
                 hBrushHigh = CreateSolidBrush(g_Global.profiles[s_currentTab].colorHigh);
-                InvalidateRect(hDlg, NULL, TRUE);
+
+                LoadProfileToUI(hDlg, s_currentTab);
             }
         }
         break;
@@ -1505,36 +1626,40 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         int id = LOWORD(wParam);
         int code = HIWORD(wParam);
 
+        // Profile Active Checkbox
         if (id == IDC_CHK_ACTIVE_PROFILE && code == BN_CLICKED) {
             if (IsDlgButtonChecked(hDlg, IDC_CHK_ACTIVE_PROFILE)) {
                 if (s_currentTab < 5) g_Global.activeProfileIndex = s_currentTab;
             }
             else {
-                if (g_Global.activeProfileIndex == s_currentTab) CheckDlgButton(hDlg, IDC_CHK_ACTIVE_PROFILE, BST_CHECKED);
+                if (g_Global.activeProfileIndex == s_currentTab)
+                    CheckDlgButton(hDlg, IDC_CHK_ACTIVE_PROFILE, BST_CHECKED);
             }
             return TRUE;
         }
 
+        // Device Change -> Update Areas
         if (id == IDC_COMBO_DEVICE && code == CBN_SELCHANGE) {
             int idx = (int)SendMessage((HWND)lParam, CB_GETCURSEL, 0, 0);
-            if (idx != CB_ERR) {
-                wchar_t* devType = (wchar_t*)SendMessage((HWND)lParam, CB_GETITEMDATA, idx, 0);
-                if (devType) PopulateAreaList(hDlg, devType);
-            }
+            wchar_t* devType = (wchar_t*)SendMessage((HWND)lParam, CB_GETITEMDATA, idx, 0);
+            if (devType) PopulateAreaList(hDlg, devType, 0);
             return TRUE;
         }
 
-        if (code == EN_CHANGE && (id == IDC_HEX_LOW || id == IDC_HEX_MED || id == IDC_HEX_HIGH)) {
-            wchar_t buf[10]; GetDlgItemTextW(hDlg, id, buf, 10);
-            if (IsValidHex(buf)) {
-                COLORREF newCol = HexToColor(buf);
-                HBRUSH newBrush = CreateSolidBrush(newCol);
-                if (id == IDC_HEX_LOW) { if (hBrushLow) DeleteObject(hBrushLow); hBrushLow = newBrush; }
-                else if (id == IDC_HEX_MED) { if (hBrushMed) DeleteObject(hBrushMed); hBrushMed = newBrush; }
-                else if (id == IDC_HEX_HIGH) { if (hBrushHigh) DeleteObject(hBrushHigh); hBrushHigh = newBrush; }
-                InvalidateRect(GetDlgItem(hDlg, id), NULL, TRUE);
+        // Real-time Hex Color and Label update
+        if (code == EN_CHANGE) {
+            if (id == IDC_HEX_LOW || id == IDC_HEX_MED || id == IDC_HEX_HIGH) {
+                wchar_t buf[10]; GetDlgItemTextW(hDlg, id, buf, 10);
+                if (IsValidHex(buf)) {
+                    COLORREF newCol = HexToColor(buf);
+                    HBRUSH newBrush = CreateSolidBrush(newCol);
+                    if (id == IDC_HEX_LOW) { if (hBrushLow) DeleteObject(hBrushLow); hBrushLow = newBrush; }
+                    else if (id == IDC_HEX_MED) { if (hBrushMed) DeleteObject(hBrushMed); hBrushMed = newBrush; }
+                    else if (id == IDC_HEX_HIGH) { if (hBrushHigh) DeleteObject(hBrushHigh); hBrushHigh = newBrush; }
+                    InvalidateRect(GetDlgItem(hDlg, id), NULL, TRUE);
+                }
             }
-            if (id == IDC_EDIT_LABEL) {
+            else if (id == IDC_EDIT_LABEL) {
                 wchar_t newLabel[64]; GetDlgItemTextW(hDlg, IDC_EDIT_LABEL, newLabel, 64);
                 HWND hTab = GetDlgItem(hDlg, IDC_TAB_PROFILES);
                 if (hTab && s_currentTab < 5) {
@@ -1546,30 +1671,16 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         }
 
         if (id == IDOK) {
-            if (s_currentTab == 5) {
-                if (!ValidateHotkeys(hDlg)) return TRUE;
-                SaveHotkeysFromUI(hDlg);
-            }
-            else {
-                SaveUIToProfile(hDlg, s_currentTab);
-                if (ValidateHotkeys(hDlg)) SaveHotkeysFromUI(hDlg);
-            }
-
-            Config& p = g_Global.profiles[s_currentTab < 5 ? s_currentTab : g_Global.activeProfileIndex];
-            if (p.tempLow < 0 || p.tempHigh > 110 || p.tempLow >= p.tempMed || p.tempMed >= p.tempHigh) {
-                MessageBoxW(hDlg, L"Invalid temperature range.", L"Error", MB_ICONWARNING);
-                return TRUE;
-            }
+            if (s_currentTab <= 4) SaveUIToProfile(hDlg, s_currentTab);
+            if (ValidateHotkeys(hDlg)) SaveHotkeysFromUI(hDlg);
 
             SetStartupTask(IsDlgButtonChecked(hDlg, IDC_CHK_STARTUP) == BST_CHECKED);
             SaveSettings();
 
+            // Refresh Engine
             g_ResetHttp = true;
-            g_asyncTemp = -1.0f;
-            g_activeSource = DataSource::Searching;
             forceLEDRefresh();
             SetEvent(g_hSensorEvent);
-
             EndDialog(hDlg, IDOK);
             return TRUE;
         }
@@ -1579,14 +1690,12 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             return TRUE;
         }
 
+        // Reset Buttons
         if (id == IDC_BTN_RESET_SHORTCUTS) {
             BYTE defMod = HOTKEYF_CONTROL | HOTKEYF_SHIFT | HOTKEYF_ALT;
             SendDlgItemMessage(hDlg, IDC_HK_TOGGLE, HKM_SETHOTKEY, MAKEWORD(0x4C, defMod), 0);
-            SendDlgItemMessage(hDlg, IDC_HK_P1, HKM_SETHOTKEY, MAKEWORD('1', defMod), 0);
-            SendDlgItemMessage(hDlg, IDC_HK_P2, HKM_SETHOTKEY, MAKEWORD('2', defMod), 0);
-            SendDlgItemMessage(hDlg, IDC_HK_P3, HKM_SETHOTKEY, MAKEWORD('3', defMod), 0);
-            SendDlgItemMessage(hDlg, IDC_HK_P4, HKM_SETHOTKEY, MAKEWORD('4', defMod), 0);
-            SendDlgItemMessage(hDlg, IDC_HK_P5, HKM_SETHOTKEY, MAKEWORD('5', defMod), 0);
+            for (int i = 0; i < 5; i++)
+                SendDlgItemMessage(hDlg, IDC_HK_P1 + i, HKM_SETHOTKEY, MAKEWORD('1' + i, defMod), 0);
             return TRUE;
         }
 
@@ -1597,9 +1706,10 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             SetDlgItemTextW(hDlg, IDC_HEX_LOW, L"#00FF00");
             SetDlgItemTextW(hDlg, IDC_HEX_MED, L"#FFFF00");
             SetDlgItemTextW(hDlg, IDC_HEX_HIGH, L"#FF0000");
-            SendMessage(hDlg, WM_COMMAND, MAKEWPARAM(IDC_HEX_LOW, EN_CHANGE), (LPARAM)GetDlgItem(hDlg, IDC_HEX_LOW));
-            SendMessage(hDlg, WM_COMMAND, MAKEWPARAM(IDC_HEX_MED, EN_CHANGE), (LPARAM)GetDlgItem(hDlg, IDC_HEX_MED));
-            SendMessage(hDlg, WM_COMMAND, MAKEWPARAM(IDC_HEX_HIGH, EN_CHANGE), (LPARAM)GetDlgItem(hDlg, IDC_HEX_HIGH));
+            // Trigger color updates
+            SendMessage(hDlg, WM_COMMAND, MAKEWPARAM(IDC_HEX_LOW, EN_CHANGE), 0);
+            SendMessage(hDlg, WM_COMMAND, MAKEWPARAM(IDC_HEX_MED, EN_CHANGE), 0);
+            SendMessage(hDlg, WM_COMMAND, MAKEWPARAM(IDC_HEX_HIGH, EN_CHANGE), 0);
             return TRUE;
         }
 
@@ -1609,8 +1719,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_SETCURSEL, 2, 0);
             return TRUE;
         }
-    }
-                   break;
+    } break;
 
     case WM_DESTROY:
         RegisterAppHotkeys(GetParent(hDlg));
@@ -1619,6 +1728,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         if (hBrushHigh) DeleteObject(hBrushHigh);
         ClearComboHeapData(GetDlgItem(hDlg, IDC_SENSOR_ID));
         ClearComboHeapData(GetDlgItem(hDlg, IDC_COMBO_DEVICE));
+        // Remove subclass
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_LOW), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_MED), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_HIGH), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
@@ -1957,12 +2067,31 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                             targetR = GetRValue(g_cfg.colorLow); targetG = GetGValue(g_cfg.colorLow); targetB = GetBValue(g_cfg.colorLow);
                         }
                         else if (temp < (float)g_cfg.tempMed) {
-                            ratio = (temp - (float)g_cfg.tempLow) / ((float)g_cfg.tempMed - (float)g_cfg.tempLow);
+                            
+                            float range = ((float)g_cfg.tempMed - (float)g_cfg.tempLow);
+                            
+                            if (range <= 0.001f) {
+                                ratio = 0.0f;
+                            }
+                            else {
+                                ratio = (temp - (float)g_cfg.tempLow) / range;
+                            }
+                            
                             if (ratio < 0.0f) ratio = 0.0f; if (ratio > 1.0f) ratio = 1.0f;
+
                             c1 = g_cfg.colorLow; c2 = g_cfg.colorMed;
                         }
                         else if (temp < (float)g_cfg.tempHigh) {
-                            ratio = (temp - (float)g_cfg.tempMed) / ((float)g_cfg.tempHigh - (float)g_cfg.tempMed);
+                            float range = ((float)g_cfg.tempHigh - (float)g_cfg.tempMed);
+                            
+                            if (range <= 0.001f) {
+                                ratio = 0.0f;
+                            }
+                            else {
+                                ratio = (temp - (float)g_cfg.tempMed) / range;
+                            }
+                            
+                            
                             if (ratio < 0.0f) ratio = 0.0f; if (ratio > 1.0f) ratio = 1.0f;
                             c1 = g_cfg.colorMed; c2 = g_cfg.colorHigh;
                         }
