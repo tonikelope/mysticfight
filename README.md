@@ -17,8 +17,8 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * **Customizable Device and LED area:** Choose the one you prefer. <i>Please note that MSI Mystic Light SDK may not recognise all areas available on your device (you will have to wait for MSI to update the public SDK)</i>.
 * **Customizable Temperature Sensor:** Choose the one you prefer.
 * **Customizable Temperature and Colors Thresholds:** RMS interpolation.
-* **5 profiles settings:** Use `Ctrl + Alt + Shift + 1-5` to change between profiles.
-* **Night-Mode with Global Hotkey:** `Ctrl + Alt + Shift + L` to power-off/on LEDs instantly.
+* **5 profiles settings:** You can set a shortcut to change between profiles.
+* **Night-Mode with Global Hotkey:** You can set a shortcut to power-off/on LEDs.
   <p align="center"><img src="mf_settings3.png" /></p>
   
 ## ⚠️ Requirements
