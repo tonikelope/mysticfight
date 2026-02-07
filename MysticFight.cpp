@@ -1837,15 +1837,18 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         if (wParam == 1) {
             g_LedsEnabled = !g_LedsEnabled;
             
-            wchar_t msg[128];
-            swprintf_s(msg, L"Lights %ls", g_LedsEnabled?L"ON":L"OUT");
-            
-            ShowNotification(hWnd, L"MysticFight", msg);
-            
-            PlaySound(MAKEINTRESOURCE(g_LedsEnabled?IDR_WAV_LIGHTS_ON: IDR_WAV_LIGHTS_OFF), GetModuleHandle(NULL), SND_RESOURCE | SND_ASYNC);
-            
             SetEvent(g_hSensorEvent);
+
             lastR = RGB_LED_REFRESH;
+
+            PostMessage(hWnd, WM_NULL, 0, 0);
+
+            wchar_t msg[128];
+            swprintf_s(msg, L"Lights %ls", g_LedsEnabled ? L"ON" : L"OUT");
+
+            ShowNotification(hWnd, L"MysticFight", msg);
+
+            PlaySound(MAKEINTRESOURCE(g_LedsEnabled ? IDR_WAV_LIGHTS_ON : IDR_WAV_LIGHTS_OFF), GetModuleHandle(NULL), SND_RESOURCE | SND_ASYNC);
         }
         else if (wParam >= 101 && wParam <= 105) {
             SwitchActiveProfile(hWnd, (int)wParam - 101);
@@ -2092,56 +2095,59 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     cfgLocal = g_cfg;
                 }
 
+                if (g_ConfigVersion != lastProcessedVersion) {
+                    bstrDevice = cfgLocal.targetDevice;
+                    lastProcessedVersion = g_ConfigVersion.load();
+                    forceLEDRefresh();
+                    Log("[MysticFight] Config cache refreshed");
+                }
+
                 ULONGLONG currentTime = GetTickCount64();
 
-                if (currentTime >= nextFrameTime) {
-                    nextFrameTime = currentTime + (1000 / cfgLocal.ledRefreshFPS);
+                if (g_Resetting_sdk) {
+                    if (currentTime >= g_ResetTimer) {
+                        switch (g_ResetStage) {
+                        case 0:
+                            ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", false);
+                            KillProcessByName(L"LEDKeeper2.exe");
+                            g_ResetTimer = currentTime + RESET_KILL_TASK_WAIT_MS; g_ResetStage = 1;
+                            break;
+                        case 1:
+                            ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", true);
+                            g_ResetTimer = currentTime + RESET_RESTART_TASK_DELAY_MS; g_ResetStage = 2;
+                            break;
+                        case 2:
+                            if (lpMLAPI_Initialize() == 0) MSIHwardwareDetection();
+                            g_Resetting_sdk = false; forceLEDRefresh();
+                            break;
+                        }
+                    }
+                }
+                else if (g_activeSource == DataSource::Searching) {
+                    if (g_pendingStyleChange) {
+                        g_pendingStyleChange = false;
+                        status = lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrBreath);
+                        if (status == 0) {
+                            lpMLAPI_SetLedColor(bstrDevice, cfgLocal.targetLedIndex, 255, 255, 255);
+                            lastR = RGB_LED_REFRESH;
+                        }
+                        else { g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0; }
+                    }
+                }
+                else if (!g_LedsEnabled) {
+                    if (lastR != RGB_LEDS_OFF || g_pendingStyleChange) {
+                        g_pendingStyleChange = false;
+                        if (lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrOff) == 0) lastR = RGB_LEDS_OFF;
+                        else { g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0; }
+                    }
+                }
+                else {
 
-                    if (g_ConfigVersion != lastProcessedVersion) {
-                        bstrDevice = cfgLocal.targetDevice;
-                        lastProcessedVersion = g_ConfigVersion.load();
-                        forceLEDRefresh();
-                        Log("[MysticFight] Config cache refreshed");
-                    }
+                        
 
-                    if (g_Resetting_sdk) {
-                        if (currentTime >= g_ResetTimer) {
-                            switch (g_ResetStage) {
-                            case 0:
-                                ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", false);
-                                KillProcessByName(L"LEDKeeper2.exe");
-                                g_ResetTimer = currentTime + RESET_KILL_TASK_WAIT_MS; g_ResetStage = 1;
-                                break;
-                            case 1:
-                                ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", true);
-                                g_ResetTimer = currentTime + RESET_RESTART_TASK_DELAY_MS; g_ResetStage = 2;
-                                break;
-                            case 2:
-                                if (lpMLAPI_Initialize() == 0) MSIHwardwareDetection();
-                                g_Resetting_sdk = false; forceLEDRefresh();
-                                break;
-                            }
-                        }
-                    }
-                    else if (g_activeSource == DataSource::Searching) {
-                        if (g_pendingStyleChange) {
-                            g_pendingStyleChange = false;
-                            status = lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrBreath);
-                            if (status == 0) {
-                                lpMLAPI_SetLedColor(bstrDevice, cfgLocal.targetLedIndex, 255, 255, 255);
-                                lastR = RGB_LED_REFRESH;
-                            }
-                            else { g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0; }
-                        }
-                    }
-                    else if (!g_LedsEnabled) {
-                        if (lastR != RGB_LEDS_OFF || g_pendingStyleChange) {
-                            g_pendingStyleChange = false;
-                            if (lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrOff) == 0) lastR = RGB_LEDS_OFF;
-                            else { g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0; }
-                        }
-                    }
-                    else {
+                    if (currentTime >= nextFrameTime) {
+                        nextFrameTime = currentTime + (1000 / cfgLocal.ledRefreshFPS);
+
                         float rawTemp = g_asyncTemp.load();
                         if (rawTemp >= 0.0f) {
                             if (g_pendingStyleChange) { g_pendingStyleChange = false; forceLEDRefresh(); }
@@ -2188,7 +2194,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                         }
                     }
                 }
-
+                
                 DWORD dwWait;
                 if (!g_LedsEnabled) {
                     dwWait = (DWORD)MAIN_LOOP_OFF_DELAY_MS;
