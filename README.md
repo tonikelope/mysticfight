@@ -19,7 +19,7 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * **Customizable Temperature and Colors Thresholds:** RMS interpolation.
 * **5 profiles settings:** You can set a custom shortcut to change between profiles.
 * **Night-Mode with Global Hotkey:** You can set a custom shortcut to power-off/on LEDs.
-  <p align="center"><img src="mf_settings3.png" /></p>
+  <p align="center"><img src="mf_settings4.png" /></p>
   
 ## ⚠️ Requirements
 For this tool to work, you MUST have the following installed/running:
