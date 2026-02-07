@@ -60,7 +60,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define ID_TRAY_ABOUT       4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.72";
+const wchar_t* APP_VERSION = L"v2.73";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -2188,7 +2188,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                         }
                     }
                 }
-                MsgWaitForMultipleObjects(0, NULL, FALSE, g_LedsEnabled ? (DWORD)(1000 / cfgLocal.ledRefreshFPS) : (DWORD)MAIN_LOOP_OFF_DELAY_MS, QS_ALLINPUT);
+
+                DWORD dwWait;
+                if (!g_LedsEnabled) {
+                    dwWait = (DWORD)MAIN_LOOP_OFF_DELAY_MS;
+                }
+                else {
+                    ULONGLONG now = GetTickCount64();
+                    if (nextFrameTime > now) {
+                        dwWait = (DWORD)min((ULONGLONG)(1000 / cfgLocal.ledRefreshFPS), nextFrameTime - now);
+                    }
+                    else {
+                        // Ya es hora (o vamos tarde): no esperar nada
+                        dwWait = 0;
+                    }
+                }
+
+                MsgWaitForMultipleObjects(0, NULL, FALSE, dwWait, QS_ALLINPUT);
             }
         } // --- FIN ÁMBITO COM ---
     }
