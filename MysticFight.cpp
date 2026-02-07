@@ -60,7 +60,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define ID_TRAY_ABOUT       4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.73";
+const wchar_t* APP_VERSION = L"v2.74";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -2148,7 +2148,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     if (currentTime >= nextFrameTime) {
                         nextFrameTime = currentTime + (1000 / cfgLocal.ledRefreshFPS);
 
-                        float rawTemp = g_asyncTemp.load();
+                        float rawTemp = g_asyncTemp;
+
                         if (rawTemp >= 0.0f) {
                             if (g_pendingStyleChange) { g_pendingStyleChange = false; forceLEDRefresh(); }
                             float temp = floorf(rawTemp * 2.0f + 0.5f) / 2.0f;
@@ -2210,7 +2211,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     }
                 }
 
-                MsgWaitForMultipleObjects(0, NULL, FALSE, dwWait, QS_ALLINPUT);
+                MsgWaitForMultipleObjectsEx(0, NULL, dwWait, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
             }
         } // --- FIN ÁMBITO COM ---
     }
