@@ -60,7 +60,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define ID_TRAY_ABOUT       4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.70";
+const wchar_t* APP_VERSION = L"v2.71";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -172,7 +172,7 @@ std::atomic<bool> g_AboutOpen{ false };
 
 // LED State Tracking
 std::atomic<DWORD> lastR{ RGB_LED_REFRESH }, lastG{ RGB_LED_REFRESH }, lastB{ RGB_LED_REFRESH };
-std::atomic<float> currR{ -1.0f }, currG{ -1.0f }, currB{ -1.0f };
+std::atomic<float> currR{ 0.0f }, currG{ 0.0f }, currB{ 0.0f };
 std::atomic<float> lastTemp{ -1.0f };
 
 // System Handles
@@ -1317,7 +1317,7 @@ static void SensorThread() {
 
 static void forceLEDRefresh() {
     lastTemp = -1.0f;
-    currR = -1.0f; currG = -1.0f; currB = -1.0f;
+    currR = 0.0f; currG = 0.0f; currB = 0.0f;
     lastR = RGB_LED_REFRESH; lastG = RGB_LED_REFRESH; lastB = RGB_LED_REFRESH;
 }
 
@@ -1941,6 +1941,37 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
     return DefWindowProc(hWnd, message, wParam, lParam);
 }
 
+
+/**
+ * Versión 1: Error Genérico
+ */
+static void LogSDKError(const char* functionName, int errorCode, const _bstr_t& device, DWORD index) {
+    char buf[LOG_BUFFER_SIZE];
+    snprintf(buf, sizeof(buf), "[SDK ERROR] %s failed | Code: %d | Device: %ls | Index: %lu",
+        functionName, errorCode, (wchar_t*)device, index);
+    Log(buf);
+}
+
+/**
+ * Versión 2: Error de Color (Automáticamente detectada si pasas R, G, B)
+ */
+static void LogSDKError(const char* functionName, int errorCode, const _bstr_t& device, DWORD index, DWORD r, DWORD g, DWORD b) {
+    char buf[LOG_BUFFER_SIZE];
+    snprintf(buf, sizeof(buf), "[SDK ERROR] %s failed | Code: %d | Device: %ls | Index: %lu | RGB Sent: (%lu, %lu, %lu)",
+        functionName, errorCode, (wchar_t*)device, index, r, g, b);
+    Log(buf);
+}
+
+/**
+ * Versión 3: Error de Estilo (Automáticamente detectada si pasas una cadena de estilo)
+ */
+static void LogSDKError(const char* functionName, int errorCode, const _bstr_t& device, DWORD index, const _bstr_t& style) {
+    char buf[LOG_BUFFER_SIZE];
+    snprintf(buf, sizeof(buf), "[SDK ERROR] %s failed | Code: %d | Device: %ls | Index: %lu | Style Sent: %ls",
+        functionName, errorCode, (wchar_t*)device, index, (wchar_t*)style);
+    Log(buf);
+}
+
 static bool BindMSISDK(HMODULE hLib) {
     if (!hLib) return false;
 
@@ -1969,21 +2000,27 @@ static bool BindMSISDK(HMODULE hLib) {
 // ============================================================================
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    //(Visual Styles)
+    // 1. Initialize Common Controls (Visual Styles)
     INITCOMMONCONTROLSEX icce;
     icce.dwSize = sizeof(icce);
     icce.dwICC = ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES;
     InitCommonControlsEx(&icce);
 
+    // 2. Set Process Priority to High to prevent RGB stuttering
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
 
+    // 3. Initialize COM
     HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (FAILED(hr)) return 1;
 
+    // 4. Mutex check to prevent multiple instances
     g_hMutex = CreateMutexW(NULL, TRUE, L"Global\\MysticFight_Unique_Mutex");
     if (g_hMutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (g_hMutex) { MessageBoxW(NULL, L"MysticFight is already running.", L"Information", MB_OK | MB_ICONINFORMATION); CloseHandle(g_hMutex); }
+        if (g_hMutex) {
+            MessageBoxW(NULL, L"MysticFight is already running.", L"Information", MB_OK | MB_ICONINFORMATION);
+            CloseHandle(g_hMutex);
+        }
         CoUninitialize();
         return 0;
     }
@@ -1992,105 +2029,110 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     std::thread sThread;
 
     try {
-        // 1. Extraer y Cargar DLL
+        // 5. Extract and Load MSI SDK DLL
         if (!ExtractMSIDLL() || !(g_hLibrary = LoadLibraryW(L"MysticLight_SDK.dll"))) {
             MessageBoxW(NULL, L"Critical Error: Required components (DLL) could not be prepared.", L"MysticFight - Error", MB_OK | MB_ICONERROR);
-            if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); }
-            CoUninitialize();
-            return 1;
+            throw std::runtime_error("DLL preparation failed");
         }
 
-        // 2. Vincular funciones (AQUÍ USAMOS LA NUEVA FUNCIÓN)
+        // 6. Bind SDK Functions
         if (!BindMSISDK(g_hLibrary)) {
             MessageBoxW(NULL, L"The MSI SDK DLL is incompatible or corrupted.", L"MysticFight - Error", MB_OK | MB_ICONERROR);
-            FreeLibrary(g_hLibrary); g_hLibrary = NULL;
-            if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); }
-            CoUninitialize();
-            return 1;
+            throw std::runtime_error("SDK Binding failed");
         }
 
-        // --- Startup Logistics ---
         TrimLogFile();
-        char versionMsg[128]; snprintf(versionMsg, sizeof(versionMsg), "[MysticFight] MysticFight %ls started", APP_VERSION); Log(versionMsg);
+        char versionMsg[128];
+        snprintf(versionMsg, sizeof(versionMsg), "[MysticFight] MysticFight %ls started", APP_VERSION);
+        Log(versionMsg);
 
+        // 7. Load Settings
         bool isFirstRun = (GetFileAttributesW(INI_FILE) == INVALID_FILE_ATTRIBUTES);
         LoadSettings();
-        g_target_device = g_cfg.targetDevice;
 
-        wchar_t windowTitle[100]; swprintf_s(windowTitle, L"MysticFight %ls (by tonikelope)", APP_VERSION);
+        // 8. Create Hidden Window for Message Processing
+        wchar_t windowTitle[100];
+        swprintf_s(windowTitle, L"MysticFight %ls (by tonikelope)", APP_VERSION);
         WNDCLASSW wc = { 0 };
         wc.lpfnWndProc = WndProc;
         wc.hInstance = hInstance;
         wc.lpszClassName = L"MysticFight_Class";
-        wc.hIcon = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(101), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
+        wc.hIcon = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_ICON1), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
         RegisterClassW(&wc);
         hWnd = CreateWindowExW(0, wc.lpszClassName, windowTitle, 0, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
 
-        // --- Async Initialization ---
+        // 9. Initialize Async Sensor Thread
         Log("[MysticFight] Initializing MSI SDK and HTTP Sensor Thread...");
         g_hSensorEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
         g_hSourceResolvedEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
         sThread = std::thread(SensorThread);
 
+        // 10. Initialize MSI SDK with 5-second timeout
         ULONGLONG startTime = GetTickCount64();
         bool sdkReady = false;
         while (GetTickCount64() - startTime < 5000) {
-            if (lpMLAPI_Initialize && lpMLAPI_Initialize() == 0) { sdkReady = true; Log("[MysticFight] SDK Initialized"); break; }
+            if (lpMLAPI_Initialize && lpMLAPI_Initialize() == 0) {
+                sdkReady = true;
+                Log("[MysticFight] SDK Initialized successfully");
+                break;
+            }
             Sleep(500);
         }
 
         if (!sdkReady) {
             MessageBoxW(NULL, L"The MSI Mystic Light SDK is not responding.", L"MysticFight - SDK Error", MB_OK | MB_ICONERROR);
-            g_Running = false; SetEvent(g_hSensorEvent); sThread.join();
-            CloseHandle(g_hSensorEvent); CloseHandle(g_hSourceResolvedEvent);
-            if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); }
-            CoUninitialize();
-            return 1;
+            throw std::runtime_error("MSI SDK Timeout");
         }
 
-        if (sdkReady) MSIHwardwareDetection();
+        MSIHwardwareDetection();
 
-        // Wait for HTTP Source
+        // 11. Wait for HTTP Data Source discovery
         ULONGLONG elapsed = GetTickCount64() - startTime;
         DWORD waitTime = (elapsed >= 5000) ? 0 : (5000 - (DWORD)elapsed);
         WaitForSingleObject(g_hSourceResolvedEvent, waitTime);
 
         if (g_activeSource == DataSource::Searching) {
-            MessageBoxW(NULL, L"Fatal Error: No temperature data source found (LibreHardwareMonitor HTTP Port 8085).", L"MysticFight - Startup Error", MB_OK | MB_ICONERROR);
-            g_Running = false; sThread.join(); return 1;
+            MessageBoxW(NULL, L"Fatal Error: No temperature data source found (Port 8085).", L"MysticFight - Startup Error", MB_OK | MB_ICONERROR);
+            throw std::runtime_error("LHM Source not found");
         }
 
         if (isFirstRun) SaveSettings();
 
-        // Tray Icon
+        // 12. Setup Tray Icon
         NOTIFYICONDATAW nid = { sizeof(NOTIFYICONDATAW), hWnd, 1, NIF_ICON | NIF_MESSAGE | NIF_TIP, WM_TRAYICON };
         nid.hIcon = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_ICON1), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
-        swprintf_s(nid.szTip, _countof(nid.szTip), L"MysticFight %ls (by tonikelope)", APP_VERSION);
+        swprintf_s(nid.szTip, _countof(nid.szTip), L"MysticFight %ls", APP_VERSION);
         Shell_NotifyIconW(NIM_ADD, &nid);
 
         if (isFirstRun) DialogBoxParamW(hInstance, MAKEINTRESOURCEW(IDD_SETTINGS), hWnd, (DLGPROC)SettingsDlgProc, 0);
 
         RegisterAppHotkeys(hWnd);
-
         ShowNotification(hWnd, windowTitle, L"Let's dance baby");
 
-        // --- Main Loop State ---
+        // ============================================================================
+        // MAIN LOOP OPTIMIZATION: BSTR CACHING
+        // ============================================================================
         _bstr_t bstrOff(L"Off");
-        _bstr_t bstrBreath(L"Breath");
         _bstr_t bstrSteady(L"Steady");
+        _bstr_t bstrBreath(L"Breath");
+        _bstr_t bstrDevice(L""); // Cached Device BSTR to avoid per-frame allocations
+
+        int lastProfileIndex = -1;
+        wchar_t lastDeviceName[256] = L"";
+
         DWORD targetR = 0, targetG = 0, targetB = 0;
         MSG msg = { 0 };
         bool lhmAlive = true;
-        bool firstRun = true;
+        bool firstRunLoop = true;
         int status = 0;
 
-        Log("[MysticFight] SDK + LHM SENSORS OK. Let's start monitoring!");
+        Log("[MysticFight] SDK + LHM SENSORS OK. Monitoring started.");
 
         // ============================================================================
         // MAIN APPLICATION LOOP
         // ============================================================================
         while (g_Running) {
-            
+            status = 0; // Reset status for the watchdog
 
             while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
                 if (msg.message == WM_QUIT) { g_Running = false; break; }
@@ -2099,60 +2141,77 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             if (!g_Running) break;
 
             Config cfgLocal;
+            
+            int currentIdx;
             {
                 std::lock_guard<std::mutex> lock(g_cfgMutex);
-                cfgLocal = g_cfg; // Copia rápida de la estructura
+                cfgLocal = g_cfg;
+                currentIdx = g_Global.activeProfileIndex;
             }
 
-            _bstr_t bstrDevice(cfgLocal.targetDevice);
+            // --- BSTR CACHE UPDATE LOGIC ---
+            // Re-allocate BSTR only if profile or device string changed
+            if (currentIdx != lastProfileIndex || wcscmp(cfgLocal.targetDevice, lastDeviceName) != 0) {
+                bstrDevice = cfgLocal.targetDevice;
+                wcscpy_s(lastDeviceName, cfgLocal.targetDevice);
+                lastProfileIndex = currentIdx;
+                forceLEDRefresh();
+            }
 
             ULONGLONG currentTime = GetTickCount64();
 
-            // Watchdog Logic
+            // 1. WATCHDOG LOGIC (SDK Recovery)
             if (g_Resetting_sdk) {
                 if (currentTime >= g_ResetTimer) {
                     switch (g_ResetStage) {
-                    case 0: // Kill
+                    case 0: // Kill frozen MSI processes
                         ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", false);
                         KillProcessByName(L"LEDKeeper2.exe");
                         g_ResetTimer = currentTime + RESET_KILL_TASK_WAIT_MS;
                         g_ResetStage = 1;
                         break;
-                    case 1: // Restart
+                    case 1: // Restart MSI services
                         ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", true);
                         g_ResetTimer = currentTime + RESET_RESTART_TASK_DELAY_MS;
                         g_ResetStage = 2;
                         break;
-                    case 2: // Re-Init
+                    case 2: // Re-initialize hardware
                         if (lpMLAPI_Initialize && lpMLAPI_Initialize() == 0) {
                             MSIHwardwareDetection();
-                            if (lpMLAPI_SetLedStyle) lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrSteady);
                         }
-                        g_ResetTimer = currentTime + RESET_RESTART_TASK_DELAY_MS;
+
                         g_Resetting_sdk = false;
                         forceLEDRefresh();
                         break;
                     }
                 }
             }
-            // Fallback Logic
+            // 2. SEARCHING MODE
             else if (g_activeSource == DataSource::Searching) {
                 if (lhmAlive) {
                     lhmAlive = false;
-                    if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrBreath);
-                    if (status == 0 && lpMLAPI_SetLedColor) status = lpMLAPI_SetLedColor(bstrDevice, cfgLocal.targetLedIndex, 255, 255, 255);
+
+                    status = lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrBreath);
+                    
+                    if (status != 0) LogSDKError("MLAPI_SetLedStyle", status, bstrDevice, cfgLocal.targetLedIndex, bstrBreath);
+
+                    if (status == 0 && lpMLAPI_SetLedColor) {
+                        status = lpMLAPI_SetLedColor(bstrDevice, cfgLocal.targetLedIndex, 255, 255, 255);
+                        if (status != 0) LogSDKError("MLAPI_SetLedColor", status, bstrDevice, cfgLocal.targetLedIndex, 255, 255, 255);
+                    }
                 }
             }
-            // Normal Operation
-            // Normal Operation
+            // 3. NORMAL OPERATION (LEDs Enabled)
             else if (g_LedsEnabled) {
                 float rawTemp = g_asyncTemp.load();
 
-                // CASO 1: Tenemos temperatura válida
                 if (rawTemp >= 0.0f) {
-                    // Si veníamos de estar muertos (Breath), forzamos refresco para volver a Steady
-                    if (!lhmAlive) { lhmAlive = true; forceLEDRefresh(); }
+                    if (!lhmAlive) { 
+                        lhmAlive = true; 
+                        forceLEDRefresh();
+                    }
 
+                    // Interpolate temperature to color
                     float temp = floorf(rawTemp * 2.0f + 0.5f) / 2.0f;
                     if (temp != lastTemp) {
                         lastTemp = temp;
@@ -2165,13 +2224,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                         else if (temp < (float)cfgLocal.tempMed) {
                             float range = ((float)cfgLocal.tempMed - (float)cfgLocal.tempLow);
                             ratio = range > 0.0f ? (temp - (float)cfgLocal.tempLow) / range : 0.0f;
-                            if (ratio < 0.0f) ratio = 0.0f; if (ratio > 1.0f) ratio = 1.0f;
                             c1 = cfgLocal.colorLow; c2 = cfgLocal.colorMed;
                         }
                         else if (temp < (float)cfgLocal.tempHigh) {
                             float range = ((float)cfgLocal.tempHigh - (float)cfgLocal.tempMed);
                             ratio = range > 0.0f ? (temp - (float)cfgLocal.tempMed) / range : 0.0f;
-                            if (ratio < 0.0f) ratio = 0.0f; if (ratio > 1.0f) ratio = 1.0f;
                             c1 = cfgLocal.colorMed; c2 = cfgLocal.colorHigh;
                         }
                         else {
@@ -2185,71 +2242,95 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                             targetG = (DWORD)sqrt(g1 * g1 * (1.0 - ratio) + g2 * g2 * ratio);
                             targetB = (DWORD)sqrt(b1 * b1 * (1.0 - ratio) + b2 * b2 * ratio);
                         }
-                        if (firstRun) { currR = (float)targetR; currG = (float)targetG; currB = (float)targetB; firstRun = false; }
+                        if (firstRunLoop) { currR = (float)targetR; currG = (float)targetG; currB = (float)targetB; firstRunLoop = false; }
                     }
 
+                    // Apply Smoothing
                     float r = currR; float g = currG; float b = currB;
                     r += ((float)targetR - r) * cfgLocal.smoothingFactor;
                     g += ((float)targetG - g) * cfgLocal.smoothingFactor;
                     b += ((float)targetB - b) * cfgLocal.smoothingFactor;
                     currR = r; currG = g; currB = b;
 
-                    DWORD sendR = (DWORD)roundf(r);
-                    DWORD sendG = (DWORD)roundf(g);
-                    DWORD sendB = (DWORD)roundf(b);
+                    DWORD sendR = (DWORD)roundf(r); DWORD sendG = (DWORD)roundf(g); DWORD sendB = (DWORD)roundf(b);
 
+                    // --- HARDWARE WRITE WITH LOGGING ---
                     if (sendR != lastR || sendG != lastG || sendB != lastB) {
-                        if (lastR == RGB_LEDS_OFF || lastR == RGB_LED_REFRESH) {
-                            if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrSteady);
-                        }
-                        if (status == 0 && lpMLAPI_SetLedColor) status = lpMLAPI_SetLedColor(bstrDevice, cfgLocal.targetLedIndex, sendR, sendG, sendB);
 
-                        if (status != 0) { g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0; }
-                        else { lastR = sendR; lastG = sendG; lastB = sendB; }
+                        // Ensure 'Steady' style if coming from an OFF state
+                        if (lastR == RGB_LEDS_OFF || lastR == RGB_LED_REFRESH) {
+                            if (lpMLAPI_SetLedStyle) {
+                                status = lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrSteady);
+                                if (status != 0) LogSDKError("MLAPI_SetLedStyle", status, bstrDevice, cfgLocal.targetLedIndex, bstrSteady);
+                            }
+                        }
+
+                        // Apply the calculated Color
+                        if (status == 0 && lpMLAPI_SetLedColor) {
+                            status = lpMLAPI_SetLedColor(bstrDevice, cfgLocal.targetLedIndex, sendR, sendG, sendB);
+                            if (status != 0) LogSDKError("MLAPI_SetLedColor", status, bstrDevice, cfgLocal.targetLedIndex, sendR, sendG, sendB);
+                        }
+
+                        // Error handling trigger
+                        if (status != 0) {
+                            g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0;
+                            Log("[Watchdog] Hardware write failed. Triggering recovery...");
+                        }
+                        else {
+                            lastR = sendR; lastG = sendG; lastB = sendB;
+                        }
                     }
                 }
-                // CASO 2: Pérdida de conexión con LHM (rawTemp == -1) -> LA MAGIA VISUAL
-                else {
-                    if (lhmAlive) {
-                        lhmAlive = false; // Marcamos como perdido para no repetir el comando 100 veces por segundo
-
-                        // Activamos modo Respiración (Breath) en Blanco
-                        if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrBreath);
-                        if (status == 0 && lpMLAPI_SetLedColor) status = lpMLAPI_SetLedColor(bstrDevice, cfgLocal.targetLedIndex, 255, 255, 255);
-
-                        if (status != 0) { g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0; }
-                        else lastR = RGB_LEDS_OFF; // Esto fuerza que al volver la señal, se repinte
+            }
+            // 4. LEDS DISABLED (User Toggle)
+            else {
+                if (lastR != RGB_LEDS_OFF) {
+                    
+                    if (lpMLAPI_SetLedStyle) {
+                        status = lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrOff);
+                        
+                        if (status != 0) {
+                            LogSDKError("MLAPI_SetLedStyle", status, bstrDevice, cfgLocal.targetLedIndex, bstrOff);
+                            Log("[Watchdog] Hardware write failed. Triggering recovery...");
+                            g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0;
+                        }
+                        else {
+                            lastR = RGB_LEDS_OFF;
+                        }
                     }
                 }
             }
 
+            // Sleep/Wait logic
             MsgWaitForMultipleObjects(0, NULL, FALSE, g_LedsEnabled ? (DWORD)(1000 / cfgLocal.ledRefreshFPS) : (DWORD)MAIN_LOOP_OFF_DELAY_MS, QS_ALLINPUT);
         }
 
-        
-
     }
     catch (const std::exception& e) {
-        char errBuf[256]; snprintf(errBuf, sizeof(errBuf), "[MysticFight] CRITICAL EXCEPTION: %s", e.what());
-        Log(errBuf); MessageBoxA(NULL, errBuf, "MysticFight Crash", MB_OK | MB_ICONERROR);
+        char errBuf[256];
+        snprintf(errBuf, sizeof(errBuf), "[MysticFight] CRITICAL EXCEPTION: %s", e.what());
+        Log(errBuf);
+        MessageBoxA(NULL, errBuf, "MysticFight Crash", MB_OK | MB_ICONERROR);
     }
     catch (...) {
         Log("[MysticFight] CRITICAL UNKNOWN EXCEPTION occurred.");
         MessageBoxW(NULL, L"An unknown critical error occurred.", L"MysticFight Crash", MB_OK | MB_ICONERROR);
     }
 
+    // --- EXIT SEQUENCE ---
     g_Running = false;
-
     if (g_windows_shutdown) ShutdownBlockReasonCreate(hWnd, L"Mystic Fight Shutdown...");
-    
+
     SetEvent(g_hSensorEvent);
 
     if (g_hConnect) WinHttpCloseHandle(g_hConnect);
     if (g_hSession) WinHttpCloseHandle(g_hSession);
-    
+
     if (sThread.joinable()) sThread.join();
 
     FinalCleanup(hWnd);
+
+    Log("[MysticFight] BYE BYE");
 
     if (g_windows_shutdown) ShutdownBlockReasonDestroy(hWnd);
 
