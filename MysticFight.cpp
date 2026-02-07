@@ -1,6 +1,7 @@
 ﻿/**
  * MysticFight - RGB Control & Hardware Monitor Integration
- * Author: tonikelope (and Gemini)
+ * Author: Gemini (and tonikelope, at least I want to believe it).
+ * 
  */
 
 #include "resource.h"
@@ -59,7 +60,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define ID_TRAY_ABOUT       4001
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.69";
+const wchar_t* APP_VERSION = L"v2.70";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -166,6 +167,8 @@ std::atomic<bool> g_windows_shutdown{ false };
 std::atomic<bool> g_LedsEnabled{ true };
 std::atomic<float> g_asyncTemp{ -1.0f };
 std::atomic<int> g_httpConnectionDrops{ 0 };
+std::atomic<bool> g_SettingsOpen{ false };
+std::atomic<bool> g_AboutOpen{ false };
 
 // LED State Tracking
 std::atomic<DWORD> lastR{ RGB_LED_REFRESH }, lastG{ RGB_LED_REFRESH }, lastB{ RGB_LED_REFRESH };
@@ -807,9 +810,8 @@ static bool ValidStartupTaskExists() {
 
         BSTR bstrPath = NULL;
         if (SUCCEEDED(pExecAction->get_Path(&bstrPath))) {
-            bool match = (_wcsicmp(szCurrentPath, bstrPath) == 0);
-            SysFreeString(bstrPath);
-            return match;
+            _bstr_t pathWrapper(bstrPath, false);
+            return (_wcsicmp(szCurrentPath, (const wchar_t*)pathWrapper) == 0);
         }
     }
     catch (...) {
@@ -841,18 +843,18 @@ static void SetStartupTask(bool run) {
         ITaskDefinitionPtr pTask;
         pService->NewTask(0, &pTask);
 
+        // --- CORRECCIÓN DE FUGAS DE INTERFAZ ---
         IPrincipalPtr pPrincipal;
-        pTask->get_Principal(&pPrincipal);
-        if (pPrincipal != nullptr) {
+        // Se usa &pPrincipal directamente con una interfaz que devuelve punteros
+        if (SUCCEEDED(pTask->get_Principal(&pPrincipal)) && pPrincipal != nullptr) {
             pPrincipal->put_RunLevel(TASK_RUNLEVEL_HIGHEST);
             pPrincipal->put_LogonType(TASK_LOGON_INTERACTIVE_TOKEN);
         }
 
         ITaskSettingsPtr pSettings;
-        pTask->get_Settings(&pSettings);
-        if (pSettings != nullptr) {
+        if (SUCCEEDED(pTask->get_Settings(&pSettings)) && pSettings != nullptr) {
             pSettings->put_StartWhenAvailable(VARIANT_TRUE);
-            pSettings->put_ExecutionTimeLimit(_bstr_t(L"PT0S"));
+            pSettings->put_ExecutionTimeLimit(_bstr_t(L"PT0S")); // Aquí NO hace falta false (es literal)
             pSettings->put_AllowHardTerminate(VARIANT_TRUE);
         }
 
@@ -1061,7 +1063,7 @@ static void SaveUIToProfile(HWND hDlg, int profileIndex) {
 static void PopulateAreaList(HWND hDlg, const wchar_t* deviceType, int targetLedIndex) {
     HWND hComboArea = GetDlgItem(hDlg, IDC_COMBO_AREA);
 
-    // Step 1: Standard reset
+    // 1. Limpieza visual obligatoria antes de rellenar
     SendMessage(hComboArea, CB_RESETCONTENT, 0, 0);
 
     if (!deviceType || !lpMLAPI_GetLedInfo || !lpMLAPI_GetDeviceInfo) {
@@ -1073,7 +1075,7 @@ static void PopulateAreaList(HWND hDlg, const wchar_t* deviceType, int targetLed
     SAFEARRAY* pLedCount = nullptr;
     int currentDeviceLedCount = 0;
 
-    // Step 2: Get Device Info to find the LED count for the specific deviceType
+    // 2. Obtener info de dispositivos para saber cuántos LEDs tiene este deviceType
     if (lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0 && pDevType && pLedCount) {
         BSTR* pTypes = nullptr;
         void* pCountsRaw = nullptr;
@@ -1082,6 +1084,7 @@ static void PopulateAreaList(HWND hDlg, const wchar_t* deviceType, int targetLed
 
         if (SUCCEEDED(SafeArrayAccessData(pDevType, (void**)&pTypes)) &&
             SUCCEEDED(SafeArrayAccessData(pLedCount, &pCountsRaw))) {
+
             long lBound, uBound;
             SafeArrayGetLBound(pDevType, 1, &lBound);
             SafeArrayGetUBound(pDevType, 1, &uBound);
@@ -1100,88 +1103,88 @@ static void PopulateAreaList(HWND hDlg, const wchar_t* deviceType, int targetLed
         SafeArrayDestroy(pLedCount);
     }
 
-    // Step 3: Populate the combo with LED areas
+    // 3. Rellenar el combo con las áreas de LED
     if (currentDeviceLedCount > 0) {
-        BSTR bstrDevice = SysAllocString(deviceType);
+        // Usamos _bstr_t aquí: se liberará sola al salir del bloque if
+        _bstr_t bstrDevice(deviceType);
+
         for (DWORD i = 0; i < (DWORD)currentDeviceLedCount; i++) {
             BSTR ledName = nullptr;
             SAFEARRAY* pStyles = nullptr;
+
+            // La API de MSI nos da un BSTR en ledName que debemos liberar nosotros
             if (lpMLAPI_GetLedInfo(bstrDevice, i, &ledName, &pStyles) == 0) {
                 int idx = (int)SendMessageW(hComboArea, CB_ADDSTRING, 0, (LPARAM)(ledName ? ledName : L"Unknown Area"));
+
+                // Guardamos el índice i como un simple número (no es un puntero)
                 SendMessage(hComboArea, CB_SETITEMDATA, idx, (LPARAM)i);
 
                 if (i == (DWORD)targetLedIndex) {
                     SendMessage(hComboArea, CB_SETCURSEL, idx, 0);
                 }
 
+                // Limpieza de lo que devuelve GetLedInfo en cada vuelta del bucle
                 if (pStyles) SafeArrayDestroy(pStyles);
                 if (ledName) SysFreeString(ledName);
             }
         }
-        SysFreeString(bstrDevice);
+        // Al llegar aquí, bstrDevice se destruye sola. No hace falta SysFreeString.
     }
 
-    // Step 4: Final Selection and THE FIX
+    // 4. Selección final y habilitar/deshabilitar
     if (SendMessage(hComboArea, CB_GETCURSEL, 0, 0) == CB_ERR && SendMessage(hComboArea, CB_GETCOUNT, 0, 0) > 0) {
         SendMessage(hComboArea, CB_SETCURSEL, 0, 0);
     }
 
-    // This is the line: Enable ONLY if there is more than 1 choice
     int finalCount = (int)SendMessage(hComboArea, CB_GETCOUNT, 0, 0);
     EnableWindow(hComboArea, finalCount > 1);
 }
 
 static void PopulateDeviceList(HWND hDlg) {
     HWND hComboDev = GetDlgItem(hDlg, IDC_COMBO_DEVICE);
-
-    // Step 1: Nuclear cleanup. This frees all heap strings and resets the combo.
     ClearComboHeapData(hComboDev);
 
-    SAFEARRAY* pDevType = nullptr;
-    SAFEARRAY* pLedCount = nullptr;
+    SAFEARRAY* pDevType = nullptr, * pLedCount = nullptr;
 
     if (lpMLAPI_GetDeviceInfo && lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount) == 0) {
         BSTR* pTypes = nullptr;
         SafeArrayAccessData(pDevType, (void**)&pTypes);
+
         long lBound, uBound;
         SafeArrayGetLBound(pDevType, 1, &lBound);
         SafeArrayGetUBound(pDevType, 1, &uBound);
         long count = uBound - lBound + 1;
 
         for (long i = 0; i < count; i++) {
-            BSTR typeInternal = pTypes[i];
-            BSTR friendlyName = NULL;
-            if (lpMLAPI_GetDeviceNameEx) lpMLAPI_GetDeviceNameEx(typeInternal, i, &friendlyName);
+            // Usamos _bstr_t para manejar los nombres de MSI
+            _bstr_t bstrType(pTypes[i]);
+            BSTR friendlyBSTR = nullptr;
 
-            // Create the new string in the heap
-            wchar_t* pSafeStr = HeapDupString(typeInternal);
-            int idx = (int)SendMessageW(hComboDev, CB_ADDSTRING, 0, (LPARAM)(friendlyName ? friendlyName : typeInternal));
+            if (lpMLAPI_GetDeviceNameEx)
+                lpMLAPI_GetDeviceNameEx(bstrType, i, &friendlyBSTR);
+
+            _bstr_t bstrFriendly(friendlyBSTR, false); // Se encarga de liberar friendlyBSTR
+
+            wchar_t* pSafeStr = HeapDupString(bstrType); // Guardamos copia para el itemData
+            int idx = (int)SendMessageW(hComboDev, CB_ADDSTRING, 0, (LPARAM)(wchar_t*)bstrFriendly);
 
             if (idx != CB_ERR) {
-                // REDUNDANCY REMOVED: No need to check for oldData here anymore
-                // We just store the new safe pointer.
                 SendMessage(hComboDev, CB_SETITEMDATA, idx, (LPARAM)pSafeStr);
-
-                if (wcscmp(typeInternal, g_cfg.targetDevice) == 0)
+                if (wcscmp(bstrType, g_cfg.targetDevice) == 0)
                     SendMessage(hComboDev, CB_SETCURSEL, idx, 0);
             }
             else {
-                // If adding the string failed, free the memory to prevent a leak
                 HeapFree(GetProcessHeap(), 0, pSafeStr);
             }
-
-            if (friendlyName) SysFreeString(friendlyName);
         }
         SafeArrayUnaccessData(pDevType);
         SafeArrayDestroy(pDevType);
         SafeArrayDestroy(pLedCount);
 
-        if (SendMessage(hComboDev, CB_GETCURSEL, 0, 0) == CB_ERR && SendMessage(hComboDev, CB_GETCOUNT, 0, 0) > 0)
-            SendMessage(hComboDev, CB_SETCURSEL, 0, 0);
+        int finalCount = (int)SendMessage(hComboDev, CB_GETCOUNT, 0, 0);
+        EnableWindow(hComboDev, finalCount > 1);
 
-        EnableWindow(hComboDev, (int)SendMessage(hComboDev, CB_GETCOUNT, 0, 0) > 1);
-    }
-    else {
+    } else {
         EnableWindow(hComboDev, FALSE);
     }
 }
@@ -1197,10 +1200,10 @@ static void LogAllLHMTemperatureSensors() {
     wchar_t localURL[256];
     {
         std::lock_guard<std::mutex> lock(g_cfgMutex);
-        memcpy(localURL, g_cfg.webServerUrl, sizeof(g_cfg.webServerUrl));
+        wcscpy_s(localURL, g_cfg.webServerUrl);
     }
 
-    std::string json = FetchLHMJson(localURL, HTTP_FAST_TIMEOUT);
+    std::string json = FetchLHMJson(localURL, (int)HTTP_FAST_TIMEOUT);
     if (!json.empty()) {
         std::string typeKey = "\"Type\":\"Temperature\"";
         size_t pos = 0;
@@ -1209,6 +1212,7 @@ static void LogAllLHMTemperatureSensors() {
         while ((pos = json.find(typeKey, pos)) != std::string::npos) {
             size_t blockStart = json.rfind('{', pos);
             size_t blockEnd = json.find('}', pos);
+
             if (blockStart != std::string::npos && blockEnd != std::string::npos) {
                 std::string block = json.substr(blockStart, blockEnd - blockStart + 1);
                 std::wstring name = ExtractJsonString(block, "Text");
@@ -1216,15 +1220,19 @@ static void LogAllLHMTemperatureSensors() {
                 std::wstring valStr = ExtractJsonString(block, "Value");
 
                 if (!id.empty()) {
-                    std::wstring wVal = valStr;
-                    for (auto& c : wVal) if (c == L',') c = L'.';
-                    float valFloat = (float)_wtof(wVal.c_str());
+                    // Limpieza del valor numérico
+                    for (auto& c : valStr) if (c == L',') c = L'.';
+                    float valFloat = (float)_wtof(valStr.c_str());
 
-                    char buf[LOG_BUFFER_SIZE];
+                    // --- LIMPIEZA DE LOG (Uso de _bstr_t para conversión automática) ---
                     wchar_t wBuf[LOG_BUFFER_SIZE];
-                    swprintf(wBuf, LOG_BUFFER_SIZE, L"[MysticFight] [HTTP] ID: %ls | Name: %ls | Value: %.1f", id.c_str(), name.c_str(), valFloat);
-                    WideCharToMultiByte(CP_ACP, 0, wBuf, -1, buf, sizeof(buf), NULL, NULL);
-                    Log(buf);
+                    swprintf_s(wBuf, L"[MysticFight] [HTTP] ID: %ls | Name: %ls | Value: %.1f",
+                        id.c_str(), name.c_str(), valFloat);
+
+                    // Convertimos a char* (ANSI) de forma automática para la función Log
+                    _bstr_t logConverter(wBuf);
+                    Log(logConverter); // _bstr_t se convierte solo a char* aquí
+
                     foundAny = true;
                 }
             }
@@ -1365,7 +1373,7 @@ static void MSIHwardwareDetection() {
                 if (lpMLAPI_GetDeviceNameEx) lpMLAPI_GetDeviceNameEx(g_deviceName, 0, &friendlyName);
 
                 char devInfo[LOG_BUFFER_SIZE];
-                snprintf(devInfo, sizeof(devInfo), "[MysticFight] %ls (Type: %ls) | Logical Areas: %d",
+                snprintf(devInfo, sizeof(devInfo), "[MysticFight] MSI device selected: %ls (Type: %ls) | Logical Areas: %d",
                     (friendlyName ? friendlyName : L"Unknown Device"), g_deviceName, g_totalLeds);
                 Log(devInfo);
                 if (friendlyName) SysFreeString(friendlyName);
@@ -1757,6 +1765,9 @@ INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
 
     switch (message) {
     case WM_INITDIALOG: {
+        HWND hLink = GetDlgItem(hDlg, IDC_GITHUB_LINK);
+        SetClassLongPtr(hLink, GCLP_HCURSOR, (LONG_PTR)LoadCursor(NULL, IDC_HAND));
+
         RECT rcDlg; GetWindowRect(hDlg, &rcDlg);
         int dwWidth = rcDlg.right - rcDlg.left; int dwHeight = rcDlg.bottom - rcDlg.top;
         int x = (GetSystemMetrics(SM_CXSCREEN) - dwWidth) / 2; int y = (GetSystemMetrics(SM_CYSCREEN) - dwHeight) / 2;
@@ -1783,16 +1794,8 @@ INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
         }
         break;
     }
-    case WM_SETCURSOR: {
-        if ((HWND)wParam == GetDlgItem(hDlg, IDC_GITHUB_LINK)) {
-            SetCursor(LoadCursor(NULL, IDC_HAND));
-            return TRUE;
-        }
-        break;
-    }
     case WM_COMMAND:
         if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
-            if (hFontLink) { DeleteObject(hFontLink); hFontLink = NULL; }
             EndDialog(hDlg, LOWORD(wParam));
             return (INT_PTR)TRUE;
         }
@@ -1812,17 +1815,26 @@ INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
 static void FinalCleanup(HWND hWnd) {
     Log("[MysticFight] Starting cleaning...");
 
-    // Hardware
+    // Hardware Cleanup Correcto
     if (g_hLibrary) {
-        if (g_deviceName && lpMLAPI_SetLedStyle) {
+        // Intentamos apagar el dispositivo QUE EL USUARIO CONFIGURÓ, no el genérico.
+        if (lpMLAPI_SetLedStyle) {
             _bstr_t bstrOff(L"Off");
-            lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
-            Log("[MysticFight] LEDs power off");
+
+            // Acceso seguro a la configuración global para obtener el Target real
+            Config& activeProfile = g_Global.profiles[g_Global.activeProfileIndex];
+            _bstr_t bstrTarget(activeProfile.targetDevice);
+
+            // Apagamos el dispositivo correcto
+            lpMLAPI_SetLedStyle(bstrTarget, activeProfile.targetLedIndex, bstrOff);
+            Log("[MysticFight] LEDs power off sent to configured target.");
         }
+
         if (lpMLAPI_Release) { lpMLAPI_Release(); Log("[MysticFight] MSI SDK Released"); }
         FreeLibrary(g_hLibrary);
         g_hLibrary = NULL;
     }
+
     if (g_deviceName) { SysFreeString(g_deviceName); g_deviceName = NULL; }
 
     // UI & System
@@ -1832,13 +1844,15 @@ static void FinalCleanup(HWND hWnd) {
         UnregisterHotKey(hWnd, 1);
         for (int i = 101; i <= 105; i++) UnregisterHotKey(hWnd, i);
     }
-    if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); g_hMutex = NULL; }
 
-    // Network
     CoUninitialize();
-    if (g_hConnect) { WinHttpCloseHandle(g_hConnect); g_hConnect = NULL; }
-    if (g_hSession) { WinHttpCloseHandle(g_hSession); g_hSession = NULL; }
-    CloseHandle(g_hSensorEvent);
+
+    g_hConnect = NULL;
+    g_hSession = NULL;
+
+    if (g_hSensorEvent) { CloseHandle(g_hSensorEvent); g_hSensorEvent = NULL; }
+    if (g_hSourceResolvedEvent) { CloseHandle(g_hSourceResolvedEvent); g_hSourceResolvedEvent = NULL; }
+    if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); g_hMutex = NULL; }
 
     Log("[MysticFight] Cleaning finished.");
 }
@@ -1885,8 +1899,34 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             wchar_t fullLogPath[MAX_PATH]; GetFullPathNameW(LOG_FILENAME, MAX_PATH, fullLogPath, NULL);
             RunShellNonAdmin(fullLogPath);
         }
-        if (LOWORD(wParam) == ID_TRAY_CONFIG) DialogBoxParamW(GetModuleHandle(NULL), MAKEINTRESOURCEW(IDD_SETTINGS), hWnd, (DLGPROC)SettingsDlgProc, 0);
-        if (LOWORD(wParam) == ID_TRAY_ABOUT) DialogBoxParamW(GetModuleHandle(NULL), MAKEINTRESOURCEW(IDD_ABOUT), hWnd, (DLGPROC)AboutDlgProc, 0);
+        
+        
+        if (LOWORD(wParam) == ID_TRAY_CONFIG) {
+            // Si ya está abierta, traemos la existente al frente y no abrimos otra
+            if (g_SettingsOpen) {
+                HWND hExisting = FindWindowW(L"#32770", L"Settings"); // O el título que tenga tu diálogo
+                if (hExisting) SetForegroundWindow(hExisting);
+                break;
+            }
+
+            g_SettingsOpen = true; // Cerramos la cerradura
+            DialogBoxParamW(GetModuleHandle(NULL), MAKEINTRESOURCEW(IDD_SETTINGS), hWnd, (DLGPROC)SettingsDlgProc, 0);
+            g_SettingsOpen = false; // Abrimos la cerradura al cerrar
+        }
+        
+        if (LOWORD(wParam) == ID_TRAY_ABOUT) {
+            if (g_AboutOpen) {
+                // Buscamos la ventana por su título para traerla al frente
+                HWND hExistingAbout = FindWindowW(L"#32770", L"About MysticFight");
+                if (hExistingAbout) SetForegroundWindow(hExistingAbout);
+                break;
+            }
+
+            g_AboutOpen = true;
+            DialogBoxParamW(GetModuleHandle(NULL), MAKEINTRESOURCEW(IDD_ABOUT), hWnd, (DLGPROC)AboutDlgProc, 0);
+            g_AboutOpen = false;
+        }
+
         break;
     case WM_QUERYENDSESSION:
         if (!g_windows_shutdown) {
@@ -1901,6 +1941,28 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
     return DefWindowProc(hWnd, message, wParam, lParam);
 }
 
+static bool BindMSISDK(HMODULE hLib) {
+    if (!hLib) return false;
+
+    // 1. Cargamos cada función
+    lpMLAPI_Initialize = (LPMLAPI_Initialize)GetProcAddress(hLib, "MLAPI_Initialize");
+    lpMLAPI_GetDeviceInfo = (LPMLAPI_GetDeviceInfo)GetProcAddress(hLib, "MLAPI_GetDeviceInfo");
+    lpMLAPI_SetLedColor = (LPMLAPI_SetLedColor)GetProcAddress(hLib, "MLAPI_SetLedColor");
+    lpMLAPI_SetLedStyle = (LPMLAPI_SetLedStyle)GetProcAddress(hLib, "MLAPI_SetLedStyle");
+    lpMLAPI_SetLedSpeed = (LPMLAPI_SetLedSpeed)GetProcAddress(hLib, "MLAPI_SetLedSpeed");
+    lpMLAPI_Release = (LPMLAPI_Release)GetProcAddress(hLib, "MLAPI_Release");
+    lpMLAPI_GetDeviceNameEx = (LPMLAPI_GetDeviceNameEx)GetProcAddress(hLib, "MLAPI_GetDeviceNameEx");
+    lpMLAPI_GetLedInfo = (LPMLAPI_GetLedInfo)GetProcAddress(hLib, "MLAPI_GetLedInfo");
+
+    // 2. Verificamos que las CRÍTICAS no sean NULL
+    // Si falta alguna esencial, devolvemos false para no romper nada
+    if (!lpMLAPI_Initialize || !lpMLAPI_SetLedColor || !lpMLAPI_Release) {
+        Log("[MysticFight] Error: Critical MSI SDK functions missing.");
+        return false;
+    }
+
+    return true;
+}
 
 // ============================================================================
 // MAIN ENTRY POINT
@@ -1930,7 +1992,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     std::thread sThread;
 
     try {
-        // --- Component Extraction ---
+        // 1. Extraer y Cargar DLL
         if (!ExtractMSIDLL() || !(g_hLibrary = LoadLibraryW(L"MysticLight_SDK.dll"))) {
             MessageBoxW(NULL, L"Critical Error: Required components (DLL) could not be prepared.", L"MysticFight - Error", MB_OK | MB_ICONERROR);
             if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); }
@@ -1938,15 +2000,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             return 1;
         }
 
-        // --- Bind MSI SDK ---
-        lpMLAPI_Initialize = (LPMLAPI_Initialize)GetProcAddress(g_hLibrary, "MLAPI_Initialize");
-        lpMLAPI_GetDeviceInfo = (LPMLAPI_GetDeviceInfo)GetProcAddress(g_hLibrary, "MLAPI_GetDeviceInfo");
-        lpMLAPI_SetLedColor = (LPMLAPI_SetLedColor)GetProcAddress(g_hLibrary, "MLAPI_SetLedColor");
-        lpMLAPI_SetLedStyle = (LPMLAPI_SetLedStyle)GetProcAddress(g_hLibrary, "MLAPI_SetLedStyle");
-        lpMLAPI_SetLedSpeed = (LPMLAPI_SetLedSpeed)GetProcAddress(g_hLibrary, "MLAPI_SetLedSpeed");
-        lpMLAPI_Release = (LPMLAPI_Release)GetProcAddress(g_hLibrary, "MLAPI_Release");
-        lpMLAPI_GetDeviceNameEx = (LPMLAPI_GetDeviceNameEx)GetProcAddress(g_hLibrary, "MLAPI_GetDeviceNameEx");
-        lpMLAPI_GetLedInfo = (LPMLAPI_GetLedInfo)GetProcAddress(g_hLibrary, "MLAPI_GetLedInfo");
+        // 2. Vincular funciones (AQUÍ USAMOS LA NUEVA FUNCIÓN)
+        if (!BindMSISDK(g_hLibrary)) {
+            MessageBoxW(NULL, L"The MSI SDK DLL is incompatible or corrupted.", L"MysticFight - Error", MB_OK | MB_ICONERROR);
+            FreeLibrary(g_hLibrary); g_hLibrary = NULL;
+            if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); }
+            CoUninitialize();
+            return 1;
+        }
 
         // --- Startup Logistics ---
         TrimLogFile();
@@ -2023,6 +2084,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         bool firstRun = true;
         int status = 0;
 
+        Log("[MysticFight] SDK + LHM SENSORS OK. Let's start monitoring!");
+
         // ============================================================================
         // MAIN APPLICATION LOOP
         // ============================================================================
@@ -2081,10 +2144,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 }
             }
             // Normal Operation
+            // Normal Operation
             else if (g_LedsEnabled) {
                 float rawTemp = g_asyncTemp.load();
 
+                // CASO 1: Tenemos temperatura válida
                 if (rawTemp >= 0.0f) {
+                    // Si veníamos de estar muertos (Breath), forzamos refresco para volver a Steady
                     if (!lhmAlive) { lhmAlive = true; forceLEDRefresh(); }
 
                     float temp = floorf(rawTemp * 2.0f + 0.5f) / 2.0f;
@@ -2097,22 +2163,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                             targetR = GetRValue(cfgLocal.colorLow); targetG = GetGValue(cfgLocal.colorLow); targetB = GetBValue(cfgLocal.colorLow);
                         }
                         else if (temp < (float)cfgLocal.tempMed) {
-                            
                             float range = ((float)cfgLocal.tempMed - (float)cfgLocal.tempLow);
-                            
-                            ratio = range>0.0f?(temp - (float)cfgLocal.tempLow) / range:0.0f;
-                            
+                            ratio = range > 0.0f ? (temp - (float)cfgLocal.tempLow) / range : 0.0f;
                             if (ratio < 0.0f) ratio = 0.0f; if (ratio > 1.0f) ratio = 1.0f;
-
                             c1 = cfgLocal.colorLow; c2 = cfgLocal.colorMed;
                         }
                         else if (temp < (float)cfgLocal.tempHigh) {
                             float range = ((float)cfgLocal.tempHigh - (float)cfgLocal.tempMed);
-                            
-                            ratio = range>0.0f?(temp - (float)cfgLocal.tempMed) / range:0.0f;
-                            
+                            ratio = range > 0.0f ? (temp - (float)cfgLocal.tempMed) / range : 0.0f;
                             if (ratio < 0.0f) ratio = 0.0f; if (ratio > 1.0f) ratio = 1.0f;
-
                             c1 = cfgLocal.colorMed; c2 = cfgLocal.colorHigh;
                         }
                         else {
@@ -2128,34 +2187,42 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                         }
                         if (firstRun) { currR = (float)targetR; currG = (float)targetG; currB = (float)targetB; firstRun = false; }
                     }
-                }
 
-                float r = currR.load(); float g = currG.load(); float b = currB.load();
-                r += ((float)targetR - r) * cfgLocal.smoothingFactor;
-                g += ((float)targetG - g) * cfgLocal.smoothingFactor;
-                b += ((float)targetB - b) * cfgLocal.smoothingFactor;
-                currR.store(r); currG.store(g); currB.store(b);
+                    float r = currR; float g = currG; float b = currB;
+                    r += ((float)targetR - r) * cfgLocal.smoothingFactor;
+                    g += ((float)targetG - g) * cfgLocal.smoothingFactor;
+                    b += ((float)targetB - b) * cfgLocal.smoothingFactor;
+                    currR = r; currG = g; currB = b;
 
-                DWORD sendR = (DWORD)currR, sendG = (DWORD)currG, sendB = (DWORD)currB;
+                    DWORD sendR = (DWORD)roundf(r);
+                    DWORD sendG = (DWORD)roundf(g);
+                    DWORD sendB = (DWORD)roundf(b);
 
-                if (sendR != lastR || sendG != lastG || sendB != lastB) {
-                    if (lastR == RGB_LEDS_OFF || lastR == RGB_LED_REFRESH) {
-                        if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrSteady);
+                    if (sendR != lastR || sendG != lastG || sendB != lastB) {
+                        if (lastR == RGB_LEDS_OFF || lastR == RGB_LED_REFRESH) {
+                            if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrSteady);
+                        }
+                        if (status == 0 && lpMLAPI_SetLedColor) status = lpMLAPI_SetLedColor(bstrDevice, cfgLocal.targetLedIndex, sendR, sendG, sendB);
+
+                        if (status != 0) { g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0; }
+                        else { lastR = sendR; lastG = sendG; lastB = sendB; }
                     }
-                    if (status == 0 && lpMLAPI_SetLedColor) status = lpMLAPI_SetLedColor(bstrDevice, cfgLocal.targetLedIndex, sendR, sendG, sendB);
+                }
+                // CASO 2: Pérdida de conexión con LHM (rawTemp == -1) -> LA MAGIA VISUAL
+                else {
+                    if (lhmAlive) {
+                        lhmAlive = false; // Marcamos como perdido para no repetir el comando 100 veces por segundo
 
-                    if (status != 0) { g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0; }
-                    else { lastR = sendR; lastG = sendG; lastB = sendB; }
+                        // Activamos modo Respiración (Breath) en Blanco
+                        if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrBreath);
+                        if (status == 0 && lpMLAPI_SetLedColor) status = lpMLAPI_SetLedColor(bstrDevice, cfgLocal.targetLedIndex, 255, 255, 255);
+
+                        if (status != 0) { g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0; }
+                        else lastR = RGB_LEDS_OFF; // Esto fuerza que al volver la señal, se repinte
+                    }
                 }
             }
-            // LEDs Disabled
-            else {
-                if (lastR != RGB_LEDS_OFF) {
-                    if (lpMLAPI_SetLedStyle) status = lpMLAPI_SetLedStyle(g_deviceName, 0, bstrOff);
-                    if (status != 0) { g_Resetting_sdk = true; g_ResetStage = 0; g_ResetTimer = 0; }
-                    else lastR = RGB_LEDS_OFF;
-                }
-            }
+
             MsgWaitForMultipleObjects(0, NULL, FALSE, g_LedsEnabled ? (DWORD)(1000 / cfgLocal.ledRefreshFPS) : (DWORD)MAIN_LOOP_OFF_DELAY_MS, QS_ALLINPUT);
         }
 
@@ -2177,12 +2244,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     
     SetEvent(g_hSensorEvent);
 
-    {
-        std::lock_guard<std::mutex> lock(g_httpMutex);
-        if (g_hConnect) { WinHttpCloseHandle(g_hConnect); g_hConnect = NULL; }
-        if (g_hSession) { WinHttpCloseHandle(g_hSession); g_hSession = NULL; }
-    }
-
+    if (g_hConnect) WinHttpCloseHandle(g_hConnect);
+    if (g_hSession) WinHttpCloseHandle(g_hSession);
+    
     if (sThread.joinable()) sThread.join();
 
     FinalCleanup(hWnd);

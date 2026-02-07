@@ -121,7 +121,7 @@ BEGIN
     CONTROL         "", IDC_ABOUT_ICON, "Static", SS_ICON | SS_REALSIZEIMAGE, 15, 15, 32, 32
     LTEXT           "", IDC_ABOUT_VERSION, 55, 15, 120, 8, SS_NOPREFIX
     LTEXT           "By tonikelope", IDC_STATIC, 55, 26, 120, 8
-    LTEXT           "MSI Mystic Light CPU Temperature Profile Replacement", IDC_STATIC, 55, 40, 120, 20
+    LTEXT           "MSI Mystic Light Temperature Profile Replacement", IDC_STATIC, 55, 40, 120, 20
     LTEXT           "Visit GitHub Project", IDC_GITHUB_LINK, 55, 65, 120, 8, SS_NOTIFY
     DEFPUSHBUTTON   "Close", IDOK, 133, 89, 50, 14
 END
