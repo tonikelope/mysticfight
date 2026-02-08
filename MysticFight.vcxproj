@@ -140,6 +140,7 @@
     <ClCompile Include="MysticFight.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="MysticFight.h" />
     <ClInclude Include="resource.h" />
   </ItemGroup>
   <ItemGroup>
