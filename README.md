@@ -16,7 +16,7 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * **VERY Lightweight:** No heavy dashboards; just a simple tray app that stays out of your way.
 * **Customizable Device and LED area:** Choose the one you prefer. <i>Please note that MSI Mystic Light SDK may not recognise all areas available on your device (you will have to wait for MSI to update the public SDK)</i>.
 * **Customizable Temperature Sensor:** Choose the one you prefer.
-* **Customizable Temperature and Colors Thresholds:** RMS interpolation.
+* **Customizable Temperature and Colors Thresholds:** RMS interpolation with Adaptive Smooth Factor.
 * **5 profiles settings:** You can set a custom shortcut to change between profiles.
 * **Night-Mode:** You can set a custom shortcut to power-off/on LEDs.
 * **SDK auto-reset:** Automatic reset mechanism for the Mystic Light service in case of failure.
