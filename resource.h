@@ -20,6 +20,7 @@
 #define ID_TRAY_CONFIG                  2001
 #define ID_TRAY_LOG                     3001
 #define ID_TRAY_ABOUT                   4001
+#define ID_TRAY_TOGGLE_LEDS				4002
 
 // --- SETTINGS DIALOG CONTROLS ---
 

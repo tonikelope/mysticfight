@@ -87,7 +87,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define ID_TRAY_PROFILE_START   5000 
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.76";
+const wchar_t* APP_VERSION = L"v2.77";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -286,6 +286,8 @@ LPMLAPI_GetLedInfo      lpMLAPI_GetLedInfo = nullptr;
 inline Config& GetCfgSafe() { return g_Global.profiles[g_Global.activeProfileIndex]; }
 #define g_cfg GetCfgSafe()
 
+HICON g_hIconColor = NULL;
+HICON g_hIconGray = NULL;
 
 // ============================================================================
 // UTILITY FUNCTIONS (Logging, Strings, & Privileges)
@@ -294,8 +296,11 @@ inline Config& GetCfgSafe() { return g_Global.profiles[g_Global.activeProfileInd
 /**
  * Updates the tray icon tooltip to show real-time status
  */
-void UpdateStatus(HWND hWnd, const wchar_t* status) {
-    NOTIFYICONDATAW nid = { sizeof(nid), hWnd, 1, NIF_TIP };
+static void UpdateStatus(HWND hWnd, const wchar_t* status) {
+    NOTIFYICONDATAW nid = { sizeof(nid), hWnd, 1, NIF_TIP | NIF_ICON };
+
+    // Seleccionamos el icono según el estado
+    nid.hIcon = g_LedsEnabled ? g_hIconColor : g_hIconGray;
 
     if (status != NULL) {
         swprintf_s(nid.szTip, L"MysticFight %ls (by tonikelope) - %ls", APP_VERSION, status);
@@ -414,6 +419,26 @@ static void ShowNotification(HWND hWnd, const wchar_t* title, const wchar_t* inf
     wcsncpy_s(nid.szInfo, info, _TRUNCATE);
     nid.dwInfoFlags = iconType | NIIF_LARGE_ICON;
     Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+/**
+ * Toggles the LED state and updates UI/Hardware
+ */
+static void ToggleLights(HWND hWnd) {
+    g_LedsEnabled = !g_LedsEnabled;
+    SetEvent(g_hSensorEvent);
+    lastR = RGB_LED_REFRESH; // Force hardware sync
+
+    // UI Notification
+    wchar_t msg[128];
+    swprintf_s(msg, L"Lights %ls", g_LedsEnabled ? L"ON" : L"OUT");
+    ShowNotification(hWnd, L"MysticFight", msg);
+
+    UpdateStatus(hWnd, NULL);
+
+    // Audio Feedback
+    PlaySound(MAKEINTRESOURCE(g_LedsEnabled ? IDR_WAV_LIGHTS_ON : IDR_WAV_LIGHTS_OFF),
+        GetModuleHandle(NULL), SND_RESOURCE | SND_ASYNC);
 }
 
 /**
@@ -1643,6 +1668,55 @@ static void SwitchActiveProfile(HWND hWnd, int index) {
     ShowNotification(hWnd, L"MysticFight", msg);
 }
 
+HICON CreateGrayscaleIcon(HICON hIcon) {
+    ICONINFO iconInfo;
+    if (!GetIconInfo(hIcon, &iconInfo)) return NULL;
+
+    BITMAP bmp;
+    GetObject(iconInfo.hbmColor, sizeof(BITMAP), &bmp);
+
+    // Forzamos a que sea 32 bits para no perder la transparencia
+    BITMAPINFO bmi = { 0 };
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = bmp.bmWidth;
+    bmi.bmiHeader.biHeight = bmp.bmHeight;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    std::vector<DWORD> pixels(bmp.bmWidth * bmp.bmHeight);
+    HDC hdc = GetDC(NULL);
+
+    // Extraer píxeles
+    GetDIBits(hdc, iconInfo.hbmColor, 0, bmp.bmHeight, pixels.data(), &bmi, DIB_RGB_COLORS);
+
+    for (auto& pixel : pixels) {
+        BYTE a = (pixel >> 24) & 0xFF; // Preservar transparencia
+        BYTE r = (pixel >> 16) & 0xFF;
+        BYTE g = (pixel >> 8) & 0xFF;
+        BYTE b = pixel & 0xFF;
+
+        // Fórmula de luminancia para un gris natural
+        BYTE gray = (BYTE)(0.299f * r + 0.587f * g + 0.114f * b);
+
+        // Recomponer el pixel: A R G B
+        pixel = (a << 24) | (gray << 16) | (gray << 8) | gray;
+    }
+
+    // Devolver los píxeles al bitmap de color de la estructura iconInfo
+    SetDIBits(hdc, iconInfo.hbmColor, 0, bmp.bmHeight, pixels.data(), &bmi, DIB_RGB_COLORS);
+    ReleaseDC(NULL, hdc);
+
+    // Crear el nuevo icono a partir de la info modificada
+    HICON hGrayIcon = CreateIconIndirect(&iconInfo);
+
+    // Limpieza de recursos temporales de GetIconInfo
+    DeleteObject(iconInfo.hbmColor);
+    DeleteObject(iconInfo.hbmMask);
+
+    return hGrayIcon;
+}
+
 
 // ============================================================================
 // WINDOW PROCEDURES & UI SUBCLASSING
@@ -2076,6 +2150,14 @@ static void FinalCleanup(HWND hWnd) {
     if (hWnd) {
         NOTIFYICONDATA nid = { sizeof(NOTIFYICONDATA), hWnd, 1 };
         Shell_NotifyIcon(NIM_DELETE, &nid);
+
+        if (g_hIconGray) {
+            DestroyIcon(g_hIconGray);
+            g_hIconGray = NULL;
+        }
+
+        g_hIconColor = NULL;
+
         UnregisterHotKey(hWnd, 1);
         for (int i = 101; i <= 105; i++) UnregisterHotKey(hWnd, i);
         Log("[MysticFight] Global Hot Keys Unregistered");
@@ -2097,16 +2179,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
     switch (message) {
     case WM_HOTKEY:
         if (wParam == 1) {
-            g_LedsEnabled = !g_LedsEnabled;
-            SetEvent(g_hSensorEvent);
-            lastR = RGB_LED_REFRESH;
-            PostMessage(hWnd, WM_NULL, 0, 0);
-
-            wchar_t msg[128];
-            swprintf_s(msg, L"Lights %ls", g_LedsEnabled ? L"ON" : L"OUT");
-            ShowNotification(hWnd, L"MysticFight", msg);
-
-            PlaySound(MAKEINTRESOURCE(g_LedsEnabled ? IDR_WAV_LIGHTS_ON : IDR_WAV_LIGHTS_OFF), GetModuleHandle(NULL), SND_RESOURCE | SND_ASYNC);
+            ToggleLights(hWnd);
         }
         else if (wParam >= 101 && wParam <= 105) {
             SwitchActiveProfile(hWnd, (int)wParam - 101);
@@ -2119,6 +2192,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             HMENU hMenu = CreatePopupMenu();
 
             if (hMenu) {
+
+                UINT toggleFlags = MF_STRING | (g_LedsEnabled ? MF_CHECKED : MF_UNCHECKED);
+                AppendMenuW(hMenu, toggleFlags, ID_TRAY_TOGGLE_LEDS, L"Lights Enabled");
+                AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+
                 // Profile Submenu Creation
                 HMENU hProfileMenu = CreatePopupMenu();
                 for (int i = 0; i < 5; i++) {
@@ -2142,6 +2220,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         break;
 
     case WM_COMMAND:
+        if (LOWORD(wParam) == ID_TRAY_TOGGLE_LEDS) {
+            ToggleLights(hWnd);
+        }
+
         if (LOWORD(wParam) == ID_TRAY_EXIT) g_Running = false;
 
         // Handle Profile Switching via Tray
@@ -2292,7 +2374,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             wc.lpfnWndProc = WndProc;
             wc.hInstance = hInstance;
             wc.lpszClassName = L"MysticFight_Class";
-            wc.hIcon = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_ICON1), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
+
+            g_hIconColor = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_ICON1), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
+            g_hIconGray = CreateGrayscaleIcon(g_hIconColor);
+            wc.hIcon = g_hIconColor;
+            
             RegisterClassW(&wc);
             hWnd = CreateWindowExW(0, wc.lpszClassName, L"MysticFight", 0, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
 
