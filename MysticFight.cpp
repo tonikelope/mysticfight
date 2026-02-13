@@ -87,7 +87,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define ID_TRAY_PROFILE_START   5000 
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.77";
+const wchar_t* APP_VERSION = L"v2.78";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -251,7 +251,6 @@ std::atomic<float> lastTemp{ -1.0f };
 
 // Thread Synchronization Handles
 HANDLE g_hSensorEvent = NULL;
-HANDLE g_hSourceResolvedEvent = NULL;
 HANDLE g_hMutex = NULL;
 HINTERNET g_hSession = NULL;
 HINTERNET g_hConnect = NULL;
@@ -599,79 +598,70 @@ static void RegisterAppHotkeys(HWND hWnd) {
  * Thread-safe HTTP fetcher for LHM JSON data
  */
 static std::string FetchLHMJson(const wchar_t* serverUrl, int timeout) {
-    std::lock_guard<std::mutex> lock(g_httpMutex);
-
     if (!g_Running) return "";
 
-    if (g_ResetHttp) {
-        if (g_hConnect) { WinHttpCloseHandle(g_hConnect); g_hConnect = NULL; }
-        if (g_hSession) { WinHttpCloseHandle(g_hSession); g_hSession = NULL; }
-        g_ResetHttp = false;
-    }
+    HINTERNET hSessionLocal = NULL;
+    HINTERNET hConnectLocal = NULL;
+
+    // --- BLOQUE 1: SINCRONIZACIÓN (Entrar, copiar y salir rápido) ---
+    {
+        std::lock_guard<std::mutex> lock(g_httpMutex);
+
+        if (g_ResetHttp) {
+            if (g_hConnect) WinHttpCloseHandle(g_hConnect);
+            if (g_hSession) WinHttpCloseHandle(g_hSession);
+            g_hConnect = g_hSession = NULL;
+            g_ResetHttp = false;
+        }
+
+        if (!g_hSession) {
+            g_hSession = WinHttpOpen(L"MysticFight/2.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
+        }
+
+        if (g_hSession && !g_hConnect) {
+            URL_COMPONENTS urlComp = { sizeof(urlComp) };
+            urlComp.dwHostNameLength = (DWORD)-1;
+            urlComp.dwUrlPathLength = (DWORD)-1;
+            if (WinHttpCrackUrl(serverUrl, (DWORD)wcslen(serverUrl), 0, &urlComp)) {
+                std::wstring host(urlComp.lpszHostName, urlComp.dwHostNameLength);
+                g_hConnect = WinHttpConnect(g_hSession, host.c_str(), urlComp.nPort, 0);
+            }
+        }
+
+        // Guardamos copias locales de los handles actuales
+        hSessionLocal = g_hSession;
+        hConnectLocal = g_hConnect;
+    } // <-- EL MUTEX SE LIBERA AQUÍ. El Main ya tiene vía libre.
+
+    if (!hSessionLocal || !hConnectLocal || !g_Running) return "";
+
+    // --- BLOQUE 2: RED (Sin Mutex, con timeout alto de 60s) ---
+    WinHttpSetTimeouts(hSessionLocal, timeout, timeout, timeout, timeout);
 
     std::string responseData;
-    HINTERNET hRequest = NULL;
-    bool connectionFailed = false;
+    HINTERNET hRequest = WinHttpOpenRequest(hConnectLocal, L"GET", L"/data.json", NULL, NULL, NULL, 0);
 
-    if (!g_hSession) {
-        g_hSession = WinHttpOpen(L"MysticFight (Persistent)", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-        if (!g_hSession) return "";
-    }
-    WinHttpSetTimeouts(g_hSession, timeout, timeout, timeout, timeout);
-
-    if (!g_hConnect) {
-        URL_COMPONENTS urlComp = { sizeof(URL_COMPONENTS) };
-        urlComp.dwHostNameLength = (DWORD)-1;
-        urlComp.dwUrlPathLength = (DWORD)-1;
-
-        if (WinHttpCrackUrl(serverUrl, (DWORD)wcslen(serverUrl), 0, &urlComp)) {
-            std::wstring host(urlComp.lpszHostName, urlComp.dwHostNameLength);
-            g_hConnect = WinHttpConnect(g_hSession, host.c_str(), urlComp.nPort, 0);
+    if (hRequest) {
+        if (WinHttpSendRequest(hRequest, NULL, 0, NULL, 0, 0, 0) && WinHttpReceiveResponse(hRequest, NULL)) {
+            DWORD dwSize = 0, dwDownloaded = 0;
+            // Verificamos g_Running en el bucle de lectura por si el JSON es enorme
+            while (g_Running && WinHttpQueryDataAvailable(hRequest, &dwSize) && dwSize > 0) {
+                if (responseData.size() + dwSize > MAX_HTTP_RESPONSE_SIZE) break;
+                char chunk[4096];
+                DWORD toRead = (dwSize > sizeof(chunk)) ? sizeof(chunk) : dwSize;
+                if (WinHttpReadData(hRequest, chunk, toRead, &dwDownloaded)) {
+                    responseData.append(chunk, dwDownloaded);
+                }
+                else break;
+            }
         }
-        if (!g_hConnect) return "";
+        WinHttpCloseHandle(hRequest);
     }
 
-    hRequest = WinHttpOpenRequest(g_hConnect, L"GET", L"/data.json", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-    if (!hRequest) {
-        WinHttpCloseHandle(g_hConnect); g_hConnect = NULL;
-        return "";
-    }
-
-    if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
-        WinHttpReceiveResponse(hRequest, NULL)) {
-
-        DWORD dwSize = 0, dwDownloaded = 0;
-        do {
-            dwSize = 0;
-            if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) { connectionFailed = true; break; }
-            if (dwSize == 0) break;
-
-            if (responseData.size() + dwSize > MAX_HTTP_RESPONSE_SIZE) {
-                Log("[MysticFight] HTTP Response exceeded size limit. Aborting.");
-                connectionFailed = true;
-                break;
-            }
-
-            char chunk[4096];
-            DWORD toRead = (dwSize > sizeof(chunk)) ? sizeof(chunk) : dwSize;
-            if (WinHttpReadData(hRequest, (LPVOID)chunk, toRead, &dwDownloaded)) {
-                responseData.append(chunk, dwDownloaded);
-            }
-            else {
-                connectionFailed = true; break;
-            }
-        } while (dwSize > 0);
-    }
-    else {
-        connectionFailed = true;
-    }
-
-    WinHttpCloseHandle(hRequest);
-
-    if (connectionFailed) {
-        Log("[MysticFight] HTTP Connection dropped. Resetting handle...");
+    // --- BLOQUE 3: LIMPIEZA DE ERRORES (Solo si el Main no ha cerrado ya) ---
+    if (responseData.empty() && g_Running) {
+        std::lock_guard<std::mutex> lock(g_httpMutex);
         if (g_hConnect) { WinHttpCloseHandle(g_hConnect); g_hConnect = NULL; }
-        return "";
     }
 
     return responseData;
@@ -1134,7 +1124,7 @@ static void PopulateSensorList(HWND hDlg, const wchar_t* webServerUrl, const wch
 
         EnableWindow(hCombo, SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 1);
     }
-    catch (const std::exception& e) {
+    catch (const std::exception) {
         Log("[UI Error] Error parsing JSON for list");
     }
 }
@@ -1511,7 +1501,6 @@ static float GetCPUTempFast() {
         Log("[MysticFight] LHM HTTP Data Source detected");
         g_activeSource = DataSource::HTTP;
         g_pendingStyleChange = true;
-        SetEvent(g_hSourceResolvedEvent);
         LogAllLHMTemperatureSensors();
     }
 
@@ -1660,7 +1649,6 @@ static void SwitchActiveProfile(HWND hWnd, int index) {
     g_pendingStyleChange = true;
 
     SetEvent(g_hSensorEvent);
-    ResetEvent(g_hSourceResolvedEvent);
     forceLEDRefresh();
 
     wchar_t msg[128];
@@ -2116,7 +2104,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
  * Releases all handles, libraries, and resets hardware state before exit
  */
 static void FinalCleanup(HWND hWnd) {
-    Log("[MysticFight] Starting cleaning...");
+    Log("[MysticFight] Final cleaning...");
 
     if (g_hLibrary) {
         if (lpMLAPI_SetLedStyle) {
@@ -2166,7 +2154,7 @@ static void FinalCleanup(HWND hWnd) {
     CoUninitialize();
 
     if (g_hSensorEvent) { CloseHandle(g_hSensorEvent); g_hSensorEvent = NULL; }
-    if (g_hSourceResolvedEvent) { CloseHandle(g_hSourceResolvedEvent); g_hSourceResolvedEvent = NULL; }
+    
     if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); g_hMutex = NULL; }
 
     Log("[MysticFight] Cleaning finished.");
@@ -2414,16 +2402,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             }
 
             g_hSensorEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
-            g_hSourceResolvedEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+            
             sThread = std::thread(SensorThread);
 
-            // Await LHM connection
-            WaitForSingleObject(g_hSourceResolvedEvent, LHM_BOOT_TIMEOUT);
-
-            if (g_activeSource == DataSource::Searching) {
-                MessageBoxW(NULL, L"Fatal Error: No temperature data source found (http://localhost:8085).", L"MysticFight - Startup Error", MB_OK | MB_ICONERROR);
-                throw std::runtime_error("LHM Data Source not found. Is LibreHardwareMonitor running and its web server enabled?");
-            }
+            Log("[MysticFight] Startup: Background LHM search initiated.");
 
             if (isFirstRun) SaveSettings();
 
@@ -2645,13 +2627,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     g_Running = false;
     SetEvent(g_hSensorEvent);
 
-    if (sThread.joinable()) sThread.join();
+    Log("[MysticFight] Closing sensor HTTP handles...");
 
     if (g_hConnect) WinHttpCloseHandle(g_hConnect);
     if (g_hSession) WinHttpCloseHandle(g_hSession);
 
+    {
+        std::lock_guard<std::mutex> lock(g_httpMutex);
+        g_hConnect = NULL;
+        g_hSession = NULL;
+    }
+
+    if (sThread.joinable()) sThread.join();
+
+    Log("[MysticFight] Sensor thread BYE BYE");
+
     FinalCleanup(hWnd);
-    Log("[MysticFight] BYE BYE");
+
+    Log("[MysticFight] Main thread BYE BYE");
 
     return 0;
 }
