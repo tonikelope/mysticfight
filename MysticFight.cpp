@@ -87,7 +87,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define ID_TRAY_PROFILE_START   5000 
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.78";
+const wchar_t* APP_VERSION = L"v2.79";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -803,8 +803,36 @@ static void SaveSettings() {
 }
 
 /**
- * Attempts to find the first temperature sensor if none is configured
+ * Helper: Recursively find the first available temperature sensor ID
  */
+static std::string FindFirstTemperatureSensorRecursive(const json& jNode) {
+    if (jNode.is_object()) {
+        // 1. Check if current node is a Temperature sensor
+        if (jNode.contains("Type") && jNode["Type"] == "Temperature") {
+            if (jNode.contains("SensorId") && jNode["SensorId"].is_string()) {
+                return jNode["SensorId"].get<std::string>();
+            }
+        }
+
+        // 2. Check Children (LHM structure is hierarchical)
+        if (jNode.contains("Children") && jNode["Children"].is_array()) {
+            for (const auto& child : jNode["Children"]) {
+                std::string foundId = FindFirstTemperatureSensorRecursive(child);
+                if (!foundId.empty()) return foundId; // Found one! Bubble it up.
+            }
+        }
+    }
+    else if (jNode.is_array()) {
+        // 3. Check array elements (Root is often an array or object wrapping arrays)
+        for (const auto& element : jNode) {
+            std::string foundId = FindFirstTemperatureSensorRecursive(element);
+            if (!foundId.empty()) return foundId;
+        }
+    }
+
+    return ""; // Not found in this branch
+}
+
 static bool AutoSelectFirstSensor() {
     wchar_t localURL[256];
     {
@@ -812,45 +840,51 @@ static bool AutoSelectFirstSensor() {
         memcpy(localURL, g_cfg.webServerUrl, sizeof(g_cfg.webServerUrl));
     }
 
+    // 1. Fetch JSON
     std::string jsonStr = FetchLHMJson(localURL, HTTP_FAST_TIMEOUT);
     if (jsonStr.empty()) return false;
 
-    // Simplified Auto-Select logic using string search for fallback compatibility
-    std::string typeKey = "\"Type\":\"Temperature\"";
-    size_t pos = jsonStr.find(typeKey);
+    try {
+        // 2. Parse JSON safely
+        auto j = json::parse(jsonStr);
 
-    if (pos != std::string::npos) {
-        size_t blockStart = jsonStr.rfind('{', pos);
-        size_t blockEnd = jsonStr.find('}', pos);
+        // 3. Find ID using the recursive helper
+        std::string foundId = FindFirstTemperatureSensorRecursive(j);
 
-        if (blockStart != std::string::npos && blockEnd != std::string::npos) {
-            std::string block = jsonStr.substr(blockStart, blockEnd - blockStart + 1);
+        if (!foundId.empty()) {
+            // 4. Convert std::string (UTF-8) to wchar_t (Windows Unicode)
+            int len = MultiByteToWideChar(CP_UTF8, 0, foundId.c_str(), -1, NULL, 0);
+            if (len > 0) {
+                std::vector<wchar_t> wId(len);
+                MultiByteToWideChar(CP_UTF8, 0, foundId.c_str(), -1, &wId[0], len);
 
-            // Re-implement basic string extraction just for this fallback
-            std::string idKey = "\"SensorId\":\"";
-            size_t idStart = block.find(idKey);
-            if (idStart != std::string::npos) {
-                idStart += idKey.length();
-                size_t idEnd = block.find("\"", idStart);
-                if (idEnd != std::string::npos) {
-                    std::string idVal = block.substr(idStart, idEnd - idStart);
-
-                    int len = MultiByteToWideChar(CP_UTF8, 0, idVal.c_str(), -1, NULL, 0);
-                    std::vector<wchar_t> wId(len);
-                    MultiByteToWideChar(CP_UTF8, 0, idVal.c_str(), -1, &wId[0], len);
-
+                // 5. Apply to empty profiles
+                {
                     std::lock_guard<std::mutex> lock(g_cfgMutex);
+                    bool updated = false;
                     for (int i = 0; i < 5; i++) {
                         if (wcslen(g_Global.profiles[i].sensorID) == 0) {
-                            wcscpy_s(g_Global.profiles[i].sensorID, &wId[0]);
+                            wcscpy_s(g_Global.profiles[i].sensorID, SENSOR_ID_LEN, &wId[0]);
+                            updated = true;
                         }
                     }
-                    Log("[MysticFight] Auto-assigned sensor to empty profiles.");
-                    return true;
+                    if (updated) {
+                        Log("[MysticFight] Auto-assigned sensor via JSON parsing.");
+                        return true;
+                    }
                 }
             }
         }
     }
+    catch (const json::parse_error& e) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "[AutoSelect] JSON Parse Error: %s", e.what());
+        Log(buf);
+    }
+    catch (...) {
+        Log("[AutoSelect] Unknown error searching for sensor.");
+    }
+
     return false;
 }
 
