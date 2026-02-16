@@ -87,7 +87,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define ID_TRAY_PROFILE_START   5000 
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.79";
+const wchar_t* APP_VERSION = L"v2.80";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -1085,29 +1085,44 @@ static void SetStartupTask(bool run) {
 // UI DATA POPULATION HELPERS (Modernized)
 // ============================================================================
 
-// Recursive JSON Collector for UI
-static void CollectSensorsRecursive(const json& jNode, std::vector<std::pair<std::string, std::string>>& sensors) {
+/**
+ * Recursive JSON Collector for UI - Now with Parent Naming context
+ * format: "Hardware Name > Sensor Name"
+ */
+static void CollectSensorsRecursive(const json& jNode, std::vector<std::pair<std::string, std::string>>& sensors, std::string parentName = "") {
     if (jNode.is_object()) {
+        std::string currentName = jNode.contains("Text") ? jNode["Text"].get<std::string>() : "";
         bool isTemp = false;
 
-        // Detectar si es temperatura por icono o tipo
+        // Detect if it's a temperature sensor by Icon or Type
         if (jNode.contains("ImageURL") && jNode["ImageURL"].get<std::string>() == "images_icon/temperature.png") isTemp = true;
         if (jNode.contains("Type") && jNode["Type"] == "Temperature") isTemp = true;
 
-        // Si es temperatura, guardamos Nombre y SensorId (Ruta)
-        if (isTemp && jNode.contains("Text") && jNode.contains("SensorId")) {
-            std::string name = jNode["Text"].get<std::string>();
+        // If it's a temperature sensor, we store the full path name and the SensorId
+        if (isTemp && !currentName.empty() && jNode.contains("SensorId")) {
+            std::string fullName = parentName.empty() ? currentName : parentName + " > " + currentName;
             std::string path = jNode["SensorId"].get<std::string>();
-            sensors.push_back({ name, path });
+            sensors.push_back({ fullName, path });
         }
 
-        // Recursión hijos
+        // Recursion for children
         if (jNode.contains("Children") && jNode["Children"].is_array()) {
-            for (const auto& child : jNode["Children"]) CollectSensorsRecursive(child, sensors);
+            // We pass the current node name as the parent for the next level, 
+            // but only if it's "meaningful" hardware (has a HardwareId or is a root device)
+            std::string nextParent = parentName;
+            if (jNode.contains("HardwareId") || parentName.empty()) {
+                nextParent = currentName;
+            }
+
+            for (const auto& child : jNode["Children"]) {
+                CollectSensorsRecursive(child, sensors, nextParent);
+            }
         }
     }
     else if (jNode.is_array()) {
-        for (const auto& element : jNode) CollectSensorsRecursive(element, sensors);
+        for (const auto& element : jNode) {
+            CollectSensorsRecursive(element, sensors, parentName);
+        }
     }
 }
 
