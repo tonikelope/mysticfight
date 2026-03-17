@@ -87,7 +87,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define ID_TRAY_PROFILE_START   5000 
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v2.80";
+const wchar_t* APP_VERSION = L"v2.81";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -1184,7 +1184,7 @@ static void PopulateAreaList(HWND hDlg, const wchar_t* deviceType, int targetLed
 /**
  * Transfers Profile Data into the Settings Dialog controls
  */
-static void LoadProfileToUI(HWND hDlg, int profileIndex) {
+static void LoadProfileToUI(HWND hDlg, int profileIndex, int tempActiveIndex) {
     if (profileIndex < 0 || profileIndex >= 5) return;
     Config& p = g_Global.profiles[profileIndex];
 
@@ -1229,7 +1229,7 @@ static void LoadProfileToUI(HWND hDlg, int profileIndex) {
     else if (p.smoothingFactor > 0.2f) SendMessage(hSmooth, CB_SETCURSEL, 3, 0);
     else SendMessage(hSmooth, CB_SETCURSEL, 2, 0);
 
-    CheckDlgButton(hDlg, IDC_CHK_ACTIVE_PROFILE, (profileIndex == g_Global.activeProfileIndex) ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(hDlg, IDC_CHK_ACTIVE_PROFILE, (profileIndex == tempActiveIndex) ? BST_CHECKED : BST_UNCHECKED);
     InvalidateRect(hDlg, NULL, TRUE);
 }
 
@@ -1852,6 +1852,7 @@ static void SaveHotkeysFromUI(HWND hDlg) {
 INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
     static HBRUSH hBrushLow = NULL, hBrushMed = NULL, hBrushHigh = NULL;
     static int s_currentTab = 0;
+    static int s_tempActiveIndex = 0;
 
     switch (message) {
     case WM_CTLCOLOREDIT: {
@@ -1879,6 +1880,8 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
     }
 
     case WM_INITDIALOG: {
+        s_tempActiveIndex = g_Global.activeProfileIndex;
+
         HWND hMainWnd = GetParent(hDlg);
         if (hMainWnd) {
             UnregisterHotKey(hMainWnd, 1);
@@ -1937,7 +1940,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         if (s_currentTab == 5) ToggleSettingsLayer(hDlg, true);
         else {
             ToggleSettingsLayer(hDlg, false);
-            LoadProfileToUI(hDlg, s_currentTab);
+            LoadProfileToUI(hDlg, s_currentTab, s_tempActiveIndex);
         }
 
         int safeTab = (s_currentTab < 5) ? s_currentTab : 0;
@@ -1979,7 +1982,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                 hBrushLow = CreateSolidBrush(g_Global.profiles[s_currentTab].colorLow);
                 hBrushMed = CreateSolidBrush(g_Global.profiles[s_currentTab].colorMed);
                 hBrushHigh = CreateSolidBrush(g_Global.profiles[s_currentTab].colorHigh);
-                LoadProfileToUI(hDlg, s_currentTab);
+                LoadProfileToUI(hDlg, s_currentTab, s_tempActiveIndex);
             }
         }
         break;
@@ -1991,10 +1994,10 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
         if (id == IDC_CHK_ACTIVE_PROFILE && code == BN_CLICKED) {
             if (IsDlgButtonChecked(hDlg, IDC_CHK_ACTIVE_PROFILE)) {
-                if (s_currentTab < 5) g_Global.activeProfileIndex = s_currentTab;
+                s_tempActiveIndex = s_currentTab;
             }
             else {
-                if (g_Global.activeProfileIndex == s_currentTab)
+                if (s_tempActiveIndex == s_currentTab)
                     CheckDlgButton(hDlg, IDC_CHK_ACTIVE_PROFILE, BST_CHECKED);
             }
             return TRUE;
@@ -2031,6 +2034,9 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         }
 
         if (id == IDOK) {
+            
+            g_Global.activeProfileIndex = s_tempActiveIndex;
+            
             if (s_currentTab <= 4) SaveUIToProfile(hDlg, s_currentTab);
             if (ValidateHotkeys(hDlg)) SaveHotkeysFromUI(hDlg);
 
