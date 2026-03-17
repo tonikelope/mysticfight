@@ -20,7 +20,7 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * **5 profiles settings:** You can set a custom global shortcut keys to change between profiles.
 * **Night-Mode:** You can set a custom global shortcut keys to power-off/on LEDs.
 * **SDK auto-reset:** Automatic reset mechanism for the Mystic Light service in case of failure.
-  <p align="center"><img src="mf_settings4.png" width="500" /></p>
+  <p align="center"><img src="mf_settings5.png" width="500" /></p>
   
 ## ⚠️ Requirements
 For this tool to work, you MUST have the following installed/running:
