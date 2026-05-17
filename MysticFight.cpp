@@ -228,7 +228,7 @@ _COM_SMARTPTR_TYPEDEF(ILogonTrigger, __uuidof(ILogonTrigger));
 // ============================================================================
 
 GlobalConfig g_Global;
-std::mutex g_cfgMutex;
+std::recursive_mutex g_cfgMutex;
 std::mutex g_httpMutex;
 
 // Atomic Logic Flags
@@ -757,7 +757,7 @@ static float ParseLHMJsonForTemp(const std::string& jsonStr, const wchar_t* sens
 // ============================================================================
 
 static void SaveSettings() {
-    std::lock_guard<std::mutex> lock(g_cfgMutex);
+    std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
 
     WritePrivateProfileStringW(L"Global", L"ActiveProfile", std::to_wstring(g_Global.activeProfileIndex).c_str(), INI_FILE);
 
@@ -836,7 +836,7 @@ static std::string FindFirstTemperatureSensorRecursive(const json& jNode) {
 static bool AutoSelectFirstSensor() {
     wchar_t localURL[256];
     {
-        std::lock_guard<std::mutex> lock(g_cfgMutex);
+        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
         memcpy(localURL, g_cfg.webServerUrl, sizeof(g_cfg.webServerUrl));
     }
 
@@ -860,7 +860,7 @@ static bool AutoSelectFirstSensor() {
 
                 // 5. Apply to empty profiles
                 {
-                    std::lock_guard<std::mutex> lock(g_cfgMutex);
+                    std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
                     bool updated = false;
                     for (int i = 0; i < 5; i++) {
                         if (wcslen(g_Global.profiles[i].sensorID) == 0) {
@@ -889,6 +889,8 @@ static bool AutoSelectFirstSensor() {
 }
 
 static void LoadSettings() {
+    std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+
     g_Global.activeProfileIndex = GetPrivateProfileIntW(L"Global", L"ActiveProfile", 0, INI_FILE);
     if (g_Global.activeProfileIndex < 0 || g_Global.activeProfileIndex > 4) g_Global.activeProfileIndex = 0;
 
@@ -1237,6 +1239,8 @@ static void LoadProfileToUI(HWND hDlg, int profileIndex, int tempActiveIndex) {
  * Transfers Dialog data back to global config profiles
  */
 static void SaveUIToProfile(HWND hDlg, int profileIndex) {
+    std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+
     Config& p = g_Global.profiles[profileIndex];
 
     p.tempLow = GetDlgItemInt(hDlg, IDC_TEMP_LOW, NULL, TRUE);
@@ -1404,8 +1408,11 @@ static void PopulateDeviceList(HWND hDlg) {
 
                     _bstr_t bstrFriendly(friendlyBSTR, false);
 
+                    const wchar_t* displayName = (const wchar_t*)bstrFriendly;
+                    if (!displayName || !*displayName) displayName = (const wchar_t*)bstrType;
+
                     wchar_t* pSafeStr = HeapDupString(bstrType);
-                    int idx = (int)SendMessageW(hComboDev, CB_ADDSTRING, 0, (LPARAM)(wchar_t*)bstrFriendly);
+                    int idx = (int)SendMessageW(hComboDev, CB_ADDSTRING, 0, (LPARAM)displayName);
 
                     if (idx != CB_ERR) {
                         SendMessage(hComboDev, CB_SETITEMDATA, idx, (LPARAM)pSafeStr);
@@ -1444,7 +1451,7 @@ static void LogAllLHMTemperatureSensors() {
 
     wchar_t localURL[256];
     {
-        std::lock_guard<std::mutex> lock(g_cfgMutex);
+        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
         wcscpy_s(localURL, g_cfg.webServerUrl);
     }
 
@@ -1525,7 +1532,7 @@ static float GetCPUTempFast() {
     wchar_t localSensorID[SENSOR_ID_LEN];
     wchar_t localURL[256];
     {
-        std::lock_guard<std::mutex> lock(g_cfgMutex);
+        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
         wcscpy_s(localSensorID, g_cfg.sensorID);
         wcscpy_s(localURL, g_cfg.webServerUrl);
     }
@@ -1567,7 +1574,7 @@ static void SensorThread() {
         DWORD waitMs = (DWORD)SENSOR_LOOP_OFF_DELAY_MS;
 
         if (g_LedsEnabled) {
-            std::lock_guard<std::mutex> lock(g_cfgMutex);
+            std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
             waitMs = (DWORD)g_cfg.sensorUpdateMS;
         }
 
@@ -1685,7 +1692,7 @@ static void MSIHwardwareDetection() {
 static void SwitchActiveProfile(HWND hWnd, int index) {
     if (index < 0 || index >= 5) return;
     {
-        std::lock_guard<std::mutex> lock(g_cfgMutex);
+        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
         g_Global.activeProfileIndex = index;
     }
 
@@ -1853,6 +1860,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
     static HBRUSH hBrushLow = NULL, hBrushMed = NULL, hBrushHigh = NULL;
     static int s_currentTab = 0;
     static int s_tempActiveIndex = 0;
+    static GlobalConfig s_snapshot;
 
     switch (message) {
     case WM_CTLCOLOREDIT: {
@@ -1880,8 +1888,6 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
     }
 
     case WM_INITDIALOG: {
-        s_tempActiveIndex = g_Global.activeProfileIndex;
-
         HWND hMainWnd = GetParent(hDlg);
         if (hMainWnd) {
             UnregisterHotKey(hMainWnd, 1);
@@ -1896,6 +1902,12 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         SetWindowPos(hDlg, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE);
 
         LoadSettings();
+
+        {
+            std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+            s_snapshot = g_Global;
+        }
+        s_tempActiveIndex = g_Global.activeProfileIndex;
 
         HWND hTab = GetDlgItem(hDlg, IDC_TAB_PROFILES);
         if (hTab) {
@@ -1943,11 +1955,6 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             LoadProfileToUI(hDlg, s_currentTab, s_tempActiveIndex);
         }
 
-        int safeTab = (s_currentTab < 5) ? s_currentTab : 0;
-        hBrushLow = CreateSolidBrush(g_Global.profiles[safeTab].colorLow);
-        hBrushMed = CreateSolidBrush(g_Global.profiles[safeTab].colorMed);
-        hBrushHigh = CreateSolidBrush(g_Global.profiles[safeTab].colorHigh);
-
         oldEditProc = (WNDPROC)SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_LOW), GWLP_WNDPROC, (LONG_PTR)ColorEditSubclassProc);
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_MED), GWLP_WNDPROC, (LONG_PTR)ColorEditSubclassProc);
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_HIGH), GWLP_WNDPROC, (LONG_PTR)ColorEditSubclassProc);
@@ -1976,12 +1983,6 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             if (s_currentTab == 5) ToggleSettingsLayer(hDlg, true);
             else {
                 ToggleSettingsLayer(hDlg, false);
-                if (hBrushLow) DeleteObject(hBrushLow);
-                if (hBrushMed) DeleteObject(hBrushMed);
-                if (hBrushHigh) DeleteObject(hBrushHigh);
-                hBrushLow = CreateSolidBrush(g_Global.profiles[s_currentTab].colorLow);
-                hBrushMed = CreateSolidBrush(g_Global.profiles[s_currentTab].colorMed);
-                hBrushHigh = CreateSolidBrush(g_Global.profiles[s_currentTab].colorHigh);
                 LoadProfileToUI(hDlg, s_currentTab, s_tempActiveIndex);
             }
         }
@@ -2034,11 +2035,16 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         }
 
         if (id == IDOK) {
-            
+            if (!ValidateHotkeys(hDlg)) {
+                return TRUE;
+            }
+
+            std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+
             g_Global.activeProfileIndex = s_tempActiveIndex;
-            
+
             if (s_currentTab <= 4) SaveUIToProfile(hDlg, s_currentTab);
-            if (ValidateHotkeys(hDlg)) SaveHotkeysFromUI(hDlg);
+            SaveHotkeysFromUI(hDlg);
 
             SetStartupTask(IsDlgButtonChecked(hDlg, IDC_CHK_STARTUP) == BST_CHECKED);
             SaveSettings();
@@ -2051,6 +2057,10 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         }
 
         if (id == IDCANCEL) {
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+                g_Global = s_snapshot;
+            }
             EndDialog(hDlg, IDCANCEL);
             return TRUE;
         }
@@ -2086,9 +2096,9 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
     case WM_DESTROY:
         RegisterAppHotkeys(GetParent(hDlg));
-        if (hBrushLow) DeleteObject(hBrushLow);
-        if (hBrushMed) DeleteObject(hBrushMed);
-        if (hBrushHigh) DeleteObject(hBrushHigh);
+        if (hBrushLow) { DeleteObject(hBrushLow); hBrushLow = NULL; }
+        if (hBrushMed) { DeleteObject(hBrushMed); hBrushMed = NULL; }
+        if (hBrushHigh) { DeleteObject(hBrushHigh); hBrushHigh = NULL; }
         ClearComboHeapData(GetDlgItem(hDlg, IDC_SENSOR_ID));
         ClearComboHeapData(GetDlgItem(hDlg, IDC_COMBO_DEVICE));
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_LOW), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
@@ -2281,7 +2291,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 
         if (!g_Resetting_sdk && LOWORD(wParam) == ID_TRAY_CONFIG) {
             if (g_SettingsOpen) {
-                HWND hExisting = FindWindowW(L"#32770", L"Settings");
+                HWND hExisting = FindWindowW(L"#32770", L"MysticFight Settings - by tonikelope");
                 if (hExisting) SetForegroundWindow(hExisting);
                 break;
             }
@@ -2492,7 +2502,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
                 Config cfgLocal;
                 {
-                    std::lock_guard<std::mutex> lock(g_cfgMutex);
+                    std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
                     cfgLocal = g_cfg;
                 }
 
