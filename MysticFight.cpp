@@ -329,10 +329,8 @@ _COM_SMARTPTR_TYPEDEF(ILogonTrigger, __uuidof(ILogonTrigger));
 
 GlobalConfig g_Global;
 std::recursive_mutex g_cfgMutex;
-std::mutex g_httpMutex;
 
 // Atomic Logic Flags
-std::atomic<bool> g_ResetHttp{ false };
 std::atomic<DataSource> g_activeSource{ DataSource::Searching };
 std::atomic<bool> g_Running{ true };
 std::atomic<bool> g_windows_shutdown{ false };
@@ -353,8 +351,6 @@ std::atomic<float> lastTemp{ -1.0f };
 // Thread Synchronization Handles
 HANDLE g_hSensorEvent = NULL;
 HANDLE g_hMutex = NULL;
-HINTERNET g_hSession = NULL;
-HINTERNET g_hConnect = NULL;
 
 // Hardware SDK State
 BSTR g_deviceName = NULL;
@@ -698,72 +694,48 @@ static void RegisterAppHotkeys(HWND hWnd) {
  * Thread-safe HTTP fetcher for LHM JSON data
  */
 static std::string FetchLHMJson(const wchar_t* serverUrl, int timeout) {
-    if (!g_Running) return "";
+    if (!g_Running || !serverUrl || !serverUrl[0]) return "";
 
-    HINTERNET hSessionLocal = NULL;
-    HINTERNET hConnectLocal = NULL;
-
-    // --- BLOQUE 1: SINCRONIZACIÓN (Entrar, copiar y salir rápido) ---
-    {
-        std::lock_guard<std::mutex> lock(g_httpMutex);
-
-        if (g_ResetHttp) {
-            if (g_hConnect) WinHttpCloseHandle(g_hConnect);
-            if (g_hSession) WinHttpCloseHandle(g_hSession);
-            g_hConnect = g_hSession = NULL;
-            g_ResetHttp = false;
-        }
-
-        if (!g_hSession) {
-            g_hSession = WinHttpOpen(L"MysticFight/2.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
-        }
-
-        if (g_hSession && !g_hConnect) {
-            URL_COMPONENTS urlComp = { sizeof(urlComp) };
-            urlComp.dwHostNameLength = (DWORD)-1;
-            urlComp.dwUrlPathLength = (DWORD)-1;
-            if (WinHttpCrackUrl(serverUrl, (DWORD)wcslen(serverUrl), 0, &urlComp)) {
-                std::wstring host(urlComp.lpszHostName, urlComp.dwHostNameLength);
-                g_hConnect = WinHttpConnect(g_hSession, host.c_str(), urlComp.nPort, 0);
-            }
-        }
-
-        // Guardamos copias locales de los handles actuales
-        hSessionLocal = g_hSession;
-        hConnectLocal = g_hConnect;
-    } // <-- EL MUTEX SE LIBERA AQUÍ. El Main ya tiene vía libre.
-
-    if (!hSessionLocal || !hConnectLocal || !g_Running) return "";
-
-    // --- BLOQUE 2: RED (Sin Mutex, con timeout alto de 60s) ---
-    WinHttpSetTimeouts(hSessionLocal, timeout, timeout, timeout, timeout);
+    // Per-call WinHTTP handles: no shared global session/connection state, so
+    // any number of threads (the sensor loop AND the settings dialog) can fetch
+    // concurrently without racing on — or closing out from under each other —
+    // shared handles. Handles are always released before returning.
+    HINTERNET hSession = WinHttpOpen(L"MysticFight/2.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
+    if (!hSession) return "";
+    WinHttpSetTimeouts(hSession, timeout, timeout, timeout, timeout);
 
     std::string responseData;
-    HINTERNET hRequest = WinHttpOpenRequest(hConnectLocal, L"GET", L"/data.json", NULL, NULL, NULL, 0);
 
-    if (hRequest) {
-        if (WinHttpSendRequest(hRequest, NULL, 0, NULL, 0, 0, 0) && WinHttpReceiveResponse(hRequest, NULL)) {
-            DWORD dwSize = 0, dwDownloaded = 0;
-            // Verificamos g_Running en el bucle de lectura por si el JSON es enorme
-            while (g_Running && WinHttpQueryDataAvailable(hRequest, &dwSize) && dwSize > 0) {
-                if (responseData.size() + dwSize > MAX_HTTP_RESPONSE_SIZE) break;
-                char chunk[4096];
-                DWORD toRead = (dwSize > sizeof(chunk)) ? sizeof(chunk) : dwSize;
-                if (WinHttpReadData(hRequest, chunk, toRead, &dwDownloaded)) {
-                    responseData.append(chunk, dwDownloaded);
+    URL_COMPONENTS urlComp = { sizeof(urlComp) };
+    urlComp.dwHostNameLength = (DWORD)-1;
+    urlComp.dwUrlPathLength = (DWORD)-1;
+
+    if (WinHttpCrackUrl(serverUrl, (DWORD)wcslen(serverUrl), 0, &urlComp)) {
+        std::wstring host(urlComp.lpszHostName, urlComp.dwHostNameLength);
+        HINTERNET hConnect = WinHttpConnect(hSession, host.c_str(), urlComp.nPort, 0);
+        if (hConnect) {
+            HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", L"/data.json", NULL, NULL, NULL, 0);
+            if (hRequest) {
+                if (WinHttpSendRequest(hRequest, NULL, 0, NULL, 0, 0, 0) && WinHttpReceiveResponse(hRequest, NULL)) {
+                    DWORD dwSize = 0, dwDownloaded = 0;
+                    // Check g_Running in the read loop in case the JSON is huge
+                    while (g_Running && WinHttpQueryDataAvailable(hRequest, &dwSize) && dwSize > 0) {
+                        if (responseData.size() + dwSize > MAX_HTTP_RESPONSE_SIZE) break;
+                        char chunk[4096];
+                        DWORD toRead = (dwSize > sizeof(chunk)) ? sizeof(chunk) : dwSize;
+                        if (WinHttpReadData(hRequest, chunk, toRead, &dwDownloaded)) {
+                            responseData.append(chunk, dwDownloaded);
+                        }
+                        else break;
+                    }
                 }
-                else break;
+                WinHttpCloseHandle(hRequest);
             }
+            WinHttpCloseHandle(hConnect);
         }
-        WinHttpCloseHandle(hRequest);
     }
 
-    // --- BLOQUE 3: LIMPIEZA DE ERRORES (Solo si el Main no ha cerrado ya) ---
-    if (responseData.empty() && g_Running) {
-        std::lock_guard<std::mutex> lock(g_httpMutex);
-        if (g_hConnect) { WinHttpCloseHandle(g_hConnect); g_hConnect = NULL; }
-    }
-
+    WinHttpCloseHandle(hSession);
     return responseData;
 }
 
@@ -994,9 +966,11 @@ static bool AutoSelectFirstSensor() {
 }
 
 static void LoadSettings() {
-    std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+    bool needAutoSelect;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
 
-    g_Global.activeProfileIndex = GetPrivateProfileIntW(L"Global", L"ActiveProfile", 0, INI_FILE);
+        g_Global.activeProfileIndex = GetPrivateProfileIntW(L"Global", L"ActiveProfile", 0, INI_FILE);
     if (g_Global.activeProfileIndex < 0 || g_Global.activeProfileIndex > 4) g_Global.activeProfileIndex = 0;
 
     g_NotificationsEnabled = GetPrivateProfileIntW(L"Global", L"Notifications", 1, INI_FILE) != 0;
@@ -1044,16 +1018,20 @@ static void LoadSettings() {
         GetPrivateProfileStringW(section.c_str(), L"Label", defLabel, p.label, 64, INI_FILE);
     }
 
-    if (wcslen(g_cfg.sensorID) == 0) { AutoSelectFirstSensor(); SaveSettings(); }
+        needAutoSelect = (wcslen(g_cfg.sensorID) == 0);
 
-    // Hotkey default values (Ctrl+Alt+Shift + Keys)
-    BYTE defMod = HOTKEYF_CONTROL | HOTKEYF_SHIFT | HOTKEYF_ALT;
-    g_Global.hotkeys.toggleLEDs = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Toggle", MAKEWORD(0x4C, defMod), INI_FILE);
-    g_Global.hotkeys.profile1 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile1", MAKEWORD('1', defMod), INI_FILE);
-    g_Global.hotkeys.profile2 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile2", MAKEWORD('2', defMod), INI_FILE);
-    g_Global.hotkeys.profile3 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile3", MAKEWORD('3', defMod), INI_FILE);
-    g_Global.hotkeys.profile4 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile4", MAKEWORD('4', defMod), INI_FILE);
-    g_Global.hotkeys.profile5 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile5", MAKEWORD('5', defMod), INI_FILE);
+        // Hotkey default values (Ctrl+Alt+Shift + Keys)
+        BYTE defMod = HOTKEYF_CONTROL | HOTKEYF_SHIFT | HOTKEYF_ALT;
+        g_Global.hotkeys.toggleLEDs = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Toggle", MAKEWORD(0x4C, defMod), INI_FILE);
+        g_Global.hotkeys.profile1 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile1", MAKEWORD('1', defMod), INI_FILE);
+        g_Global.hotkeys.profile2 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile2", MAKEWORD('2', defMod), INI_FILE);
+        g_Global.hotkeys.profile3 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile3", MAKEWORD('3', defMod), INI_FILE);
+        g_Global.hotkeys.profile4 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile4", MAKEWORD('4', defMod), INI_FILE);
+        g_Global.hotkeys.profile5 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile5", MAKEWORD('5', defMod), INI_FILE);
+    }
+
+    // HTTP must NOT run while g_cfgMutex is held (it would block the sensor thread).
+    if (needAutoSelect) { AutoSelectFirstSensor(); SaveSettings(); }
 }
 
 
@@ -1836,7 +1814,6 @@ static void SwitchActiveProfile(HWND hWnd, int index) {
     SaveSettings();
     g_ConfigVersion++;
     g_lastDataSourceSearchRetry = 0;
-    g_ResetHttp = true;
     g_activeSource = DataSource::Searching;
     g_asyncTemp = -1.0f;
     g_pendingStyleChange = true;
@@ -2285,7 +2262,6 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             g_NotificationsEnabled = (IsDlgButtonChecked(hDlg, IDC_CHK_NOTIFICATIONS) == BST_CHECKED);
             SaveSettings();
             g_ConfigVersion++;
-            g_ResetHttp = true;
             forceLEDRefresh();
             SetEvent(g_hSensorEvent);
             EndDialog(hDlg, IDOK);
@@ -2460,8 +2436,10 @@ static void FinalCleanup(HWND hWnd) {
 
     CoUninitialize();
 
-    if (g_hSensorEvent) { CloseHandle(g_hSensorEvent); g_hSensorEvent = NULL; }
-    
+    // Note: g_hSensorEvent is intentionally NOT closed here. This runs during
+    // shutdown when the sensor thread may still be wedged in a blocking call and
+    // could reference the event; the OS reclaims the handle on process exit.
+
     if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); g_hMutex = NULL; }
 
     Log("[MysticFight] Cleaning finished.");
@@ -2936,26 +2914,35 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     // Termination Procedure
     g_Running = false;
-    SetEvent(g_hSensorEvent);
+    SetEvent(g_hSensorEvent); // wake the sensor thread if it is waiting
 
-    Log("[MysticFight] Closing sensor HTTP handles...");
-
-    if (g_hConnect) WinHttpCloseHandle(g_hConnect);
-    if (g_hSession) WinHttpCloseHandle(g_hSession);
-
-    {
-        std::lock_guard<std::mutex> lock(g_httpMutex);
-        g_hConnect = NULL;
-        g_hSession = NULL;
+    // Bounded wait for the sensor thread. A blocking WinHTTP call cannot be
+    // cancelled from here (handles are per-call now), so we never join
+    // unconditionally: if the worker does not stop in time we force the process
+    // down instead of leaving a wedged, unkillable-from-tray app.
+    bool cleanStop = false;
+    if (sThread.joinable()) {
+        if (WaitForSingleObject(sThread.native_handle(), 2000) == WAIT_OBJECT_0) {
+            sThread.join();
+            cleanStop = true;
+        }
+    }
+    else {
+        cleanStop = true;
     }
 
-    if (sThread.joinable()) sThread.join();
-
-    Log("[MysticFight] Sensor thread BYE BYE");
-
+    // SDK shutdown + tray/hotkey cleanup. Safe even if the sensor thread is still
+    // wedged: it never touches the SDK, the tray icon or the hotkeys.
     FinalCleanup(hWnd);
 
-    Log("[MysticFight] Main thread BYE BYE");
+    Log(cleanStop ? "[MysticFight] Main thread BYE BYE"
+                  : "[MysticFight] Worker stuck; forcing process exit");
+
+    if (!cleanStop) {
+        // A worker is wedged in a blocking call — force the whole process down
+        // so "Exit" from the tray always works.
+        TerminateProcess(GetCurrentProcess(), 0);
+    }
 
     return 0;
 }
