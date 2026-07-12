@@ -82,6 +82,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define WM_APP_STATUS           (WM_APP + 1)   // wParam: 0=normal, 1=restarting, 2=connecting
 #define WM_APP_LETSDANCE        (WM_APP + 2)   // show the startup notification
 #define WM_APP_FATAL            (WM_APP + 3)   // wParam: 1=SDK critical, 2=SDK fatal
+#define WM_APP_HWREADY          (WM_APP + 4)   // hardware snapshot (re)built; refresh an open dialog
 #define ID_TRAY_EXIT            1001
 #define ID_TRAY_CONFIG          2001
 #define ID_TRAY_LOG             3001
@@ -358,6 +359,7 @@ HANDLE g_hSensorEvent = NULL;
 HANDLE g_hMutex = NULL;
 HANDLE g_hEngineEvent = NULL;   // wakes the LED engine thread on state/config changes
 HANDLE g_hHwReadyEvent = NULL;  // signaled once the engine has enumerated hardware
+HWND   g_hSettingsDlg = NULL;   // the open settings dialog, or NULL (UI thread only)
 
 // Hardware SDK State
 BSTR g_deviceName = NULL;
@@ -2107,6 +2109,8 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
     }
 
     case WM_INITDIALOG: {
+        g_hSettingsDlg = hDlg; // let the engine notify us when hardware becomes ready
+
         HWND hMainWnd = GetParent(hDlg);
         if (hMainWnd) {
             UnregisterHotKey(hMainWnd, 1);
@@ -2339,7 +2343,35 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         }
     } break;
 
+    case WM_APP_HWREADY: {
+        // Hardware just became available (SDK init/recovery finished). If we are on
+        // a profile tab and the device list is empty because the snapshot wasn't
+        // ready when the dialog opened, fill it now. Only touch the hardware combos
+        // (never the user's other in-progress edits), and only when empty.
+        if (s_currentTab >= 0 && s_currentTab <= 4) {
+            HWND hDev = GetDlgItem(hDlg, IDC_COMBO_DEVICE);
+            if (SendMessage(hDev, CB_GETCOUNT, 0, 0) == 0) {
+                PopulateDeviceList(hDlg);
+                wchar_t targetDevice[256]; int targetLed;
+                {
+                    std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+                    Config& p = g_Global.profiles[s_currentTab];
+                    wcscpy_s(targetDevice, p.targetDevice);
+                    targetLed = p.targetLedIndex;
+                }
+                int devCount = (int)SendMessage(hDev, CB_GETCOUNT, 0, 0);
+                for (int i = 0; i < devCount; i++) {
+                    wchar_t* dn = (wchar_t*)SendMessage(hDev, CB_GETITEMDATA, i, 0);
+                    if (dn && wcscmp(dn, targetDevice) == 0) { SendMessage(hDev, CB_SETCURSEL, i, 0); break; }
+                }
+                PopulateAreaList(hDlg, targetDevice, targetLed);
+            }
+        }
+        return (INT_PTR)TRUE;
+    }
+
     case WM_DESTROY:
+        g_hSettingsDlg = NULL;
         RegisterAppHotkeys(GetParent(hDlg));
         if (hBrushLow) { DeleteObject(hBrushLow); hBrushLow = NULL; }
         if (hBrushMed) { DeleteObject(hBrushMed); hBrushMed = NULL; }
@@ -2552,6 +2584,12 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         ShowLetsDanceNotification(hWnd);
         return 0;
 
+    case WM_APP_HWREADY:
+        // Hardware was (re)enumerated. If the settings dialog is open, let it fill
+        // in a device list that was empty because the snapshot wasn't ready yet.
+        if (g_hSettingsDlg) SendMessageW(g_hSettingsDlg, WM_APP_HWREADY, 0, 0);
+        return 0;
+
     case WM_APP_FATAL:
         MessageBoxW(NULL, (wParam == 1) ? T(STR_MSG_SDK_CRITICAL) : T(STR_MSG_SDK_FATAL),
             L"MysticFight", MB_OK | MB_ICONERROR);
@@ -2661,6 +2699,7 @@ static void EngineThread(HWND hWnd) {
         MSIHwardwareDetection();
         BuildHardwareSnapshot();
         SetEvent(g_hHwReadyEvent);
+        PostMessage(hWnd, WM_APP_HWREADY, 0, 0);
         PostMessage(hWnd, WM_APP_STATUS, 0, 0);
         PostMessage(hWnd, WM_APP_LETSDANCE, 0, 0);
     }
@@ -2737,6 +2776,7 @@ static void EngineThread(HWND hWnd) {
                         MSIHwardwareDetection();
                         BuildHardwareSnapshot();
                         SetEvent(g_hHwReadyEvent);
+                        PostMessage(hWnd, WM_APP_HWREADY, 0, 0);
                         g_Resetting_sdk = false;
                         g_resetCounter = 0;
                         g_pendingStyleChange = true;
