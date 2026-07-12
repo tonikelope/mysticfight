@@ -357,6 +357,14 @@ BSTR g_deviceName = NULL;
 HMODULE g_hLibrary = NULL;
 int g_totalLeds = 0;
 
+// Hardware snapshot: the SDK-owning thread enumerates all devices and their LED
+// areas here so the settings dialog can populate its combos WITHOUT calling the
+// MSI SDK from the UI thread (which would race with the engine thread).
+struct HwArea { DWORD index; std::wstring name; };
+struct HwDevice { std::wstring type; std::wstring friendly; std::vector<HwArea> areas; };
+std::vector<HwDevice> g_hwSnapshot;
+std::mutex g_hwMutex;
+
 ULONGLONG g_lastDataSourceSearchRetry = 0;
 
 // SDK AUTO RESET
@@ -1413,22 +1421,21 @@ static void SaveUIToProfile(HWND hDlg, int profileIndex) {
 // MSI SDK HARDWARE DETECTION & MANAGEMENT
 // ============================================================================
 
-static void PopulateAreaList(HWND hDlg, const wchar_t* deviceType, int targetLedIndex) {
-    HWND hComboArea = GetDlgItem(hDlg, IDC_COMBO_AREA);
-    SendMessage(hComboArea, CB_RESETCONTENT, 0, 0);
-
-    if (!deviceType || !lpMLAPI_GetLedInfo || !lpMLAPI_GetDeviceInfo) {
-        EnableWindow(hComboArea, FALSE);
-        return;
-    }
+/**
+ * Enumerates every MSI device and its LED areas into g_hwSnapshot.
+ * MUST be called only from the SDK-owning thread. The settings dialog reads the
+ * published snapshot (under g_hwMutex) instead of calling the SDK itself.
+ */
+static void BuildHardwareSnapshot() {
+    std::vector<HwDevice> snap;
 
     SAFEARRAY* pDevType = nullptr;
     SAFEARRAY* pLedCount = nullptr;
-    int currentDeviceLedCount = 0;
 
-    int hrInfo = lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount);
+    int hrInfo = MLAPI_ERROR;
+    if (lpMLAPI_GetDeviceInfo) hrInfo = lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount);
+
     if (hrInfo == MLAPI_OK && pDevType && pLedCount) {
-
         {
             SafeArrayScopedLock<BSTR> typeLock(pDevType);
             SafeArrayScopedLock<void> countLock(pLedCount);
@@ -1437,16 +1444,47 @@ static void PopulateAreaList(HWND hDlg, const wchar_t* deviceType, int targetLed
                 VARTYPE vtCount;
                 SafeArrayGetVartype(pLedCount, &vtCount);
 
-                long lBound, uBound;
+                long lBound = 0, uBound = 0;
                 SafeArrayGetLBound(pDevType, 1, &lBound);
                 SafeArrayGetUBound(pDevType, 1, &uBound);
-                long totalDevices = uBound - lBound + 1;
+                long count = uBound - lBound + 1;
 
-                for (long j = 0; j < totalDevices; j++) {
-                    if (wcscmp(typeLock.data[j], deviceType) == 0) {
-                        currentDeviceLedCount = GetIntFromSafeArray(countLock.data, vtCount, (int)j);
-                        break;
+                for (long i = 0; i < count; i++) {
+                    if (!typeLock.data[i]) continue;
+
+                    HwDevice dev;
+                    dev.type = typeLock.data[i];
+
+                    _bstr_t bstrType(typeLock.data[i]);
+                    BSTR friendlyBSTR = nullptr;
+                    if (lpMLAPI_GetDeviceNameEx) {
+                        int hrName = lpMLAPI_GetDeviceNameEx(bstrType, i, &friendlyBSTR);
+                        if (hrName != MLAPI_OK) LogSDKError("MLAPI_GetDeviceNameEx (Snapshot)", hrName);
                     }
+                    if (friendlyBSTR) { dev.friendly = friendlyBSTR; SysFreeString(friendlyBSTR); }
+                    if (dev.friendly.empty()) dev.friendly = dev.type;
+
+                    int ledCount = GetIntFromSafeArray(countLock.data, vtCount, (int)i);
+                    if (ledCount > 0 && lpMLAPI_GetLedInfo) {
+                        for (DWORD j = 0; j < (DWORD)ledCount; j++) {
+                            BSTR ledName = nullptr;
+                            SAFEARRAY* pStyles = nullptr;
+                            int hrLed = lpMLAPI_GetLedInfo(bstrType, j, &ledName, &pStyles);
+                            if (hrLed == MLAPI_OK) {
+                                HwArea area;
+                                area.index = j;
+                                area.name = (ledName && *ledName) ? ledName : L"";
+                                dev.areas.push_back(std::move(area));
+                                if (pStyles) SafeArrayDestroy(pStyles);
+                                if (ledName) SysFreeString(ledName);
+                            }
+                            else {
+                                LogSDKError("MLAPI_GetLedInfo (Snapshot)", hrLed);
+                            }
+                        }
+                    }
+
+                    snap.push_back(std::move(dev));
                 }
             }
         } // Locks released here
@@ -1455,31 +1493,36 @@ static void PopulateAreaList(HWND hDlg, const wchar_t* deviceType, int targetLed
         SafeArrayDestroy(pLedCount);
     }
     else if (hrInfo != MLAPI_OK) {
-        LogSDKError("MLAPI_GetDeviceInfo (PopulateAreaList)", hrInfo);
+        LogSDKError("MLAPI_GetDeviceInfo (Snapshot)", hrInfo);
     }
 
-    if (currentDeviceLedCount > 0) {
-        _bstr_t bstrDevice(deviceType);
+    {
+        std::lock_guard<std::mutex> lock(g_hwMutex);
+        g_hwSnapshot = std::move(snap);
+    }
+}
 
-        for (DWORD i = 0; i < (DWORD)currentDeviceLedCount; i++) {
-            BSTR ledName = nullptr;
-            SAFEARRAY* pStyles = nullptr;
+static void PopulateAreaList(HWND hDlg, const wchar_t* deviceType, int targetLedIndex) {
+    HWND hComboArea = GetDlgItem(hDlg, IDC_COMBO_AREA);
+    SendMessage(hComboArea, CB_RESETCONTENT, 0, 0);
 
-            int hrLed = lpMLAPI_GetLedInfo(bstrDevice, i, &ledName, &pStyles);
-            if (hrLed == MLAPI_OK) {
-                int idx = (int)SendMessageW(hComboArea, CB_ADDSTRING, 0, (LPARAM)(ledName ? ledName : T(STR_UNKNOWN_AREA)));
-                SendMessage(hComboArea, CB_SETITEMDATA, idx, (LPARAM)i);
+    if (!deviceType) { EnableWindow(hComboArea, FALSE); return; }
 
-                if (i == (DWORD)targetLedIndex) {
-                    SendMessage(hComboArea, CB_SETCURSEL, idx, 0);
-                }
+    // Read from the cached snapshot — no SDK calls on the UI thread.
+    std::vector<HwArea> areas;
+    {
+        std::lock_guard<std::mutex> lock(g_hwMutex);
+        for (const auto& d : g_hwSnapshot) {
+            if (d.type == deviceType) { areas = d.areas; break; }
+        }
+    }
 
-                if (pStyles) SafeArrayDestroy(pStyles);
-                if (ledName) SysFreeString(ledName);
-            }
-            else {
-                LogSDKError("MLAPI_GetLedInfo", hrLed);
-            }
+    for (const auto& area : areas) {
+        const wchar_t* name = area.name.empty() ? T(STR_UNKNOWN_AREA) : area.name.c_str();
+        int idx = (int)SendMessageW(hComboArea, CB_ADDSTRING, 0, (LPARAM)name);
+        if (idx != CB_ERR) {
+            SendMessage(hComboArea, CB_SETITEMDATA, idx, (LPARAM)area.index);
+            if ((int)area.index == targetLedIndex) SendMessage(hComboArea, CB_SETCURSEL, idx, 0);
         }
     }
 
@@ -1495,62 +1538,34 @@ static void PopulateDeviceList(HWND hDlg) {
     HWND hComboDev = GetDlgItem(hDlg, IDC_COMBO_DEVICE);
     ClearComboHeapData(hComboDev);
 
-    SAFEARRAY* pDevType = nullptr, * pLedCount = nullptr;
-
-    int hrInfo = MLAPI_ERROR;
-    if (lpMLAPI_GetDeviceInfo) {
-        hrInfo = lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount);
+    // Read from the cached snapshot — no SDK calls on the UI thread.
+    std::vector<HwDevice> devices;
+    {
+        std::lock_guard<std::mutex> lock(g_hwMutex);
+        devices = g_hwSnapshot;
     }
 
-    if (hrInfo == MLAPI_OK) {
-        {
-            SafeArrayScopedLock<BSTR> typeLock(pDevType);
-
-            if (typeLock.isLocked()) {
-                long lBound, uBound;
-                SafeArrayGetLBound(pDevType, 1, &lBound);
-                SafeArrayGetUBound(pDevType, 1, &uBound);
-                long count = uBound - lBound + 1;
-
-                for (long i = 0; i < count; i++) {
-                    _bstr_t bstrType(typeLock.data[i]);
-                    BSTR friendlyBSTR = nullptr;
-
-                    if (lpMLAPI_GetDeviceNameEx) {
-                        int hrName = lpMLAPI_GetDeviceNameEx(bstrType, i, &friendlyBSTR);
-                        if (hrName != MLAPI_OK) LogSDKError("MLAPI_GetDeviceNameEx", hrName);
-                    }
-
-                    _bstr_t bstrFriendly(friendlyBSTR, false);
-
-                    const wchar_t* displayName = (const wchar_t*)bstrFriendly;
-                    if (!displayName || !*displayName) displayName = (const wchar_t*)bstrType;
-
-                    wchar_t* pSafeStr = HeapDupString(bstrType);
-                    int idx = (int)SendMessageW(hComboDev, CB_ADDSTRING, 0, (LPARAM)displayName);
-
-                    if (idx != CB_ERR) {
-                        SendMessage(hComboDev, CB_SETITEMDATA, idx, (LPARAM)pSafeStr);
-                        if (wcscmp(bstrType, g_cfg.targetDevice) == 0)
-                            SendMessage(hComboDev, CB_SETCURSEL, idx, 0);
-                    }
-                    else {
-                        HeapFree(GetProcessHeap(), 0, pSafeStr);
-                    }
-                }
-            }
-        } // Locks released
-
-        SafeArrayDestroy(pDevType);
-        SafeArrayDestroy(pLedCount);
-
-        int finalCount = (int)SendMessage(hComboDev, CB_GETCOUNT, 0, 0);
-        EnableWindow(hComboDev, finalCount > 1);
+    wchar_t targetDevice[256];
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+        wcscpy_s(targetDevice, g_cfg.targetDevice);
     }
-    else {
-        if (hrInfo != MLAPI_ERROR) LogSDKError("MLAPI_GetDeviceInfo (PopulateDeviceList)", hrInfo);
-        EnableWindow(hComboDev, FALSE);
+
+    for (const auto& d : devices) {
+        const wchar_t* displayName = d.friendly.empty() ? d.type.c_str() : d.friendly.c_str();
+        wchar_t* pSafeStr = HeapDupString(d.type.c_str());
+        int idx = (int)SendMessageW(hComboDev, CB_ADDSTRING, 0, (LPARAM)displayName);
+        if (idx != CB_ERR) {
+            SendMessage(hComboDev, CB_SETITEMDATA, idx, (LPARAM)pSafeStr);
+            if (d.type == targetDevice) SendMessage(hComboDev, CB_SETCURSEL, idx, 0);
+        }
+        else {
+            HeapFree(GetProcessHeap(), 0, pSafeStr);
+        }
     }
+
+    int finalCount = (int)SendMessage(hComboDev, CB_GETCOUNT, 0, 0);
+    EnableWindow(hComboDev, finalCount > 1);
 }
 
 
@@ -2670,6 +2685,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             if (hrInit == MLAPI_OK) {
                 Log("[MysticFight] SDK Initialized successfully");
                 MSIHwardwareDetection();
+                BuildHardwareSnapshot();
             }
             else {
                 LogSDKError("MLAPI_Initialize (Startup)", hrInit);
@@ -2767,6 +2783,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                             if (hr == MLAPI_OK) {
                                 Log("[MysticFight] SDK Online.");
                                 MSIHwardwareDetection(); // Reload arrays
+                                BuildHardwareSnapshot();
                                 g_Resetting_sdk = false;
                                 g_resetCounter = 0;
                                 g_pendingStyleChange = true;
