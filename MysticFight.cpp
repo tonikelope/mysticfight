@@ -372,7 +372,7 @@ struct HwDevice { std::wstring type; std::wstring friendly; std::vector<HwArea> 
 std::vector<HwDevice> g_hwSnapshot;
 std::mutex g_hwMutex;
 
-ULONGLONG g_lastDataSourceSearchRetry = 0;
+std::atomic<ULONGLONG> g_lastDataSourceSearchRetry{ 0 };
 
 // SDK AUTO RESET
 std::atomic<bool> g_Resetting_sdk{ false };
@@ -2299,6 +2299,13 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                 g_Global = s_snapshot;
             }
             g_Language = s_langSnapshot; // revert any live language change
+            // The engine runs in parallel and may have latched an edited color
+            // that was committed live on a tab switch. Force it to re-render the
+            // restored config instead of waiting for the next temperature change.
+            g_ConfigVersion++;
+            forceLEDRefresh();
+            SetEvent(g_hEngineEvent);
+            SetEvent(g_hSensorEvent);
             EndDialog(hDlg, IDCANCEL);
             return TRUE;
         }
@@ -2553,12 +2560,19 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         return 0;
 
     case WM_QUERYENDSESSION:
-        if (!g_windows_shutdown) {
-            Log("[MysticFight] Windows Shutdown detected...");
-            g_windows_shutdown = true; g_Running = false;
+        // A query only: allow the session to end. Acting here (and returning FALSE)
+        // would veto Windows shutdown/restart.
+        return TRUE;
+
+    case WM_ENDSESSION:
+        if (wParam) { // the session is actually ending
+            if (!g_windows_shutdown) {
+                Log("[MysticFight] Windows Shutdown detected...");
+                g_windows_shutdown = true; g_Running = false;
+            }
+            PostQuitMessage(0);
         }
-        PostQuitMessage(0);
-        return FALSE;
+        return 0;
 
     case WM_CLOSE:
     case WM_DESTROY:
@@ -2639,9 +2653,11 @@ static void EngineThread(HWND hWnd) {
     _bstr_t bstrDevice(L"");
 
     // ---- Startup init ----
+    bool sdkOk = false; // whether the SDK is currently initialized (guards shutdown calls)
     int hrInit = lpMLAPI_Initialize();
     if (hrInit == MLAPI_OK) {
         Log("[MysticFight] SDK Initialized successfully");
+        sdkOk = true;
         MSIHwardwareDetection();
         BuildHardwareSnapshot();
         SetEvent(g_hHwReadyEvent);
@@ -2655,12 +2671,15 @@ static void EngineThread(HWND hWnd) {
             g_Resetting_sdk = true;
             g_ResetStage = 0;
             g_ResetTimer = GetTickCount64();
+            SetEvent(g_hHwReadyEvent); // unblock the UI's first-run wait
         }
         else {
-            PostMessage(hWnd, WM_APP_FATAL, 1, 0);
-            g_Running = false;
+            // Unrecoverable. Signal hw-ready FIRST (so a first-run UI stops waiting),
+            // then SEND (blocking) the fatal message so it is shown even if the UI
+            // has not yet reached its message loop. The handler sets g_Running=false.
+            SetEvent(g_hHwReadyEvent);
+            SendMessage(hWnd, WM_APP_FATAL, 1, 0);
         }
-        SetEvent(g_hHwReadyEvent); // never leave the UI's first-run wait hanging
     }
 
     // ---- Loop state ----
@@ -2714,6 +2733,7 @@ static void EngineThread(HWND hWnd) {
 
                     if (hr == MLAPI_OK) {
                         Log("[MysticFight] SDK Online.");
+                        sdkOk = true;
                         MSIHwardwareDetection();
                         BuildHardwareSnapshot();
                         SetEvent(g_hHwReadyEvent);
@@ -2728,8 +2748,9 @@ static void EngineThread(HWND hWnd) {
                         g_resetCounter++;
                         LogSDKError("MLAPI_Initialize", hr);
                         if (g_resetCounter >= SDK_MAX_RESETS) {
-                            PostMessage(hWnd, WM_APP_FATAL, 2, 0);
-                            g_Running = false;
+                            // UI is already pumping here; SEND so the box is shown and
+                            // the handler owns g_Running=false + PostQuitMessage.
+                            SendMessage(hWnd, WM_APP_FATAL, 2, 0);
                         }
                         else {
                             g_ResetStage = 0;
@@ -2844,7 +2865,9 @@ static void EngineThread(HWND hWnd) {
     }
 
     // ---- SDK shutdown (single owner) ----
-    if (lpMLAPI_SetLedStyle) {
+    // Only touch the SDK if it was ever initialized, so a failed-init exit does
+    // not spam the log with NOT_INITIALIZED errors.
+    if (sdkOk && lpMLAPI_SetLedStyle) {
         wchar_t dev[256]; int ledIdx;
         {
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
@@ -2856,7 +2879,7 @@ static void EngineThread(HWND hWnd) {
         if (hrStyle == MLAPI_OK) Log("[MysticFight] LEDs power off");
         else LogSDKError("MLAPI_SetLedStyle (Cleanup)", hrStyle);
     }
-    if (lpMLAPI_Release) {
+    if (sdkOk && lpMLAPI_Release) {
         int hrRelease = lpMLAPI_Release();
         if (hrRelease == MLAPI_OK) Log("[MysticFight] MSI SDK Released");
         else LogSDKError("MLAPI_Release", hrRelease);
