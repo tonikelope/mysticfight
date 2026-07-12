@@ -47,12 +47,14 @@
 #define IDC_COMBO_SENSOR_UPDATE         2112
 #define IDC_COMBO_LED_FPS               2113
 #define IDC_COMBO_SMOOTHING             2114
+#define IDC_COMBO_LANGUAGE              2115
 
 // Profile Groups (CRITICAL: Added IDC_GRP_THRESHOLDS)
 #define IDC_GRP_MSI                     2200
 #define IDC_GRP_SOURCE                  2201
 #define IDC_GRP_ADVANCED                2202
-#define IDC_GRP_THRESHOLDS              2203 
+#define IDC_GRP_THRESHOLDS              2203
+#define IDC_GRP_LANGUAGE                2204
 
 // Profile Labels (Static text needs IDs to be hidden)
 #define IDC_LBL_PROFILE_NAME            2300
@@ -72,6 +74,7 @@
 #define IDC_LBL_ADV_SENSOR              2314
 #define IDC_LBL_ADV_LED                 2315
 #define IDC_LBL_ADV_SMOOTH              2316
+#define IDC_LBL_LANGUAGE                2317
 
 // --- SHORTCUTS LAYER ---
 #define IDC_GRP_SHORTCUTS               3000
@@ -93,5 +96,7 @@
 #define IDC_ABOUT_ICON                  4001
 #define IDC_ABOUT_VERSION               4002
 #define IDC_GITHUB_LINK                 4003
+#define IDC_ABOUT_BY                    4004
+#define IDC_ABOUT_DESC                  4005
 
 #endif // RESOURCE_H

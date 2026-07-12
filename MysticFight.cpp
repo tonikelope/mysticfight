@@ -127,6 +127,105 @@ const wchar_t* DEF_COLOR_HIGH = L"#FF0000"; // Red
 const wchar_t* DEF_SERVER_URL = L"http://localhost:8085";
 const wchar_t* DEF_DEVICE_TYPE = L"MSI_MB";
 
+const int   DEF_LANGUAGE = 0; // 0 = English (default), 1 = Spanish
+
+
+// ============================================================================
+// INTERNATIONALIZATION (i18n)
+// ============================================================================
+
+enum Lang { LANG_EN = 0, LANG_ES = 1, LANG_COUNT };
+
+// Active UI language. Fast, lock-free source of truth for T() (mirrors the
+// persisted [Global] Language value). Default English.
+std::atomic<int> g_Language{ LANG_EN };
+
+enum StrId {
+    // Tab captions (profile tabs use user labels, not translated)
+    STR_TAB_SHORTCUTS, STR_TAB_ADVANCED,
+    // Profile layer
+    STR_LBL_PROFILE_NAME, STR_CHK_ACTIVE, STR_GRP_MSI, STR_LBL_DEVICE, STR_LBL_AREA,
+    STR_GRP_SOURCE, STR_LBL_TEMP_SENS, STR_LBL_WEB_SRV,
+    STR_GRP_THRESHOLDS, STR_LBL_LOW, STR_LBL_MED, STR_LBL_HIGH, STR_LBL_COLOR_HEX,
+    STR_BTN_RESET_DEFAULTS,
+    // Advanced layer
+    STR_GRP_ADVANCED, STR_LBL_ADV_SENSOR, STR_LBL_ADV_LED, STR_LBL_ADV_SMOOTH,
+    STR_GRP_LANGUAGE, STR_LBL_LANGUAGE,
+    // Shortcuts layer
+    STR_GRP_SHORTCUTS, STR_LBL_TOGGLE, STR_LBL_ACT_PROFILE, STR_BTN_RESET_HOTKEYS,
+    // Bottom bar
+    STR_CHK_STARTUP, STR_CHK_NOTIFICATIONS, STR_BTN_SAVE, STR_BTN_CANCEL,
+    // Smoothing combo
+    STR_SMOOTH_DISABLED, STR_SMOOTH_SLOW, STR_SMOOTH_NORMAL, STR_SMOOTH_FAST,
+    // Sensor / area combo
+    STR_LHM_NOT_FOUND, STR_UNKNOWN_AREA,
+    // Tray menu
+    STR_TRAY_LIGHTS, STR_TRAY_ACTIVE_PROFILE, STR_TRAY_SETTINGS, STR_TRAY_ABOUT, STR_TRAY_LOG, STR_TRAY_EXIT,
+    // Notifications
+    STR_NOTIF_LIGHTS_ON, STR_NOTIF_LIGHTS_OFF, STR_NOTIF_SWITCHED, STR_NOTIF_LETSDANCE,
+    // Message boxes
+    STR_MSG_DUP_HOTKEY, STR_MSG_ERROR_TITLE, STR_MSG_ALREADY_RUNNING, STR_MSG_INFO_TITLE,
+    STR_MSG_SDK_CRITICAL, STR_MSG_SDK_FATAL, STR_MSG_UNKNOWN_ERROR, STR_MSG_CRASH_TITLE,
+    // Tray tooltip status
+    STR_STATUS_RESTARTING, STR_STATUS_CONNECTING, STR_STATUS_INITIALIZING,
+    // About dialog
+    STR_ABOUT_BY, STR_ABOUT_DESC, STR_ABOUT_GITHUB, STR_ABOUT_CLOSE,
+    STR_COUNT
+};
+
+// Translation table. Row order MUST match the StrId enum above.
+static const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
+    // ---- English (LANG_EN) ----
+    {
+        L"Shortcuts", L"Advanced",
+        L"Profile Label:", L"Set as Active Profile", L"MSI Hardware Control", L"Device:", L"Area:",
+        L"LibreHardwareMonitor (Data source: HTTP)", L"Temperature Sensor:", L"Web Server:",
+        L"Temperature Thresholds and Colors", L"LOW:", L"MEDIUM:", L"HIGH:", L"Color (hex):",
+        L"Reset Defaults",
+        L"Performance & Advanced Settings", L"Sensor Update:", L"LED Refresh:", L"Smoothing:",
+        L"Language", L"Language:",
+        L"Global Hotkeys Configuration", L"Toggle ON/OFF:", L"Activate Profile %d:", L"Reset Hotkeys",
+        L"Run on Windows startup", L"Show notifications", L"Save", L"Cancel",
+        L"Disabled", L"Slow", L"Normal", L"Fast",
+        L"LHM Not Found (Port 8085)", L"Unknown Area",
+        L"Lights Enabled", L"Active Profile", L"Settings", L"About MysticFight", L"View Debug Log", L"Exit MysticFight",
+        L"Lights ON", L"Lights OUT", L"Switched to %ls", L"Let's dance baby",
+        L"Duplicate hotkey detected.", L"Error", L"MysticFight is already running.", L"Information",
+        L"MSI SDK Critical Error. Please check MSI Center installation.", L"MSI SDK Fatal Error. Please reinstall MSI Center.",
+        L"An unknown critical error occurred.", L"MysticFight Crash",
+        L"Restarting MSI Service...", L"Connecting to SDK...", L"Initializing...",
+        L"By tonikelope", L"MSI Mystic Light Temperature Profile Replacement", L"Visit GitHub Project", L"Close",
+    },
+    // ---- Spanish (LANG_ES) ----
+    {
+        L"Atajos", L"Avanzado",
+        L"Etiqueta del perfil:", L"Establecer como perfil activo", L"Control de hardware MSI", L"Dispositivo:", L"Área:",
+        L"LibreHardwareMonitor (Fuente de datos: HTTP)", L"Sensor de temperatura:", L"Servidor web:",
+        L"Umbrales de temperatura y colores", L"BAJA:", L"MEDIA:", L"ALTA:", L"Color (hex):",
+        L"Restaurar valores",
+        L"Rendimiento y ajustes avanzados", L"Actualización sensor:", L"Refresco LED:", L"Suavizado:",
+        L"Idioma", L"Idioma:",
+        L"Configuración de atajos globales", L"Activar/Desactivar:", L"Activar perfil %d:", L"Restaurar atajos",
+        L"Ejecutar al inicio de Windows", L"Mostrar notificaciones", L"Guardar", L"Cancelar",
+        L"Desactivado", L"Lento", L"Normal", L"Rápido",
+        L"LHM no encontrado (Puerto 8085)", L"Área desconocida",
+        L"Luces activadas", L"Perfil activo", L"Ajustes", L"Acerca de MysticFight", L"Ver registro de depuración", L"Salir de MysticFight",
+        L"Luces encendidas", L"Luces apagadas", L"Cambiado a %ls", L"A bailar, nena",
+        L"Atajo duplicado detectado.", L"Error", L"MysticFight ya se está ejecutando.", L"Información",
+        L"Error crítico del SDK de MSI. Comprueba la instalación de MSI Center.", L"Error fatal del SDK de MSI. Reinstala MSI Center.",
+        L"Se ha producido un error crítico desconocido.", L"Fallo de MysticFight",
+        L"Reiniciando servicio MSI...", L"Conectando al SDK...", L"Inicializando...",
+        L"Por tonikelope", L"Reemplazo de perfiles de temperatura para MSI Mystic Light", L"Visitar proyecto en GitHub", L"Cerrar",
+    },
+};
+
+// Returns the translated string for the active language.
+inline const wchar_t* T(StrId id) {
+    int l = g_Language.load();
+    if (l < 0 || l >= LANG_COUNT) l = LANG_EN;
+    return TR[l][id];
+}
+
 
 // ============================================================================
 // DATA STRUCTURES & ENUMS
@@ -171,9 +270,6 @@ struct Config {
     COLORREF colorLow, colorMed, colorHigh;
     wchar_t webServerUrl[256];
     wchar_t label[64];
-    int sensorUpdateMS;
-    int ledRefreshFPS;
-    float smoothingFactor;
 };
 
 struct AppHotkeys {
@@ -189,6 +285,10 @@ struct GlobalConfig {
     Config profiles[5];
     int activeProfileIndex;
     AppHotkeys hotkeys;
+    // Global performance/advanced settings (shared by all profiles)
+    int sensorUpdateMS;
+    int ledRefreshFPS;
+    float smoothingFactor;
 };
 
 
@@ -431,9 +531,7 @@ static void ToggleLights(HWND hWnd) {
     lastR = RGB_LED_REFRESH; // Force hardware sync
 
     // UI Notification
-    wchar_t msg[128];
-    swprintf_s(msg, L"Lights %ls", g_LedsEnabled ? L"ON" : L"OUT");
-    ShowNotification(hWnd, L"MysticFight", msg);
+    ShowNotification(hWnd, L"MysticFight", g_LedsEnabled ? T(STR_NOTIF_LIGHTS_ON) : T(STR_NOTIF_LIGHTS_OFF));
 
     UpdateStatus(hWnd, NULL);
 
@@ -763,6 +861,15 @@ static void SaveSettings() {
 
     WritePrivateProfileStringW(L"Global", L"ActiveProfile", std::to_wstring(g_Global.activeProfileIndex).c_str(), INI_FILE);
     WritePrivateProfileStringW(L"Global", L"Notifications", g_NotificationsEnabled ? L"1" : L"0", INI_FILE);
+    WritePrivateProfileStringW(L"Global", L"Language", std::to_wstring(g_Language.load()).c_str(), INI_FILE);
+
+    // Advanced settings are now global (shared by all profiles)
+    WritePrivateProfileStringW(L"Global", L"SensorUpdateMS", std::to_wstring(g_Global.sensorUpdateMS).c_str(), INI_FILE);
+    WritePrivateProfileStringW(L"Global", L"LedRefreshFPS", std::to_wstring(g_Global.ledRefreshFPS).c_str(), INI_FILE);
+    {
+        wchar_t sfBuf[32]; swprintf_s(sfBuf, L"%.3f", g_Global.smoothingFactor);
+        WritePrivateProfileStringW(L"Global", L"SmoothingFactor", sfBuf, INI_FILE);
+    }
 
     for (int i = 0; i < 5; i++) {
         std::wstring section = L"Settings";
@@ -771,11 +878,6 @@ static void SaveSettings() {
         Config& p = g_Global.profiles[i];
 
         WritePrivateProfileStringW(section.c_str(), L"Label", p.label, INI_FILE);
-        WritePrivateProfileStringW(section.c_str(), L"SensorUpdateMS", std::to_wstring(p.sensorUpdateMS).c_str(), INI_FILE);
-        WritePrivateProfileStringW(section.c_str(), L"LedRefreshFPS", std::to_wstring(p.ledRefreshFPS).c_str(), INI_FILE);
-
-        wchar_t sfBuf[32]; swprintf_s(sfBuf, L"%.3f", p.smoothingFactor);
-        WritePrivateProfileStringW(section.c_str(), L"SmoothingFactor", sfBuf, INI_FILE);
 
         WritePrivateProfileStringW(section.c_str(), L"SensorID", p.sensorID, INI_FILE);
         WritePrivateProfileStringW(section.c_str(), L"TargetDevice", p.targetDevice, INI_FILE);
@@ -899,6 +1001,24 @@ static void LoadSettings() {
 
     g_NotificationsEnabled = GetPrivateProfileIntW(L"Global", L"Notifications", 1, INI_FILE) != 0;
 
+    int lang = GetPrivateProfileIntW(L"Global", L"Language", DEF_LANGUAGE, INI_FILE);
+    if (lang < 0 || lang >= LANG_COUNT) lang = DEF_LANGUAGE;
+    g_Language = lang;
+
+    // Advanced settings are now global. For backward compatibility, fall back to
+    // the old per-profile values (profile 0) when the global keys are absent.
+    g_Global.sensorUpdateMS = GetPrivateProfileIntW(L"Global", L"SensorUpdateMS",
+        GetPrivateProfileIntW(L"Settings", L"SensorUpdateMS", DEF_SENSOR_UPDATE_MS, INI_FILE), INI_FILE);
+    g_Global.ledRefreshFPS = GetPrivateProfileIntW(L"Global", L"LedRefreshFPS",
+        GetPrivateProfileIntW(L"Settings", L"LedRefreshFPS", DEF_LED_REFRESH_FPS, INI_FILE), INI_FILE);
+    {
+        wchar_t sfOld[32]; GetPrivateProfileStringW(L"Settings", L"SmoothingFactor", L"", sfOld, 32, INI_FILE);
+        float defSmooth = (wcslen(sfOld) > 0) ? (float)_wtof(sfOld) : DEF_SMOOTHING_FACTOR;
+        wchar_t defStr[32]; swprintf_s(defStr, L"%.3f", defSmooth);
+        wchar_t sfBuf[32]; GetPrivateProfileStringW(L"Global", L"SmoothingFactor", defStr, sfBuf, 32, INI_FILE);
+        g_Global.smoothingFactor = (float)_wtof(sfBuf);
+    }
+
     for (int i = 0; i < 5; i++) {
         std::wstring section = L"Settings";
         if (i > 0) section += L"_" + std::to_wstring(i);
@@ -922,13 +1042,6 @@ static void LoadSettings() {
 
         wchar_t defLabel[64]; swprintf_s(defLabel, L"Profile %d", i + 1);
         GetPrivateProfileStringW(section.c_str(), L"Label", defLabel, p.label, 64, INI_FILE);
-
-        p.sensorUpdateMS = GetPrivateProfileIntW(section.c_str(), L"SensorUpdateMS", DEF_SENSOR_UPDATE_MS, INI_FILE);
-        p.ledRefreshFPS = GetPrivateProfileIntW(section.c_str(), L"LedRefreshFPS", DEF_LED_REFRESH_FPS, INI_FILE);
-
-        wchar_t sfBuf[32], sfDef[32]; swprintf_s(sfDef, L"%.3f", DEF_SMOOTHING_FACTOR);
-        GetPrivateProfileStringW(section.c_str(), L"SmoothingFactor", sfDef, sfBuf, 32, INI_FILE);
-        p.smoothingFactor = (float)_wtof(sfBuf);
     }
 
     if (wcslen(g_cfg.sensorID) == 0) { AutoSelectFirstSensor(); SaveSettings(); }
@@ -1139,7 +1252,7 @@ static void PopulateSensorList(HWND hDlg, const wchar_t* webServerUrl, const wch
 
     std::string jsonStr = FetchLHMJson(webServerUrl, (int)HTTP_FAST_TIMEOUT);
     if (jsonStr.empty()) {
-        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"LHM Not Found (Port 8085)");
+        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)T(STR_LHM_NOT_FOUND));
         EnableWindow(hCombo, FALSE);
         return;
     }
@@ -1219,6 +1332,14 @@ static void LoadProfileToUI(HWND hDlg, int profileIndex, int tempActiveIndex) {
     PopulateAreaList(hDlg, p.targetDevice, p.targetLedIndex);
     PopulateSensorList(hDlg, p.webServerUrl, p.sensorID);
 
+    CheckDlgButton(hDlg, IDC_CHK_ACTIVE_PROFILE, (profileIndex == tempActiveIndex) ? BST_CHECKED : BST_UNCHECKED);
+    InvalidateRect(hDlg, NULL, TRUE);
+}
+
+/**
+ * Loads the global advanced settings + language into the Advanced tab controls
+ */
+static void LoadGlobalAdvancedToUI(HWND hDlg) {
     auto SetComboByVal = [&](int id, int val, std::vector<int> mapping) {
         HWND hC = GetDlgItem(hDlg, id);
         for (size_t i = 0; i < mapping.size(); ++i) {
@@ -1227,17 +1348,44 @@ static void LoadProfileToUI(HWND hDlg, int profileIndex, int tempActiveIndex) {
         SendMessage(hC, CB_SETCURSEL, 0, 0);
         };
 
-    SetComboByVal(IDC_COMBO_SENSOR_UPDATE, p.sensorUpdateMS, { 250, 500, 1000 });
-    SetComboByVal(IDC_COMBO_LED_FPS, p.ledRefreshFPS, { 25, 20, 15 });
+    SetComboByVal(IDC_COMBO_SENSOR_UPDATE, g_Global.sensorUpdateMS, { 250, 500, 1000 });
+    SetComboByVal(IDC_COMBO_LED_FPS, g_Global.ledRefreshFPS, { 25, 20, 15 });
 
     HWND hSmooth = GetDlgItem(hDlg, IDC_COMBO_SMOOTHING);
-    if (p.smoothingFactor > 0.9f) SendMessage(hSmooth, CB_SETCURSEL, 0, 0);
-    else if (p.smoothingFactor < 0.1f) SendMessage(hSmooth, CB_SETCURSEL, 1, 0);
-    else if (p.smoothingFactor > 0.2f) SendMessage(hSmooth, CB_SETCURSEL, 3, 0);
+    if (g_Global.smoothingFactor > 0.9f) SendMessage(hSmooth, CB_SETCURSEL, 0, 0);
+    else if (g_Global.smoothingFactor < 0.1f) SendMessage(hSmooth, CB_SETCURSEL, 1, 0);
+    else if (g_Global.smoothingFactor > 0.2f) SendMessage(hSmooth, CB_SETCURSEL, 3, 0);
     else SendMessage(hSmooth, CB_SETCURSEL, 2, 0);
 
-    CheckDlgButton(hDlg, IDC_CHK_ACTIVE_PROFILE, (profileIndex == tempActiveIndex) ? BST_CHECKED : BST_UNCHECKED);
-    InvalidateRect(hDlg, NULL, TRUE);
+    SendMessage(GetDlgItem(hDlg, IDC_COMBO_LANGUAGE), CB_SETCURSEL, g_Language.load(), 0);
+}
+
+/**
+ * Reads the Advanced tab controls back into the global advanced settings + language.
+ * Also mirrors the chosen language into g_Language for immediate effect.
+ */
+static void SaveGlobalAdvancedFromUI(HWND hDlg) {
+    std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+
+    int idxSensor = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE), CB_GETCURSEL, 0, 0);
+    if (idxSensor == 0) g_Global.sensorUpdateMS = 250;
+    else if (idxSensor == 2) g_Global.sensorUpdateMS = 1000;
+    else g_Global.sensorUpdateMS = 500;
+
+    int idxFPS = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_LED_FPS), CB_GETCURSEL, 0, 0);
+    if (idxFPS == 1) g_Global.ledRefreshFPS = 20;
+    else if (idxFPS == 2) g_Global.ledRefreshFPS = 15;
+    else g_Global.ledRefreshFPS = 25;
+
+    int idxSmooth = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_GETCURSEL, 0, 0);
+    if (idxSmooth == 0) g_Global.smoothingFactor = 1.0f;
+    else if (idxSmooth == 1) g_Global.smoothingFactor = 0.05f;
+    else if (idxSmooth == 3) g_Global.smoothingFactor = 0.4f;
+    else g_Global.smoothingFactor = 0.15f;
+
+    int idxLang = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_LANGUAGE), CB_GETCURSEL, 0, 0);
+    if (idxLang < 0 || idxLang >= LANG_COUNT) idxLang = LANG_EN;
+    g_Language = idxLang;
 }
 
 /**
@@ -1280,22 +1428,6 @@ static void SaveUIToProfile(HWND hDlg, int profileIndex) {
     }
 
     GetDlgItemTextW(hDlg, IDC_EDIT_LABEL, p.label, 64);
-
-    int idxSensor = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE), CB_GETCURSEL, 0, 0);
-    if (idxSensor == 0) p.sensorUpdateMS = 250;
-    else if (idxSensor == 2) p.sensorUpdateMS = 1000;
-    else p.sensorUpdateMS = 500;
-
-    int idxFPS = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_LED_FPS), CB_GETCURSEL, 0, 0);
-    if (idxFPS == 1) p.ledRefreshFPS = 20;
-    else if (idxFPS == 2) p.ledRefreshFPS = 15;
-    else p.ledRefreshFPS = 25;
-
-    int idxSmooth = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_GETCURSEL, 0, 0);
-    if (idxSmooth == 0) p.smoothingFactor = 1.0f;
-    else if (idxSmooth == 1) p.smoothingFactor = 0.05f;
-    else if (idxSmooth == 3) p.smoothingFactor = 0.4f;
-    else p.smoothingFactor = 0.15f;
 }
 
 
@@ -1357,7 +1489,7 @@ static void PopulateAreaList(HWND hDlg, const wchar_t* deviceType, int targetLed
 
             int hrLed = lpMLAPI_GetLedInfo(bstrDevice, i, &ledName, &pStyles);
             if (hrLed == MLAPI_OK) {
-                int idx = (int)SendMessageW(hComboArea, CB_ADDSTRING, 0, (LPARAM)(ledName ? ledName : L"Unknown Area"));
+                int idx = (int)SendMessageW(hComboArea, CB_ADDSTRING, 0, (LPARAM)(ledName ? ledName : T(STR_UNKNOWN_AREA)));
                 SendMessage(hComboArea, CB_SETITEMDATA, idx, (LPARAM)i);
 
                 if (i == (DWORD)targetLedIndex) {
@@ -1580,7 +1712,7 @@ static void SensorThread() {
 
         if (g_LedsEnabled) {
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-            waitMs = (DWORD)g_cfg.sensorUpdateMS;
+            waitMs = (DWORD)g_Global.sensorUpdateMS;
         }
 
         WaitForSingleObject(g_hSensorEvent, waitMs);
@@ -1713,7 +1845,7 @@ static void SwitchActiveProfile(HWND hWnd, int index) {
     forceLEDRefresh();
 
     wchar_t msg[128];
-    swprintf_s(msg, L"Switched to %ls", g_cfg.label);
+    swprintf_s(msg, T(STR_NOTIF_SWITCHED), g_cfg.label);
     ShowNotification(hWnd, L"MysticFight", msg);
 }
 
@@ -1801,22 +1933,29 @@ LRESULT CALLBACK ColorEditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
     return CallWindowProc(oldEditProc, hWnd, uMsg, wParam, lParam);
 }
 
-/**
- * Swaps UI visibility between Profile settings and Global Shortcuts
- */
-static void ToggleSettingsLayer(HWND hDlg, bool showShortcuts) {
-    int cmdShowProfiles = showShortcuts ? SW_HIDE : SW_SHOW;
-    int cmdShowShortcuts = showShortcuts ? SW_SHOW : SW_HIDE;
+// Settings dialog layers, selected by the active tab.
+enum DlgLayer { LAYER_PROFILE = 0, LAYER_SHORTCUTS = 1, LAYER_ADVANCED = 2 };
 
+// Returns the layer that the given tab index belongs to (tabs 0-4 = profiles,
+// tab 5 = shortcuts, tab 6 = advanced).
+static DlgLayer LayerForTab(int tab) {
+    if (tab == 5) return LAYER_SHORTCUTS;
+    if (tab == 6) return LAYER_ADVANCED;
+    return LAYER_PROFILE;
+}
+
+/**
+ * Swaps UI visibility between the Profile, Shortcuts and Advanced layers
+ */
+static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
     const int profileCtrls[] = {
-        IDC_GRP_MSI, IDC_GRP_SOURCE, IDC_GRP_THRESHOLDS, IDC_GRP_ADVANCED,
+        IDC_GRP_MSI, IDC_GRP_SOURCE, IDC_GRP_THRESHOLDS,
         IDC_EDIT_LABEL, IDC_CHK_ACTIVE_PROFILE, IDC_COMBO_DEVICE, IDC_COMBO_AREA,
         IDC_SENSOR_ID, IDC_EDIT_SERVER, IDC_TEMP_LOW, IDC_TEMP_MED, IDC_TEMP_HIGH,
         IDC_HEX_LOW, IDC_HEX_MED, IDC_HEX_HIGH, IDC_BTN_RESET,
-        IDC_COMBO_SENSOR_UPDATE, IDC_COMBO_LED_FPS, IDC_COMBO_SMOOTHING, IDC_BTN_RESET_ADVANCED,
         IDC_LBL_PROFILE_NAME, IDC_LBL_DEVICE, IDC_LBL_AREA, IDC_LBL_TEMP_SENS, IDC_LBL_WEB_SRV,
         IDC_LBL_LOW, IDC_LBL_MED, IDC_LBL_HIGH, IDC_LBL_C1, IDC_LBL_C2, IDC_LBL_C3,
-        IDC_LBL_HEX1, IDC_LBL_HEX2, IDC_LBL_HEX3, IDC_LBL_ADV_SENSOR, IDC_LBL_ADV_LED, IDC_LBL_ADV_SMOOTH
+        IDC_LBL_HEX1, IDC_LBL_HEX2, IDC_LBL_HEX3
     };
 
     const int shortcutCtrls[] = {
@@ -1824,8 +1963,81 @@ static void ToggleSettingsLayer(HWND hDlg, bool showShortcuts) {
         IDC_LBL_P2, IDC_HK_P2, IDC_LBL_P3, IDC_HK_P3, IDC_LBL_P4, IDC_HK_P4, IDC_LBL_P5, IDC_HK_P5, IDC_BTN_RESET_SHORTCUTS
     };
 
-    for (int id : profileCtrls) { HWND hCtrl = GetDlgItem(hDlg, id); if (hCtrl) ShowWindow(hCtrl, cmdShowProfiles); }
-    for (int id : shortcutCtrls) { HWND hCtrl = GetDlgItem(hDlg, id); if (hCtrl) ShowWindow(hCtrl, cmdShowShortcuts); }
+    const int advancedCtrls[] = {
+        IDC_GRP_ADVANCED, IDC_LBL_ADV_SENSOR, IDC_COMBO_SENSOR_UPDATE,
+        IDC_LBL_ADV_LED, IDC_COMBO_LED_FPS, IDC_LBL_ADV_SMOOTH, IDC_COMBO_SMOOTHING,
+        IDC_BTN_RESET_ADVANCED, IDC_GRP_LANGUAGE, IDC_LBL_LANGUAGE, IDC_COMBO_LANGUAGE
+    };
+
+    for (int id : profileCtrls) { HWND h = GetDlgItem(hDlg, id); if (h) ShowWindow(h, layer == LAYER_PROFILE ? SW_SHOW : SW_HIDE); }
+    for (int id : shortcutCtrls) { HWND h = GetDlgItem(hDlg, id); if (h) ShowWindow(h, layer == LAYER_SHORTCUTS ? SW_SHOW : SW_HIDE); }
+    for (int id : advancedCtrls) { HWND h = GetDlgItem(hDlg, id); if (h) ShowWindow(h, layer == LAYER_ADVANCED ? SW_SHOW : SW_HIDE); }
+}
+
+/**
+ * Applies the active-language strings to every static/label/button in the
+ * settings dialog. Safe to call at any time (also used for live switching).
+ */
+static void ApplyDialogTranslations(HWND hDlg) {
+    // Profile layer
+    SetDlgItemTextW(hDlg, IDC_LBL_PROFILE_NAME, T(STR_LBL_PROFILE_NAME));
+    SetDlgItemTextW(hDlg, IDC_CHK_ACTIVE_PROFILE, T(STR_CHK_ACTIVE));
+    SetDlgItemTextW(hDlg, IDC_GRP_MSI, T(STR_GRP_MSI));
+    SetDlgItemTextW(hDlg, IDC_LBL_DEVICE, T(STR_LBL_DEVICE));
+    SetDlgItemTextW(hDlg, IDC_LBL_AREA, T(STR_LBL_AREA));
+    SetDlgItemTextW(hDlg, IDC_GRP_SOURCE, T(STR_GRP_SOURCE));
+    SetDlgItemTextW(hDlg, IDC_LBL_TEMP_SENS, T(STR_LBL_TEMP_SENS));
+    SetDlgItemTextW(hDlg, IDC_LBL_WEB_SRV, T(STR_LBL_WEB_SRV));
+    SetDlgItemTextW(hDlg, IDC_GRP_THRESHOLDS, T(STR_GRP_THRESHOLDS));
+    SetDlgItemTextW(hDlg, IDC_LBL_LOW, T(STR_LBL_LOW));
+    SetDlgItemTextW(hDlg, IDC_LBL_MED, T(STR_LBL_MED));
+    SetDlgItemTextW(hDlg, IDC_LBL_HIGH, T(STR_LBL_HIGH));
+    SetDlgItemTextW(hDlg, IDC_LBL_HEX1, T(STR_LBL_COLOR_HEX));
+    SetDlgItemTextW(hDlg, IDC_LBL_HEX2, T(STR_LBL_COLOR_HEX));
+    SetDlgItemTextW(hDlg, IDC_LBL_HEX3, T(STR_LBL_COLOR_HEX));
+    SetDlgItemTextW(hDlg, IDC_BTN_RESET, T(STR_BTN_RESET_DEFAULTS));
+
+    // Advanced layer
+    SetDlgItemTextW(hDlg, IDC_GRP_ADVANCED, T(STR_GRP_ADVANCED));
+    SetDlgItemTextW(hDlg, IDC_LBL_ADV_SENSOR, T(STR_LBL_ADV_SENSOR));
+    SetDlgItemTextW(hDlg, IDC_LBL_ADV_LED, T(STR_LBL_ADV_LED));
+    SetDlgItemTextW(hDlg, IDC_LBL_ADV_SMOOTH, T(STR_LBL_ADV_SMOOTH));
+    SetDlgItemTextW(hDlg, IDC_BTN_RESET_ADVANCED, T(STR_BTN_RESET_DEFAULTS));
+    SetDlgItemTextW(hDlg, IDC_GRP_LANGUAGE, T(STR_GRP_LANGUAGE));
+    SetDlgItemTextW(hDlg, IDC_LBL_LANGUAGE, T(STR_LBL_LANGUAGE));
+
+    // Shortcuts layer
+    SetDlgItemTextW(hDlg, IDC_GRP_SHORTCUTS, T(STR_GRP_SHORTCUTS));
+    SetDlgItemTextW(hDlg, IDC_LBL_TOGGLE, T(STR_LBL_TOGGLE));
+    for (int i = 0; i < 5; i++) {
+        wchar_t buf[64]; swprintf_s(buf, T(STR_LBL_ACT_PROFILE), i + 1);
+        SetDlgItemTextW(hDlg, IDC_LBL_P1 + i * 2, buf); // labels are every other ID
+    }
+    SetDlgItemTextW(hDlg, IDC_BTN_RESET_SHORTCUTS, T(STR_BTN_RESET_HOTKEYS));
+
+    // Bottom bar
+    SetDlgItemTextW(hDlg, IDC_CHK_STARTUP, T(STR_CHK_STARTUP));
+    SetDlgItemTextW(hDlg, IDC_CHK_NOTIFICATIONS, T(STR_CHK_NOTIFICATIONS));
+    SetDlgItemTextW(hDlg, IDOK, T(STR_BTN_SAVE));
+    SetDlgItemTextW(hDlg, IDCANCEL, T(STR_BTN_CANCEL));
+
+    // Non-profile tab captions (profile tabs keep their user labels)
+    HWND hTab = GetDlgItem(hDlg, IDC_TAB_PROFILES);
+    if (hTab) {
+        TCITEMW tie = { 0 }; tie.mask = TCIF_TEXT;
+        tie.pszText = (LPWSTR)T(STR_TAB_SHORTCUTS); SendMessage(hTab, TCM_SETITEMW, 5, (LPARAM)&tie);
+        tie.pszText = (LPWSTR)T(STR_TAB_ADVANCED);  SendMessage(hTab, TCM_SETITEMW, 6, (LPARAM)&tie);
+    }
+
+    // Smoothing combo values are words -> translate (preserving selection)
+    HWND hSmooth = GetDlgItem(hDlg, IDC_COMBO_SMOOTHING);
+    int sel = (int)SendMessage(hSmooth, CB_GETCURSEL, 0, 0);
+    SendMessage(hSmooth, CB_RESETCONTENT, 0, 0);
+    SendMessage(hSmooth, CB_ADDSTRING, 0, (LPARAM)T(STR_SMOOTH_DISABLED));
+    SendMessage(hSmooth, CB_ADDSTRING, 0, (LPARAM)T(STR_SMOOTH_SLOW));
+    SendMessage(hSmooth, CB_ADDSTRING, 0, (LPARAM)T(STR_SMOOTH_NORMAL));
+    SendMessage(hSmooth, CB_ADDSTRING, 0, (LPARAM)T(STR_SMOOTH_FAST));
+    if (sel >= 0) SendMessage(hSmooth, CB_SETCURSEL, sel, 0);
 }
 
 static bool ValidateHotkeys(HWND hDlg) {
@@ -1841,7 +2053,7 @@ static bool ValidateHotkeys(HWND hDlg) {
         if (LOBYTE(keys[i]) == 0) continue;
         for (int j = i + 1; j < 6; j++) {
             if (keys[i] == keys[j]) {
-                MessageBoxW(hDlg, L"Duplicate hotkey detected.", L"Error", MB_ICONWARNING);
+                MessageBoxW(hDlg, T(STR_MSG_DUP_HOTKEY), T(STR_MSG_ERROR_TITLE), MB_ICONWARNING);
                 return false;
             }
         }
@@ -1865,6 +2077,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
     static HBRUSH hBrushLow = NULL, hBrushMed = NULL, hBrushHigh = NULL;
     static int s_currentTab = 0;
     static int s_tempActiveIndex = 0;
+    static int s_langSnapshot = LANG_EN;
     static GlobalConfig s_snapshot;
 
     switch (message) {
@@ -1922,8 +2135,10 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                 tie.pszText = g_Global.profiles[i].label;
                 SendMessage(hTab, TCM_INSERTITEMW, i, (LPARAM)&tie);
             }
-            tie.pszText = (LPWSTR)L"Shortcuts";
+            tie.pszText = (LPWSTR)T(STR_TAB_SHORTCUTS);
             SendMessage(hTab, TCM_INSERTITEMW, 5, (LPARAM)&tie);
+            tie.pszText = (LPWSTR)T(STR_TAB_ADVANCED);
+            SendMessage(hTab, TCM_INSERTITEMW, 6, (LPARAM)&tie);
         }
 
         HWND hSensorUpdate = GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE);
@@ -1936,11 +2151,12 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         SendMessage(hLedFPS, CB_ADDSTRING, 0, (LPARAM)L"20 FPS");
         SendMessage(hLedFPS, CB_ADDSTRING, 0, (LPARAM)L"15 FPS");
 
-        HWND hSmoothing = GetDlgItem(hDlg, IDC_COMBO_SMOOTHING);
-        SendMessage(hSmoothing, CB_ADDSTRING, 0, (LPARAM)L"Disabled");
-        SendMessage(hSmoothing, CB_ADDSTRING, 0, (LPARAM)L"Slow");
-        SendMessage(hSmoothing, CB_ADDSTRING, 0, (LPARAM)L"Normal");
-        SendMessage(hSmoothing, CB_ADDSTRING, 0, (LPARAM)L"Fast");
+        // Smoothing combo is filled by ApplyDialogTranslations (its values are words).
+
+        // Language combo: names are shown in their own language (not translated).
+        HWND hLang = GetDlgItem(hDlg, IDC_COMBO_LANGUAGE);
+        SendMessage(hLang, CB_ADDSTRING, 0, (LPARAM)L"English");
+        SendMessage(hLang, CB_ADDSTRING, 0, (LPARAM)L"Español");
 
         PopulateDeviceList(hDlg);
 
@@ -1951,14 +2167,18 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         SendDlgItemMessage(hDlg, IDC_HK_P4, HKM_SETHOTKEY, g_Global.hotkeys.profile4, 0);
         SendDlgItemMessage(hDlg, IDC_HK_P5, HKM_SETHOTKEY, g_Global.hotkeys.profile5, 0);
 
+        // Apply translations (also fills the smoothing combo), then load the
+        // global advanced + language selections. Snapshot language for Cancel.
+        ApplyDialogTranslations(hDlg);
+        LoadGlobalAdvancedToUI(hDlg);
+        s_langSnapshot = g_Language.load();
+
         s_currentTab = g_Global.activeProfileIndex;
         TabCtrl_SetCurSel(hTab, s_currentTab);
 
-        if (s_currentTab == 5) ToggleSettingsLayer(hDlg, true);
-        else {
-            ToggleSettingsLayer(hDlg, false);
+        ShowSettingsLayer(hDlg, LayerForTab(s_currentTab));
+        if (LayerForTab(s_currentTab) == LAYER_PROFILE)
             LoadProfileToUI(hDlg, s_currentTab, s_tempActiveIndex);
-        }
 
         oldEditProc = (WNDPROC)SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_LOW), GWLP_WNDPROC, (LONG_PTR)ColorEditSubclassProc);
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_MED), GWLP_WNDPROC, (LONG_PTR)ColorEditSubclassProc);
@@ -1975,6 +2195,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         if (pnm->idFrom == IDC_TAB_PROFILES && pnm->code == TCN_SELCHANGE) {
             int newTab = TabCtrl_GetCurSel(pnm->hwndFrom);
 
+            // Persist the tab we are leaving
             if (s_currentTab >= 0 && s_currentTab <= 4) SaveUIToProfile(hDlg, s_currentTab);
             else if (s_currentTab == 5) {
                 if (!ValidateHotkeys(hDlg)) {
@@ -1983,14 +2204,13 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                 }
                 SaveHotkeysFromUI(hDlg);
             }
+            else if (s_currentTab == 6) SaveGlobalAdvancedFromUI(hDlg);
 
             s_currentTab = newTab;
 
-            if (s_currentTab == 5) ToggleSettingsLayer(hDlg, true);
-            else {
-                ToggleSettingsLayer(hDlg, false);
+            ShowSettingsLayer(hDlg, LayerForTab(s_currentTab));
+            if (LayerForTab(s_currentTab) == LAYER_PROFILE)
                 LoadProfileToUI(hDlg, s_currentTab, s_tempActiveIndex);
-            }
         }
         break;
     }
@@ -2014,6 +2234,14 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             int idx = (int)SendMessage((HWND)lParam, CB_GETCURSEL, 0, 0);
             wchar_t* devType = (wchar_t*)SendMessage((HWND)lParam, CB_GETITEMDATA, idx, 0);
             if (devType) PopulateAreaList(hDlg, devType, 0);
+            return TRUE;
+        }
+
+        if (id == IDC_COMBO_LANGUAGE && code == CBN_SELCHANGE) {
+            int idxLang = (int)SendMessage((HWND)lParam, CB_GETCURSEL, 0, 0);
+            if (idxLang < 0 || idxLang >= LANG_COUNT) idxLang = LANG_EN;
+            g_Language = idxLang;
+            ApplyDialogTranslations(hDlg); // live language switch
             return TRUE;
         }
 
@@ -2051,6 +2279,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
             if (s_currentTab <= 4) SaveUIToProfile(hDlg, s_currentTab);
             SaveHotkeysFromUI(hDlg);
+            SaveGlobalAdvancedFromUI(hDlg);
 
             SetStartupTask(IsDlgButtonChecked(hDlg, IDC_CHK_STARTUP) == BST_CHECKED);
             g_NotificationsEnabled = (IsDlgButtonChecked(hDlg, IDC_CHK_NOTIFICATIONS) == BST_CHECKED);
@@ -2068,6 +2297,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                 std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
                 g_Global = s_snapshot;
             }
+            g_Language = s_langSnapshot; // revert any live language change
             EndDialog(hDlg, IDCANCEL);
             return TRUE;
         }
@@ -2137,6 +2367,11 @@ INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
 
         std::wstring versionStr = L"MysticFight " + std::wstring(APP_VERSION);
         SetDlgItemTextW(hDlg, IDC_ABOUT_VERSION, versionStr.c_str());
+
+        SetDlgItemTextW(hDlg, IDC_ABOUT_BY, T(STR_ABOUT_BY));
+        SetDlgItemTextW(hDlg, IDC_ABOUT_DESC, T(STR_ABOUT_DESC));
+        SetDlgItemTextW(hDlg, IDC_GITHUB_LINK, T(STR_ABOUT_GITHUB));
+        SetDlgItemTextW(hDlg, IDOK, T(STR_ABOUT_CLOSE));
 
         HFONT hFont = (HFONT)SendMessage(GetDlgItem(hDlg, IDC_GITHUB_LINK), WM_GETFONT, 0, 0);
         LOGFONT lf; GetObject(hFont, sizeof(LOGFONT), &lf);
@@ -2254,7 +2489,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             if (hMenu) {
 
                 UINT toggleFlags = MF_STRING | (g_LedsEnabled ? MF_CHECKED : MF_UNCHECKED);
-                AppendMenuW(hMenu, toggleFlags, ID_TRAY_TOGGLE_LEDS, L"Lights Enabled");
+                AppendMenuW(hMenu, toggleFlags, ID_TRAY_TOGGLE_LEDS, T(STR_TRAY_LIGHTS));
                 AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
 
                 // Profile Submenu Creation
@@ -2264,13 +2499,13 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                     AppendMenuW(hProfileMenu, flags, ID_TRAY_PROFILE_BASE + i, g_Global.profiles[i].label);
                 }
 
-                AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hProfileMenu, L"Active Profile");
+                AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hProfileMenu, T(STR_TRAY_ACTIVE_PROFILE));
                 AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-                InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, ID_TRAY_CONFIG, L"Settings");
-                InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, ID_TRAY_ABOUT, L"About MysticFight");
-                InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, ID_TRAY_LOG, L"View Debug Log");
+                InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, ID_TRAY_CONFIG, T(STR_TRAY_SETTINGS));
+                InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, ID_TRAY_ABOUT, T(STR_TRAY_ABOUT));
+                InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, ID_TRAY_LOG, T(STR_TRAY_LOG));
                 InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
-                InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, ID_TRAY_EXIT, L"Exit MysticFight");
+                InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, ID_TRAY_EXIT, T(STR_TRAY_EXIT));
 
                 SetForegroundWindow(hWnd);
                 TrackPopupMenu(hMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, curPoint.x, curPoint.y, 0, hWnd, NULL);
@@ -2377,7 +2612,7 @@ static bool SafeSDKCall(int result, const char* funcName) {
 static void ShowLetsDanceNotification(HWND hWnd) {
     wchar_t startTitle[128];
     swprintf_s(startTitle, L"MysticFight %ls (by tonikelope)", APP_VERSION);
-    ShowNotification(hWnd, startTitle, L"Let's dance baby");
+    ShowNotification(hWnd, startTitle, T(STR_NOTIF_LETSDANCE));
 }
 
 // ============================================================================
@@ -2397,7 +2632,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     g_hMutex = CreateMutexW(NULL, TRUE, L"Global\\MysticFight_Unique_Mutex");
     if (g_hMutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS) {
         if (g_hMutex) {
-            MessageBoxW(NULL, L"MysticFight is already running.", L"Information", MB_OK | MB_ICONINFORMATION);
+            MessageBoxW(NULL, T(STR_MSG_ALREADY_RUNNING), T(STR_MSG_INFO_TITLE), MB_OK | MB_ICONINFORMATION);
             CloseHandle(g_hMutex);
         }
         CoUninitialize();
@@ -2445,7 +2680,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             // Tray Icon Setup
             NOTIFYICONDATAW nid = { sizeof(NOTIFYICONDATAW), hWnd, 1, NIF_ICON | NIF_MESSAGE | NIF_TIP, WM_TRAYICON };
             nid.hIcon = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_ICON1), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
-            swprintf_s(nid.szTip, L"MysticFight %ls - Initializing...", APP_VERSION);
+            swprintf_s(nid.szTip, L"MysticFight %ls - %ls", APP_VERSION, T(STR_STATUS_INITIALIZING));
             Shell_NotifyIconW(NIM_ADD, &nid);
 
             // Init Engine
@@ -2468,7 +2703,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     g_ResetTimer = GetTickCount64();
                 }
                 else {
-                    MessageBoxW(NULL, L"MSI SDK Critical Error. Please check MSI Center installation.", L"MysticFight", MB_OK | MB_ICONERROR);
+                    MessageBoxW(NULL, T(STR_MSG_SDK_CRITICAL), L"MysticFight", MB_OK | MB_ICONERROR);
                     throw std::runtime_error("MSI SDK Initializing failed");
                 }
             }
@@ -2508,9 +2743,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 if (!g_Running) break;
 
                 Config cfgLocal;
+                int ledRefreshFPS;
+                float smoothingFactor;
                 {
                     std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
                     cfgLocal = g_cfg;
+                    ledRefreshFPS = g_Global.ledRefreshFPS;
+                    smoothingFactor = g_Global.smoothingFactor;
                 }
 
                 if (g_ConfigVersion != lastProcessedVersion) {
@@ -2530,7 +2769,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                         switch (g_ResetStage) {
                         case 0:
                             Log("[MysticFight] Restarting MSI Service...");
-                            UpdateStatus(hWnd, L"Restarting MSI Service...");
+                            UpdateStatus(hWnd, T(STR_STATUS_RESTARTING));
                             ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", false);
                             KillProcessByName(L"LEDKeeper2.exe");
                             g_ResetTimer = currentTime + KILL_LEDKEEPER_TASK_WAIT_MS;
@@ -2543,7 +2782,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                             break;
                         case 2:
                             Log("[MysticFight] Connecting to SDK...");
-                            UpdateStatus(hWnd, L"Connecting to SDK...");
+                            UpdateStatus(hWnd, T(STR_STATUS_CONNECTING));
 
                             int hr = lpMLAPI_Initialize();
 
@@ -2562,7 +2801,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                                 LogSDKError("MLAPI_Initialize", hr);
 
                                 if (g_resetCounter >= SDK_MAX_RESETS) {
-                                    MessageBoxW(NULL, L"MSI SDK Fatal Error. Please reinstall MSI Center.", L"MysticFight Error", MB_OK | MB_ICONERROR);
+                                    MessageBoxW(NULL, T(STR_MSG_SDK_FATAL), L"MysticFight Error", MB_OK | MB_ICONERROR);
                                     g_Running = false;
                                 }
                                 else {
@@ -2599,7 +2838,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 }
                 else {
                     if (currentTime >= nextFrameTime) {
-                        nextFrameTime = currentTime + (1000 / cfgLocal.ledRefreshFPS);
+                        nextFrameTime = currentTime + (1000 / ledRefreshFPS);
 
                         float rawTemp = g_asyncTemp;
 
@@ -2643,8 +2882,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                             }
 
                             // FPS Compensation for Smoothing
-                            float timeCompensation = 25.0f / (float)(cfgLocal.ledRefreshFPS > 0 ? cfgLocal.ledRefreshFPS : 25);
-                            float adjustedFactor = cfgLocal.smoothingFactor * timeCompensation;
+                            float timeCompensation = 25.0f / (float)(ledRefreshFPS > 0 ? ledRefreshFPS : 25);
+                            float adjustedFactor = smoothingFactor * timeCompensation;
                             if (adjustedFactor > 1.0f) adjustedFactor = 1.0f;
 
                             // Apply Smoothing
@@ -2675,7 +2914,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 else {
                     ULONGLONG now = GetTickCount64();
                     if (nextFrameTime > now) {
-                        dwWait = (DWORD)min((ULONGLONG)(1000 / cfgLocal.ledRefreshFPS), nextFrameTime - now);
+                        dwWait = (DWORD)min((ULONGLONG)(1000 / ledRefreshFPS), nextFrameTime - now);
                     }
                     else dwWait = 0;
                 }
@@ -2692,7 +2931,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
     catch (...) {
         Log("[MysticFight] CRITICAL UNKNOWN EXCEPTION occurred.");
-        MessageBoxW(NULL, L"An unknown critical error occurred.", L"MysticFight Crash", MB_OK | MB_ICONERROR);
+        MessageBoxW(NULL, T(STR_MSG_UNKNOWN_ERROR), T(STR_MSG_CRASH_TITLE), MB_OK | MB_ICONERROR);
     }
 
     // Termination Procedure
