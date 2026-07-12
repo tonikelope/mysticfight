@@ -237,6 +237,7 @@ std::atomic<DataSource> g_activeSource{ DataSource::Searching };
 std::atomic<bool> g_Running{ true };
 std::atomic<bool> g_windows_shutdown{ false };
 std::atomic<bool> g_LedsEnabled{ true };
+std::atomic<bool> g_NotificationsEnabled{ true };
 std::atomic<float> g_asyncTemp{ -1.0f };
 std::atomic<int> g_httpConnectionDrops{ 0 };
 std::atomic<bool> g_SettingsOpen{ false };
@@ -413,6 +414,7 @@ static bool EnableDebugPrivilege() {
  * Modern Windows Notification (Toast style via Tray)
  */
 static void ShowNotification(HWND hWnd, const wchar_t* title, const wchar_t* info, DWORD iconType = NIIF_USER) {
+    if (!g_NotificationsEnabled) return;
     NOTIFYICONDATAW nid = { sizeof(NOTIFYICONDATAW), hWnd, 1, NIF_INFO };
     wcsncpy_s(nid.szInfoTitle, title, _TRUNCATE);
     wcsncpy_s(nid.szInfo, info, _TRUNCATE);
@@ -760,6 +762,7 @@ static void SaveSettings() {
     std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
 
     WritePrivateProfileStringW(L"Global", L"ActiveProfile", std::to_wstring(g_Global.activeProfileIndex).c_str(), INI_FILE);
+    WritePrivateProfileStringW(L"Global", L"Notifications", g_NotificationsEnabled ? L"1" : L"0", INI_FILE);
 
     for (int i = 0; i < 5; i++) {
         std::wstring section = L"Settings";
@@ -893,6 +896,8 @@ static void LoadSettings() {
 
     g_Global.activeProfileIndex = GetPrivateProfileIntW(L"Global", L"ActiveProfile", 0, INI_FILE);
     if (g_Global.activeProfileIndex < 0 || g_Global.activeProfileIndex > 4) g_Global.activeProfileIndex = 0;
+
+    g_NotificationsEnabled = GetPrivateProfileIntW(L"Global", L"Notifications", 1, INI_FILE) != 0;
 
     for (int i = 0; i < 5; i++) {
         std::wstring section = L"Settings";
@@ -1960,6 +1965,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_HIGH), GWLP_WNDPROC, (LONG_PTR)ColorEditSubclassProc);
 
         if (ValidStartupTaskExists()) CheckDlgButton(hDlg, IDC_CHK_STARTUP, BST_CHECKED);
+        if (g_NotificationsEnabled) CheckDlgButton(hDlg, IDC_CHK_NOTIFICATIONS, BST_CHECKED);
 
         return (INT_PTR)TRUE;
     }
@@ -2047,6 +2053,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             SaveHotkeysFromUI(hDlg);
 
             SetStartupTask(IsDlgButtonChecked(hDlg, IDC_CHK_STARTUP) == BST_CHECKED);
+            g_NotificationsEnabled = (IsDlgButtonChecked(hDlg, IDC_CHK_NOTIFICATIONS) == BST_CHECKED);
             SaveSettings();
             g_ConfigVersion++;
             g_ResetHttp = true;

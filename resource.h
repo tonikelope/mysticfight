@@ -29,6 +29,7 @@
 #define IDC_CHK_STARTUP                 2001
 #define IDC_BTN_RESET                   2002
 #define IDC_BTN_RESET_ADVANCED          2003
+#define IDC_CHK_NOTIFICATIONS           2004
 
 // Profile Inputs
 #define IDC_EDIT_LABEL                  2100
