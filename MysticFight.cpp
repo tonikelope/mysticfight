@@ -93,7 +93,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define ID_TRAY_PROFILE_START   5000 
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v3.0";
+const wchar_t* APP_VERSION = L"v3.1";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -176,6 +176,8 @@ enum StrId {
     STR_STATUS_RESTARTING, STR_STATUS_CONNECTING, STR_STATUS_INITIALIZING,
     // About dialog
     STR_ABOUT_BY, STR_ABOUT_DESC, STR_ABOUT_GITHUB, STR_ABOUT_CLOSE,
+    // Default (factory) profile label, e.g. "Profile 3" / "Perfil 3" (%d = number)
+    STR_DEFAULT_PROFILE,
     STR_COUNT
 };
 
@@ -201,6 +203,7 @@ static const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"An unknown critical error occurred.", L"MysticFight Crash",
         L"Restarting MSI Service...", L"Connecting to SDK...", L"Initializing...",
         L"By tonikelope", L"MSI Mystic Light Temperature Profile Replacement", L"Visit GitHub Project", L"Close",
+        L"Profile %d",
     },
     // ---- Spanish (LANG_ES) ----
     {
@@ -222,6 +225,7 @@ static const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Se ha producido un error crítico desconocido.", L"Fallo de MysticFight",
         L"Reiniciando servicio MSI...", L"Conectando al SDK...", L"Inicializando...",
         L"Por tonikelope", L"Reemplazo de perfiles de temperatura para MSI Mystic Light", L"Visitar proyecto en GitHub", L"Cerrar",
+        L"Perfil %d",
     },
 };
 
@@ -1032,8 +1036,17 @@ static void LoadSettings() {
         GetPrivateProfileStringW(section.c_str(), L"SensorID", L"", p.sensorID, SENSOR_ID_LEN, INI_FILE);
         GetPrivateProfileStringW(section.c_str(), L"WebServerUrl", DEF_SERVER_URL, p.webServerUrl, 256, INI_FILE);
 
-        wchar_t defLabel[64]; swprintf_s(defLabel, L"Profile %d", i + 1);
+        wchar_t defLabel[64]; swprintf_s(defLabel, T(STR_DEFAULT_PROFILE), i + 1);
         GetPrivateProfileStringW(section.c_str(), L"Label", defLabel, p.label, 64, INI_FILE);
+
+        // A stored label that equals a factory default in ANY supported language
+        // is treated as "unnamed": re-localize it to the active language. This
+        // migrates old configs that persisted the English "Profile N" default and
+        // keeps unnamed profiles in sync when the UI language changes.
+        for (int l = 0; l < LANG_COUNT; l++) {
+            wchar_t langDef[64]; swprintf_s(langDef, TR[l][STR_DEFAULT_PROFILE], i + 1);
+            if (wcscmp(p.label, langDef) == 0) { wcscpy_s(p.label, defLabel); break; }
+        }
     }
 
         needAutoSelect = (wcslen(g_cfg.sensorID) == 0);
@@ -2030,6 +2043,23 @@ static void ApplyDialogTranslations(HWND hDlg) {
         TCITEMW tie = { 0 }; tie.mask = TCIF_TEXT;
         tie.pszText = (LPWSTR)T(STR_TAB_SHORTCUTS); SendMessage(hTab, TCM_SETITEMW, 5, (LPARAM)&tie);
         tie.pszText = (LPWSTR)T(STR_TAB_ADVANCED);  SendMessage(hTab, TCM_SETITEMW, 6, (LPARAM)&tie);
+
+        // Re-localize profile tabs still using a factory default name ("Profile N"
+        // / "Perfil N" in any language) so a live language change updates them too.
+        // User-named profiles are left untouched. The language combo lives on the
+        // Advanced tab, so no profile label is being edited when we get here.
+        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+        for (int i = 0; i < 5; i++) {
+            Config& p = g_Global.profiles[i];
+            bool isDefault = false;
+            for (int l = 0; l < LANG_COUNT; l++) {
+                wchar_t langDef[64]; swprintf_s(langDef, TR[l][STR_DEFAULT_PROFILE], i + 1);
+                if (wcscmp(p.label, langDef) == 0) { isDefault = true; break; }
+            }
+            if (!isDefault) continue;
+            swprintf_s(p.label, T(STR_DEFAULT_PROFILE), i + 1);
+            tie.pszText = p.label; SendMessage(hTab, TCM_SETITEMW, i, (LPARAM)&tie);
+        }
     }
 
     // Smoothing combo values are words -> translate (preserving selection)
