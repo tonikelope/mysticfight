@@ -93,7 +93,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define ID_TRAY_PROFILE_START   5000 
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v3.1";
+const wchar_t* APP_VERSION = L"v3.2";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -1591,6 +1591,23 @@ static void PopulateDeviceList(HWND hDlg) {
     EnableWindow(hComboDev, finalCount > 1);
 }
 
+// The settings dialog remains usable during SDK recovery, but hardware target
+// selection must wait until the engine has published a valid snapshot again.
+// All other controls (including Run on Windows startup) are independent of the
+// MSI SDK and deliberately remain available.
+static void SetMsiHardwareControlsEnabled(HWND hDlg, bool sdkReady) {
+    const int staticControls[] = { IDC_GRP_MSI, IDC_LBL_DEVICE, IDC_LBL_AREA };
+    for (int id : staticControls) {
+        HWND hCtrl = GetDlgItem(hDlg, id);
+        if (hCtrl) EnableWindow(hCtrl, sdkReady);
+    }
+
+    HWND hDevice = GetDlgItem(hDlg, IDC_COMBO_DEVICE);
+    HWND hArea = GetDlgItem(hDlg, IDC_COMBO_AREA);
+    if (hDevice) EnableWindow(hDevice, sdkReady && SendMessage(hDevice, CB_GETCOUNT, 0, 0) > 1);
+    if (hArea) EnableWindow(hArea, sdkReady && SendMessage(hArea, CB_GETCOUNT, 0, 0) > 1);
+}
+
 
 // ============================================================================
 // CORE MONITORING LOGIC
@@ -2212,8 +2229,10 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         TabCtrl_SetCurSel(hTab, s_currentTab);
 
         ShowSettingsLayer(hDlg, LayerForTab(s_currentTab));
-        if (LayerForTab(s_currentTab) == LAYER_PROFILE)
+        if (LayerForTab(s_currentTab) == LAYER_PROFILE) {
             LoadProfileToUI(hDlg, s_currentTab, s_tempActiveIndex);
+            SetMsiHardwareControlsEnabled(hDlg, !g_Resetting_sdk.load());
+        }
 
         oldEditProc = (WNDPROC)SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_LOW), GWLP_WNDPROC, (LONG_PTR)ColorEditSubclassProc);
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_MED), GWLP_WNDPROC, (LONG_PTR)ColorEditSubclassProc);
@@ -2244,8 +2263,10 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             s_currentTab = newTab;
 
             ShowSettingsLayer(hDlg, LayerForTab(s_currentTab));
-            if (LayerForTab(s_currentTab) == LAYER_PROFILE)
+            if (LayerForTab(s_currentTab) == LAYER_PROFILE) {
                 LoadProfileToUI(hDlg, s_currentTab, s_tempActiveIndex);
+                SetMsiHardwareControlsEnabled(hDlg, !g_Resetting_sdk.load());
+            }
         }
         break;
     }
@@ -2399,6 +2420,12 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         }
         return (INT_PTR)TRUE;
     }
+
+    case WM_APP_STATUS:
+        // Recovery status is marshalled by the main UI window. Only the MSI
+        // hardware selectors are gated; the rest of Settings stays interactive.
+        SetMsiHardwareControlsEnabled(hDlg, wParam == 0);
+        return (INT_PTR)TRUE;
 
     case WM_DESTROY:
         g_hSettingsDlg = NULL;
@@ -2580,7 +2607,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             RunShellNonAdmin(fullLogPath);
         }
 
-        if (!g_Resetting_sdk && LOWORD(wParam) == ID_TRAY_CONFIG) {
+        // Settings is UI-only and reads the cached hardware snapshot. Keep it
+        // available while the engine thread is recovering (or stuck inside the
+        // SDK), so a hardware failure cannot lock the user out of configuration.
+        if (LOWORD(wParam) == ID_TRAY_CONFIG) {
             if (g_SettingsOpen) {
                 HWND hExisting = FindWindowW(L"#32770", L"MysticFight Settings - by tonikelope");
                 if (hExisting) SetForegroundWindow(hExisting);
@@ -2608,6 +2638,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         if (wParam == 1)      UpdateStatus(hWnd, T(STR_STATUS_RESTARTING));
         else if (wParam == 2) UpdateStatus(hWnd, T(STR_STATUS_CONNECTING));
         else                  UpdateStatus(hWnd, NULL);
+        if (g_hSettingsDlg) SendMessageW(g_hSettingsDlg, WM_APP_STATUS, wParam, 0);
         return 0;
 
     case WM_APP_LETSDANCE:
