@@ -16,9 +16,12 @@
  // -----------------------------------------------------------------------------
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <ctime>
 #include <fstream>
 #include <math.h>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -93,7 +96,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define ID_TRAY_PROFILE_START   5000 
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v3.2";
+const wchar_t* APP_VERSION = L"v3.3";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -111,6 +114,12 @@ const ULONGLONG LHM_RETRY_DELAY_MS = 5000;          // Cooldown for searching LH
 const ULONGLONG KILL_LEDKEEPER_TASK_WAIT_MS = 2000; // Watchdog termination wait
 const ULONGLONG RESET_LEDKEEPER_TASK_DELAY_MS = 5000; // Cooldown for task restart
 const ULONGLONG RESET_SDK_RETRY_DELAY_MS = 1000;
+const DWORD     SDK_RENDER_TIMEOUT_MS = 5000;         // Maximum time for a render command in the isolated SDK host
+const DWORD     SDK_INIT_TIMEOUT_MS = 15000;          // Initialize + enumerate + validate timeout
+const DWORD     SDK_SHUTDOWN_TIMEOUT_MS = 750;
+const ULONGLONG SDK_HEARTBEAT_ACTIVE_INTERVAL_MS = 60000;
+const ULONGLONG SDK_HEARTBEAT_OFF_INTERVAL_MS = 300000;
+const ULONGLONG SDK_HEARTBEAT_LOG_INTERVAL_MS = 600000;
 const ULONGLONG HTTP_FAST_TIMEOUT = 1000;           // UI-blocking timeout
 const ULONGLONG HTTP_NORMAL_TIMEOUT = 60000;        // Background network timeout
 const int       HEX_COLOR_LEN = 7;                  // Format: #RRGGBB
@@ -314,6 +323,64 @@ typedef int (*LPMLAPI_SetLedStyle)(BSTR type, DWORD index, BSTR style);
 typedef int (*LPMLAPI_SetLedSpeed)(BSTR type, DWORD index, DWORD level);
 typedef int (*LPMLAPI_Release)();
 
+// SDK process-isolation protocol. MysticFight launches a hidden copy of itself
+// with --sdk-host; only that child loads and calls the vendor DLL. Fixed-size
+// packets keep the protocol simple and deterministic across anonymous pipes.
+const DWORD SDK_IPC_MAGIC = 0x4D465344; // "MFSD"
+const DWORD SDK_IPC_VERSION = 1;
+const int SDK_IPC_TIMEOUT = -10001;
+const int SDK_IPC_BROKEN = -10002;
+const int SDK_HOST_LOAD_FAILED = -10003;
+const int SDK_HOST_PROTOCOL_ERROR = -10004;
+const int SDK_HOST_COM_FAILED = -10005;
+const DWORD SDK_IPC_MAX_DEVICES = 16;
+const DWORD SDK_IPC_MAX_AREAS = 32;
+
+enum class SdkCommand : DWORD {
+    Initialize = 1,
+    SetStyle = 2,
+    SetColor = 3,
+    Heartbeat = 4,
+    Shutdown = 5
+};
+
+struct SdkIpcRequest {
+    DWORD magic;
+    DWORD version;
+    DWORD sequence;
+    SdkCommand command;
+    wchar_t device[256];
+    DWORD ledIndex;
+    DWORD r, g, b;
+    wchar_t style[32];
+};
+
+struct SdkIpcArea {
+    DWORD index;
+    wchar_t name[128];
+};
+
+struct SdkIpcDevice {
+    wchar_t type[256];
+    wchar_t friendly[256];
+    DWORD areaCount;
+    SdkIpcArea areas[SDK_IPC_MAX_AREAS];
+};
+
+struct SdkIpcResponse {
+    DWORD magic;
+    DWORD version;
+    DWORD sequence;
+    DWORD hostProcessId;
+    int result;
+    int initializeResult;
+    int deviceInfoResult;
+    DWORD deviceCount;
+    SdkIpcDevice devices[SDK_IPC_MAX_DEVICES];
+};
+
+const DWORD SDK_IPC_RESPONSE_HEADER_SIZE = static_cast<DWORD>(offsetof(SdkIpcResponse, devices));
+
 
 // ============================================================================
 // COM SMART POINTERS (Task Scheduler Wrapper)
@@ -352,6 +419,7 @@ std::atomic<bool> g_SettingsOpen{ false };
 std::atomic<bool> g_AboutOpen{ false };
 std::atomic<bool> g_pendingStyleChange{ true };
 std::atomic<int> g_ConfigVersion{ 0 };
+std::atomic<ULONGLONG> g_ledCommandGeneration{ 0 };
 
 // LED Real-time State Tracking
 std::atomic<DWORD> lastR{ RGB_LED_REFRESH }, lastG{ RGB_LED_REFRESH }, lastB{ RGB_LED_REFRESH };
@@ -366,14 +434,12 @@ HANDLE g_hHwReadyEvent = NULL;  // signaled once the engine has enumerated hardw
 HWND   g_hSettingsDlg = NULL;   // the open settings dialog, or NULL (UI thread only)
 
 // Hardware SDK State
-BSTR g_deviceName = NULL;
 HMODULE g_hLibrary = NULL;
-int g_totalLeds = 0;
 
 // Hardware snapshot: the SDK-owning thread enumerates all devices and their LED
 // areas here so the settings dialog can populate its combos WITHOUT calling the
 // MSI SDK from the UI thread (which would race with the engine thread).
-struct HwArea { DWORD index; std::wstring name; };
+struct HwArea { DWORD index = 0; std::wstring name; };
 struct HwDevice { std::wstring type; std::wstring friendly; std::vector<HwArea> areas; };
 std::vector<HwDevice> g_hwSnapshot;
 std::mutex g_hwMutex;
@@ -385,9 +451,21 @@ std::atomic<bool> g_Resetting_sdk{ false };
 int g_ResetStage = 0;
 ULONGLONG g_ResetTimer = 0;
 int g_sdkFailCount = 0;
+int g_sdkSuccessStreak = 0;
 const int MAX_SDK_FAILURES = 5;
 const int SDK_MAX_RESETS = 3;
 int g_resetCounter = 0;
+
+// SDK helper process state. These handles are owned exclusively by EngineThread.
+HANDLE g_hSdkHostProcess = NULL;
+HANDLE g_hSdkJob = NULL;
+HANDLE g_hSdkRequestWrite = NULL;
+HANDLE g_hSdkResponseRead = NULL;
+DWORD g_sdkHostProcessId = 0;
+DWORD g_sdkSequence = 0;
+ULONGLONG g_lastSdkProgress = 0;
+ULONGLONG g_lastSdkHeartbeatLog = 0;
+bool g_isSdkHost = false;
 
 // SDK Function Pointers
 LPMLAPI_Initialize      lpMLAPI_Initialize = nullptr;
@@ -433,6 +511,10 @@ static void UpdateStatus(HWND hWnd, const wchar_t* status) {
  * Standard thread-safe logger to file
  */
 static void Log(const char* text) {
+    // The SDK host reports through IPC. Avoid two processes appending to the
+    // same ofstream without an inter-process lock.
+    if (g_isSdkHost) return;
+
     static std::mutex logMutex;
     std::lock_guard<std::mutex> lock(logMutex);
 
@@ -460,6 +542,11 @@ static void LogSDKError(const char* functionName, int errorCode) {
     case MLAPI_INVALID_ARGUMENT:  errorDesc = "Invalid parameter value"; break;
     case MLAPI_DEVICE_NOT_FOUND:  errorDesc = "Device not found"; break;
     case MLAPI_NOT_SUPPORTED:     errorDesc = "Feature not supported"; break;
+    case SDK_IPC_TIMEOUT:         errorDesc = "Isolated SDK host did not answer before the watchdog deadline"; break;
+    case SDK_IPC_BROKEN:          errorDesc = "Isolated SDK host stopped or its IPC channel broke"; break;
+    case SDK_HOST_LOAD_FAILED:    errorDesc = "Isolated SDK host could not load or bind the MSI SDK"; break;
+    case SDK_HOST_PROTOCOL_ERROR: errorDesc = "Isolated SDK host returned an invalid IPC packet"; break;
+    case SDK_HOST_COM_FAILED:     errorDesc = "Isolated SDK host could not initialize COM"; break;
     default:                      errorDesc = "Unknown SDK error code: " + std::to_string(errorCode); break;
     }
 
@@ -543,18 +630,27 @@ static void ShowNotification(HWND hWnd, const wchar_t* title, const wchar_t* inf
  * Toggles the LED state and updates UI/Hardware
  */
 static void ToggleLights(HWND hWnd) {
-    g_LedsEnabled = !g_LedsEnabled;
+    bool enabled = !g_LedsEnabled.load();
+    g_LedsEnabled = enabled;
+    ULONGLONG generation = g_ledCommandGeneration.fetch_add(1) + 1;
+    g_pendingStyleChange = true;
+    lastR = RGB_LED_REFRESH; // publish desired refresh before waking the engine
+
+    char trace[160];
+    snprintf(trace, sizeof(trace), "[LED] REQUEST generation=%llu state=%s",
+        generation, enabled ? "ON" : "OFF");
+    Log(trace);
+
     SetEvent(g_hSensorEvent);
     SetEvent(g_hEngineEvent);
-    lastR = RGB_LED_REFRESH; // Force hardware sync
 
     // UI Notification
-    ShowNotification(hWnd, L"MysticFight", g_LedsEnabled ? T(STR_NOTIF_LIGHTS_ON) : T(STR_NOTIF_LIGHTS_OFF));
+    ShowNotification(hWnd, L"MysticFight", enabled ? T(STR_NOTIF_LIGHTS_ON) : T(STR_NOTIF_LIGHTS_OFF));
 
     UpdateStatus(hWnd, NULL);
 
     // Audio Feedback
-    PlaySound(MAKEINTRESOURCE(g_LedsEnabled ? IDR_WAV_LIGHTS_ON : IDR_WAV_LIGHTS_OFF),
+    PlaySound(MAKEINTRESOURCE(enabled ? IDR_WAV_LIGHTS_ON : IDR_WAV_LIGHTS_OFF),
         GetModuleHandle(NULL), SND_RESOURCE | SND_ASYNC);
 }
 
@@ -732,7 +828,8 @@ static std::string FetchLHMJson(const wchar_t* serverUrl, int timeout) {
     urlComp.dwHostNameLength = (DWORD)-1;
     urlComp.dwUrlPathLength = (DWORD)-1;
 
-    if (WinHttpCrackUrl(serverUrl, (DWORD)wcslen(serverUrl), 0, &urlComp)) {
+    if (WinHttpCrackUrl(serverUrl, (DWORD)wcslen(serverUrl), 0, &urlComp) &&
+        urlComp.lpszHostName && urlComp.dwHostNameLength > 0) {
         std::wstring host(urlComp.lpszHostName, urlComp.dwHostNameLength);
         HINTERNET hConnect = WinHttpConnect(hSession, host.c_str(), urlComp.nPort, 0);
         if (hConnect) {
@@ -1015,6 +1112,24 @@ static void LoadSettings() {
         g_Global.smoothingFactor = (float)_wtof(sfBuf);
     }
 
+    // Treat the INI file as untrusted input. These values are later used in
+    // timing divisions and interpolation, so invalid manual edits must not
+    // stall or destabilize the engine.
+    if (g_Global.sensorUpdateMS != 250 && g_Global.sensorUpdateMS != 500 &&
+        g_Global.sensorUpdateMS != 1000) {
+        Log("[Config] Invalid SensorUpdateMS; using factory default.");
+        g_Global.sensorUpdateMS = DEF_SENSOR_UPDATE_MS;
+    }
+    if (g_Global.ledRefreshFPS != 15 && g_Global.ledRefreshFPS != 20 &&
+        g_Global.ledRefreshFPS != 25) {
+        Log("[Config] Invalid LedRefreshFPS; using factory default.");
+        g_Global.ledRefreshFPS = DEF_LED_REFRESH_FPS;
+    }
+    if (!(g_Global.smoothingFactor > 0.0f && g_Global.smoothingFactor <= 1.0f)) {
+        Log("[Config] Invalid SmoothingFactor; using factory default.");
+        g_Global.smoothingFactor = DEF_SMOOTHING_FACTOR;
+    }
+
     for (int i = 0; i < 5; i++) {
         std::wstring section = L"Settings";
         if (i > 0) section += L"_" + std::to_wstring(i);
@@ -1023,14 +1138,25 @@ static void LoadSettings() {
         p.tempLow = GetPrivateProfileIntW(section.c_str(), L"TempLow", DEF_TEMP_LOW, INI_FILE);
         p.tempMed = GetPrivateProfileIntW(section.c_str(), L"TempMed", DEF_TEMP_MED, INI_FILE);
         p.tempHigh = GetPrivateProfileIntW(section.c_str(), L"TempHigh", DEF_TEMP_HIGH, INI_FILE);
+        if (!(p.tempLow < p.tempMed && p.tempMed < p.tempHigh)) {
+            Log("[Config] Invalid temperature thresholds; using factory defaults.");
+            p.tempLow = DEF_TEMP_LOW;
+            p.tempMed = DEF_TEMP_MED;
+            p.tempHigh = DEF_TEMP_HIGH;
+        }
 
         GetPrivateProfileStringW(section.c_str(), L"TargetDevice", DEF_DEVICE_TYPE, p.targetDevice, 256, INI_FILE);
+        if (p.targetDevice[0] == L'\0') wcscpy_s(p.targetDevice, DEF_DEVICE_TYPE);
         p.targetLedIndex = GetPrivateProfileIntW(section.c_str(), L"TargetLedIndex", 0, INI_FILE);
+        if (p.targetLedIndex < 0) p.targetLedIndex = 0;
 
         wchar_t hL[10], hM[10], hH[10];
         GetPrivateProfileStringW(section.c_str(), L"ColorLow", DEF_COLOR_LOW, hL, 10, INI_FILE);
         GetPrivateProfileStringW(section.c_str(), L"ColorMed", DEF_COLOR_MED, hM, 10, INI_FILE);
         GetPrivateProfileStringW(section.c_str(), L"ColorHigh", DEF_COLOR_HIGH, hH, 10, INI_FILE);
+        if (!IsValidHex(hL)) wcscpy_s(hL, DEF_COLOR_LOW);
+        if (!IsValidHex(hM)) wcscpy_s(hM, DEF_COLOR_MED);
+        if (!IsValidHex(hH)) wcscpy_s(hH, DEF_COLOR_HIGH);
         p.colorLow = HexToColor(hL); p.colorMed = HexToColor(hM); p.colorHigh = HexToColor(hH);
 
         GetPrivateProfileStringW(section.c_str(), L"SensorID", L"", p.sensorID, SENSOR_ID_LEN, INI_FILE);
@@ -1140,13 +1266,15 @@ static bool ValidStartupTaskExists() {
  * Creates or removes a Task Scheduler entry with Highest Privileges
  */
 static void SetStartupTask(bool run) {
-    wchar_t szPath[MAX_PATH], szDir[MAX_PATH];
-    if (GetModuleFileNameW(NULL, szPath, MAX_PATH) == 0) return;
+    wchar_t szPath[MAX_PATH];
+    DWORD pathLength = GetModuleFileNameW(NULL, szPath, MAX_PATH);
+    if (pathLength == 0 || pathLength >= MAX_PATH) return;
+    szPath[pathLength] = L'\0';
     if (run && ValidStartupTaskExists()) return;
 
-    wcscpy_s(szDir, szPath);
-    wchar_t* lastSlash = wcsrchr(szDir, L'\\');
-    if (lastSlash) *lastSlash = L'\0';
+    std::wstring workingDirectory(szPath, pathLength);
+    size_t lastSlash = workingDirectory.find_last_of(L'\\');
+    if (lastSlash != std::wstring::npos) workingDirectory.resize(lastSlash);
 
     try {
         ITaskServicePtr pService;
@@ -1193,7 +1321,7 @@ static void SetStartupTask(bool run) {
         IExecActionPtr pExecAction = pAction;
         if (pExecAction != nullptr) {
             pExecAction->put_Path(_bstr_t(szPath));
-            pExecAction->put_WorkingDirectory(_bstr_t(szDir));
+            pExecAction->put_WorkingDirectory(_bstr_t(workingDirectory.c_str()));
         }
 
         IRegisteredTaskPtr pRegisteredTask;
@@ -1449,7 +1577,7 @@ static void SaveUIToProfile(HWND hDlg, int profileIndex) {
  * MUST be called only from the SDK-owning thread. The settings dialog reads the
  * published snapshot (under g_hwMutex) instead of calling the SDK itself.
  */
-static void BuildHardwareSnapshot() {
+static int BuildHardwareSnapshot() {
     std::vector<HwDevice> snap;
 
     SAFEARRAY* pDevType = nullptr;
@@ -1496,7 +1624,9 @@ static void BuildHardwareSnapshot() {
                             if (hrLed == MLAPI_OK) {
                                 HwArea area;
                                 area.index = j;
-                                area.name = (ledName && *ledName) ? ledName : L"";
+                                area.name = ledName
+                                    ? std::wstring(ledName, SysStringLen(ledName))
+                                    : std::wstring();
                                 dev.areas.push_back(std::move(area));
                                 if (pStyles) SafeArrayDestroy(pStyles);
                                 if (ledName) SysFreeString(ledName);
@@ -1512,16 +1642,23 @@ static void BuildHardwareSnapshot() {
             }
         } // Locks released here
 
-        SafeArrayDestroy(pDevType);
-        SafeArrayDestroy(pLedCount);
     }
     else if (hrInfo != MLAPI_OK) {
         LogSDKError("MLAPI_GetDeviceInfo (Snapshot)", hrInfo);
     }
 
+    if (pDevType) SafeArrayDestroy(pDevType);
+    if (pLedCount) SafeArrayDestroy(pLedCount);
+
     {
         std::lock_guard<std::mutex> lock(g_hwMutex);
         g_hwSnapshot = std::move(snap);
+    }
+
+    if (hrInfo != MLAPI_OK) return hrInfo;
+    {
+        std::lock_guard<std::mutex> lock(g_hwMutex);
+        return g_hwSnapshot.empty() ? MLAPI_DEVICE_NOT_FOUND : MLAPI_OK;
     }
 }
 
@@ -1568,7 +1705,7 @@ static void PopulateDeviceList(HWND hDlg) {
         devices = g_hwSnapshot;
     }
 
-    wchar_t targetDevice[256];
+    wchar_t targetDevice[256] = {};
     {
         std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
         wcscpy_s(targetDevice, g_cfg.targetDevice);
@@ -1776,87 +1913,21 @@ static bool ExtractMSIDLL() {
 
     HGLOBAL hData = LoadResource(hModule, hRes);
     DWORD size = SizeofResource(hModule, hRes);
+    if (!hData || size == 0) return false;
     void* pData = LockResource(hData);
+    if (!pData) return false;
 
     HANDLE hFile = CreateFileW(dllPath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return false;
 
-    DWORD written;
-    bool success = WriteFile(hFile, pData, size, &written, NULL);
+    DWORD written = 0;
+    bool success = WriteFile(hFile, pData, size, &written, NULL) && written == size;
     CloseHandle(hFile);
 
+    // Do not leave a partial DLL that a later run would mistake for a valid one.
+    if (!success) DeleteFileW(dllPath.c_str());
+
     return success;
-}
-
-/**
- * MSI Hardware Detection: Scans for compatible devices using RAII for memory safety.
- * Optimized to handle SAFEARRAY life cycles automatically.
- */
-static void MSIHwardwareDetection() {
-    SAFEARRAY* pDevType = nullptr;
-    SAFEARRAY* pLedCount = nullptr;
-
-    // Execute API call
-    int hrInfo = MLAPI_ERROR;
-    if (lpMLAPI_GetDeviceInfo) {
-        hrInfo = lpMLAPI_GetDeviceInfo(&pDevType, &pLedCount);
-    }
-
-    if (hrInfo == MLAPI_OK && pDevType && pLedCount) {
-        {
-            // Use Scoped Locks to ensure memory is released regardless of function exit point
-            SafeArrayScopedLock<BSTR> typeLock(pDevType);
-            SafeArrayScopedLock<void> countLock(pLedCount);
-
-            if (typeLock.isLocked() && countLock.isLocked()) {
-                long lBound = 0, uBound = 0;
-                SafeArrayGetLBound(pDevType, 1, &lBound);
-                SafeArrayGetUBound(pDevType, 1, &uBound);
-                long count = uBound - lBound + 1;
-
-                // Check if we have at least one valid device
-                if (count > 0 && typeLock.data != nullptr && typeLock.data[0] != nullptr) {
-
-                    // Clear existing device name to prevent memory leaks
-                    if (g_deviceName) {
-                        SysFreeString(g_deviceName);
-                        g_deviceName = nullptr;
-                    }
-
-                    // Store primary device identifier and LED count
-                    g_deviceName = SysAllocString(typeLock.data[0]);
-
-                    VARTYPE vtCount;
-                    SafeArrayGetVartype(pLedCount, &vtCount);
-                    g_totalLeds = GetIntFromSafeArray(countLock.data, vtCount, 0);
-
-                    // Attempt to fetch a friendly name for logs
-                    BSTR friendlyName = nullptr;
-                    if (lpMLAPI_GetDeviceNameEx) {
-                        int hrName = lpMLAPI_GetDeviceNameEx(g_deviceName, 0, &friendlyName);
-                        if (hrName != MLAPI_OK) {
-                            LogSDKError("MLAPI_GetDeviceNameEx", hrName);
-                        }
-                    }
-
-                    // Log findings
-                    char devInfo[LOG_BUFFER_SIZE];
-                    snprintf(devInfo, sizeof(devInfo),
-                        "[MysticFight] MSI device selected: %ls (Type: %ls) | Logical Areas: %d",
-                        (friendlyName ? friendlyName : L"Unknown"), g_deviceName, g_totalLeds);
-                    Log(devInfo);
-
-                    if (friendlyName) SysFreeString(friendlyName);
-                }
-            }
-        } // Locks released automatically
-
-        SafeArrayDestroy(pDevType);
-        SafeArrayDestroy(pLedCount);
-    }
-    else if (hrInfo != MLAPI_OK) {
-        LogSDKError("MLAPI_GetDeviceInfo (Hardware Detection)", hrInfo);
-    }
 }
 
 static void SwitchActiveProfile(HWND hWnd, int index) {
@@ -2226,7 +2297,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         s_langSnapshot = g_Language.load();
 
         s_currentTab = g_Global.activeProfileIndex;
-        TabCtrl_SetCurSel(hTab, s_currentTab);
+        if (hTab) TabCtrl_SetCurSel(hTab, s_currentTab);
 
         ShowSettingsLayer(hDlg, LayerForTab(s_currentTab));
         if (LayerForTab(s_currentTab) == LAYER_PROFILE) {
@@ -2403,7 +2474,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             HWND hDev = GetDlgItem(hDlg, IDC_COMBO_DEVICE);
             if (SendMessage(hDev, CB_GETCOUNT, 0, 0) == 0) {
                 PopulateDeviceList(hDlg);
-                wchar_t targetDevice[256]; int targetLed;
+                wchar_t targetDevice[256] = {}; int targetLed;
                 {
                     std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
                     Config& p = g_Global.profiles[s_currentTab];
@@ -2507,9 +2578,8 @@ INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
 /**
  * Releases all handles, libraries, and resets hardware state before exit
  */
-// UI-thread shutdown. The MSI SDK (LED power-off + Release) and g_deviceName are
-// owned and released by the engine thread, NOT here, so this stays safe to call
-// even if the engine is still wedged in a blocking SDK call during shutdown.
+// UI-thread shutdown. The isolated host owns SDK power-off and release, so this
+// remains safe even if the vendor DLL is wedged during shutdown.
 static void FinalCleanup(HWND hWnd) {
     Log("[MysticFight] Final cleaning...");
 
@@ -2695,30 +2765,605 @@ static bool BindMSISDK(HMODULE hLib) {
     lpMLAPI_GetDeviceNameEx = (LPMLAPI_GetDeviceNameEx)GetProcAddress(hLib, "MLAPI_GetDeviceNameEx");
     lpMLAPI_GetLedInfo = (LPMLAPI_GetLedInfo)GetProcAddress(hLib, "MLAPI_GetLedInfo");
 
-    if (!lpMLAPI_Initialize || !lpMLAPI_SetLedColor || !lpMLAPI_Release) {
+    if (!lpMLAPI_Initialize || !lpMLAPI_GetDeviceInfo || !lpMLAPI_SetLedColor ||
+        !lpMLAPI_SetLedStyle || !lpMLAPI_Release) {
         Log("[MysticFight] Error: Critical MSI SDK functions missing.");
         return false;
     }
     return true;
 }
+
+static const char* SdkCommandName(SdkCommand command) {
+    switch (command) {
+    case SdkCommand::Initialize: return "Initialize";
+    case SdkCommand::SetStyle: return "SetStyle";
+    case SdkCommand::SetColor: return "SetColor";
+    case SdkCommand::Heartbeat: return "Heartbeat";
+    case SdkCommand::Shutdown: return "Shutdown";
+    default: return "Unknown";
+    }
+}
+
+static bool PipeReadExact(HANDLE pipe, void* buffer, DWORD bytes) {
+    BYTE* cursor = static_cast<BYTE*>(buffer);
+    DWORD total = 0;
+    while (total < bytes) {
+        DWORD received = 0;
+        if (!ReadFile(pipe, cursor + total, bytes - total, &received, NULL) || received == 0) return false;
+        total += received;
+    }
+    return true;
+}
+
+static bool PipeWriteExact(HANDLE pipe, const void* buffer, DWORD bytes) {
+    const BYTE* cursor = static_cast<const BYTE*>(buffer);
+    DWORD total = 0;
+    while (total < bytes) {
+        DWORD written = 0;
+        if (!WriteFile(pipe, cursor + total, bytes - total, &written, NULL) || written == 0) return false;
+        total += written;
+    }
+    return true;
+}
+
+static void CloseSdkHostHandles() {
+    if (g_hSdkRequestWrite) { CloseHandle(g_hSdkRequestWrite); g_hSdkRequestWrite = NULL; }
+    if (g_hSdkResponseRead) { CloseHandle(g_hSdkResponseRead); g_hSdkResponseRead = NULL; }
+    if (g_hSdkHostProcess) { CloseHandle(g_hSdkHostProcess); g_hSdkHostProcess = NULL; }
+    if (g_hSdkJob) { CloseHandle(g_hSdkJob); g_hSdkJob = NULL; }
+    g_sdkHostProcessId = 0;
+}
+
+static void TerminateSdkHost(const char* reason) {
+    if (g_hSdkHostProcess && WaitForSingleObject(g_hSdkHostProcess, 0) == WAIT_TIMEOUT) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "[SDK Supervisor] Terminating host pid=%lu reason=%s",
+            g_sdkHostProcessId, reason ? reason : "unspecified");
+        Log(msg);
+        TerminateProcess(g_hSdkHostProcess, 2);
+        WaitForSingleObject(g_hSdkHostProcess, 500);
+    }
+    CloseSdkHostHandles();
+}
+
+static bool StartSdkHost() {
+    TerminateSdkHost("replace stale host");
+
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+    HANDLE requestRead = NULL, requestWrite = NULL;
+    HANDLE responseRead = NULL, responseWrite = NULL;
+
+    if (!CreatePipe(&requestRead, &requestWrite, &sa, 0) ||
+        !CreatePipe(&responseRead, &responseWrite, &sa, 0)) {
+        if (requestRead) CloseHandle(requestRead);
+        if (requestWrite) CloseHandle(requestWrite);
+        if (responseRead) CloseHandle(responseRead);
+        if (responseWrite) CloseHandle(responseWrite);
+        Log("[SDK Supervisor] Failed to create IPC pipes.");
+        return false;
+    }
+
+    if (!SetHandleInformation(requestWrite, HANDLE_FLAG_INHERIT, 0) ||
+        !SetHandleInformation(responseRead, HANDLE_FLAG_INHERIT, 0)) {
+        CloseHandle(requestRead); CloseHandle(requestWrite);
+        CloseHandle(responseRead); CloseHandle(responseWrite);
+        Log("[SDK Supervisor] Failed to secure parent IPC handles against inheritance.");
+        return false;
+    }
+
+    wchar_t exePath[MAX_PATH];
+    DWORD exePathLength = GetModuleFileNameW(NULL, exePath, MAX_PATH);
+    if (exePathLength == 0 || exePathLength >= MAX_PATH) {
+        CloseHandle(requestRead); CloseHandle(requestWrite);
+        CloseHandle(responseRead); CloseHandle(responseWrite);
+        return false;
+    }
+    exePath[exePathLength] = L'\0';
+
+    std::wstring workDir(exePath, exePathLength);
+    size_t lastSlash = workDir.find_last_of(L'\\');
+    if (lastSlash != std::wstring::npos) workDir.resize(lastSlash);
+
+    std::wstring commandLine = L"\"" + std::wstring(exePath) + L"\" --sdk-host " +
+        std::to_wstring(reinterpret_cast<uintptr_t>(requestRead)) + L" " +
+        std::to_wstring(reinterpret_cast<uintptr_t>(responseWrite));
+    std::vector<wchar_t> mutableCommand(commandLine.begin(), commandLine.end());
+    mutableCommand.push_back(L'\0');
+
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi = {};
+    // Keep the child suspended until it belongs to the kill-on-close job. This
+    // removes the small startup window in which an orphan host could escape.
+    BOOL created = CreateProcessW(exePath, mutableCommand.data(), NULL, NULL, TRUE,
+        CREATE_NO_WINDOW | CREATE_SUSPENDED, NULL, workDir.c_str(), &si, &pi);
+
+    CloseHandle(requestRead);
+    CloseHandle(responseWrite);
+
+    if (!created) {
+        CloseHandle(requestWrite);
+        CloseHandle(responseRead);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "[SDK Supervisor] CreateProcess failed (Error: %lu)", GetLastError());
+        Log(msg);
+        return false;
+    }
+
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobInfo = {};
+    jobInfo.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!job || !SetInformationJobObject(job, JobObjectExtendedLimitInformation,
+        &jobInfo, sizeof(jobInfo)) || !AssignProcessToJobObject(job, pi.hProcess)) {
+        Log("[SDK Supervisor] Failed to place SDK host in kill-on-close job.");
+        TerminateProcess(pi.hProcess, 2);
+        WaitForSingleObject(pi.hProcess, 500);
+        if (job) CloseHandle(job);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        CloseHandle(requestWrite);
+        CloseHandle(responseRead);
+        return false;
+    }
+
+    if (ResumeThread(pi.hThread) == static_cast<DWORD>(-1)) {
+        Log("[SDK Supervisor] Failed to resume isolated SDK host.");
+        TerminateProcess(pi.hProcess, 2);
+        WaitForSingleObject(pi.hProcess, 500);
+        CloseHandle(job);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        CloseHandle(requestWrite);
+        CloseHandle(responseRead);
+        return false;
+    }
+    CloseHandle(pi.hThread);
+
+    g_hSdkJob = job;
+    g_hSdkHostProcess = pi.hProcess;
+    g_hSdkRequestWrite = requestWrite;
+    g_hSdkResponseRead = responseRead;
+    g_sdkHostProcessId = pi.dwProcessId;
+    g_lastSdkProgress = GetTickCount64();
+
+    char msg[160];
+    snprintf(msg, sizeof(msg), "[SDK Supervisor] Host started pid=%lu", g_sdkHostProcessId);
+    Log(msg);
+    return true;
+}
+
+static bool ReadSdkResponseWithTimeout(SdkIpcResponse& response, DWORD expectedBytes,
+    DWORD timeout, bool& timedOut) {
+    timedOut = false;
+    BYTE* cursor = reinterpret_cast<BYTE*>(&response);
+    DWORD total = 0;
+    ULONGLONG started = GetTickCount64();
+
+    while (total < expectedBytes) {
+        if (!g_hSdkResponseRead || !g_hSdkHostProcess) return false;
+
+        DWORD available = 0;
+        if (!PeekNamedPipe(g_hSdkResponseRead, NULL, 0, NULL, &available, NULL)) return false;
+
+        if (available > 0) {
+            DWORD chunk = min(available, expectedBytes - total);
+            DWORD received = 0;
+            if (!ReadFile(g_hSdkResponseRead, cursor + total, chunk, &received, NULL) || received == 0) return false;
+            total += received;
+            continue;
+        }
+
+        if (WaitForSingleObject(g_hSdkHostProcess, 0) != WAIT_TIMEOUT) return false;
+        if (GetTickCount64() - started >= timeout) {
+            timedOut = true;
+            return false;
+        }
+        Sleep(10);
+    }
+    return true;
+}
+
+static int SendSdkCommand(SdkIpcRequest& request, SdkIpcResponse* responseOut, DWORD timeout) {
+    if (!g_hSdkHostProcess || !g_hSdkRequestWrite || !g_hSdkResponseRead) return SDK_IPC_BROKEN;
+
+    request.magic = SDK_IPC_MAGIC;
+    request.version = SDK_IPC_VERSION;
+    request.sequence = ++g_sdkSequence;
+    const char* opName = SdkCommandName(request.command);
+    bool traceEveryCall = request.command != SdkCommand::SetColor && request.command != SdkCommand::Heartbeat;
+
+    if (traceEveryCall) {
+        char begin[192];
+        snprintf(begin, sizeof(begin), "[SDK IPC] BEGIN seq=%lu op=%s pid=%lu",
+            request.sequence, opName, g_sdkHostProcessId);
+        Log(begin);
+    }
+
+    ULONGLONG started = GetTickCount64();
+    if (!PipeWriteExact(g_hSdkRequestWrite, &request, sizeof(request))) {
+        Log("[SDK IPC] Command pipe broke while writing.");
+        TerminateSdkHost("command pipe write failure");
+        return SDK_IPC_BROKEN;
+    }
+
+    DWORD expectedBytes = request.command == SdkCommand::Initialize
+        ? static_cast<DWORD>(sizeof(SdkIpcResponse))
+        : SDK_IPC_RESPONSE_HEADER_SIZE;
+    // Reuse one per-thread buffer. The snapshot payload is large, but render
+    // commands only clear/read the compact header and do no heap allocation.
+    static thread_local SdkIpcResponse response;
+    ZeroMemory(&response, expectedBytes);
+    bool timedOut = false;
+    if (!ReadSdkResponseWithTimeout(response, expectedBytes, timeout, timedOut)) {
+        char failure[256];
+        snprintf(failure, sizeof(failure), "[SDK IPC] %s seq=%lu op=%s elapsed=%llums",
+            timedOut ? "TIMEOUT" : "BROKEN", request.sequence, opName, GetTickCount64() - started);
+        Log(failure);
+        TerminateSdkHost(timedOut ? "SDK call timeout" : "response pipe failure");
+        return timedOut ? SDK_IPC_TIMEOUT : SDK_IPC_BROKEN;
+    }
+
+    if (response.magic != SDK_IPC_MAGIC || response.version != SDK_IPC_VERSION ||
+        response.sequence != request.sequence || response.hostProcessId != g_sdkHostProcessId) {
+        Log("[SDK IPC] Invalid response packet; terminating host.");
+        TerminateSdkHost("protocol mismatch");
+        return SDK_HOST_PROTOCOL_ERROR;
+    }
+    if (request.command == SdkCommand::Initialize) {
+        if (response.deviceCount > SDK_IPC_MAX_DEVICES) {
+            Log("[SDK IPC] Invalid device count in initialization response.");
+            TerminateSdkHost("invalid snapshot bounds");
+            return SDK_HOST_PROTOCOL_ERROR;
+        }
+        for (DWORD i = 0; i < response.deviceCount; ++i) {
+            if (response.devices[i].areaCount > SDK_IPC_MAX_AREAS) {
+                Log("[SDK IPC] Invalid LED-area count in initialization response.");
+                TerminateSdkHost("invalid snapshot bounds");
+                return SDK_HOST_PROTOCOL_ERROR;
+            }
+        }
+    }
+
+    ULONGLONG elapsed = GetTickCount64() - started;
+    g_lastSdkProgress = GetTickCount64();
+    if (traceEveryCall || response.result != MLAPI_OK || elapsed >= 250) {
+        char end[224];
+        snprintf(end, sizeof(end), "[SDK IPC] END seq=%lu op=%s result=%d elapsed=%llums",
+            request.sequence, opName, response.result, elapsed);
+        Log(end);
+    }
+
+    if (responseOut) {
+        ZeroMemory(responseOut, sizeof(*responseOut));
+        memcpy(responseOut, &response, expectedBytes);
+    }
+    return response.result;
+}
+
+static void CopySnapshotToResponse(SdkIpcResponse& response) {
+    std::lock_guard<std::mutex> lock(g_hwMutex);
+    response.deviceCount = min(static_cast<DWORD>(g_hwSnapshot.size()), SDK_IPC_MAX_DEVICES);
+    for (DWORD i = 0; i < response.deviceCount; ++i) {
+        const HwDevice& source = g_hwSnapshot[i];
+        SdkIpcDevice& target = response.devices[i];
+        wcsncpy_s(target.type, source.type.c_str(), _TRUNCATE);
+        wcsncpy_s(target.friendly, source.friendly.c_str(), _TRUNCATE);
+        target.areaCount = min(static_cast<DWORD>(source.areas.size()), SDK_IPC_MAX_AREAS);
+        for (DWORD j = 0; j < target.areaCount; ++j) {
+            target.areas[j].index = source.areas[j].index;
+            wcsncpy_s(target.areas[j].name, source.areas[j].name.c_str(), _TRUNCATE);
+        }
+    }
+}
+
+static int SdkHostMain(HANDLE requestRead, HANDLE responseWrite) {
+    g_isSdkHost = true;
+    HRESULT coHr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    bool comInitialized = SUCCEEDED(coHr);
+
+    g_hLibrary = LoadLibraryW(L"MysticLight_SDK.dll");
+    bool bound = comInitialized && g_hLibrary && BindMSISDK(g_hLibrary);
+    bool initialized = false;
+    bool running = true;
+    auto responseStorage = std::make_unique<SdkIpcResponse>();
+    SdkIpcResponse& response = *responseStorage;
+
+    while (running) {
+        SdkIpcRequest request = {};
+        if (!PipeReadExact(requestRead, &request, sizeof(request))) break;
+
+        DWORD responseBytes = request.command == SdkCommand::Initialize
+            ? static_cast<DWORD>(sizeof(SdkIpcResponse))
+            : SDK_IPC_RESPONSE_HEADER_SIZE;
+        ZeroMemory(&response, responseBytes);
+        response.magic = SDK_IPC_MAGIC;
+        response.version = SDK_IPC_VERSION;
+        response.sequence = request.sequence;
+        response.hostProcessId = GetCurrentProcessId();
+        response.result = SDK_HOST_PROTOCOL_ERROR;
+        response.initializeResult = MLAPI_NOT_INITIALIZED;
+        response.deviceInfoResult = MLAPI_NOT_INITIALIZED;
+
+        if (request.magic == SDK_IPC_MAGIC && request.version == SDK_IPC_VERSION) {
+            if (!bound) {
+                response.result = comInitialized ? SDK_HOST_LOAD_FAILED : SDK_HOST_COM_FAILED;
+            }
+            else switch (request.command) {
+            case SdkCommand::Initialize: {
+                if (initialized) {
+                    lpMLAPI_Release();
+                    initialized = false;
+                }
+                response.initializeResult = lpMLAPI_Initialize();
+                response.result = response.initializeResult;
+                if (response.initializeResult == MLAPI_OK) {
+                    initialized = true;
+                    response.deviceInfoResult = BuildHardwareSnapshot();
+                    response.result = response.deviceInfoResult;
+                    if (response.result == MLAPI_OK) CopySnapshotToResponse(response);
+                }
+                break;
+            }
+            case SdkCommand::SetStyle:
+                response.result = initialized
+                    ? lpMLAPI_SetLedStyle(_bstr_t(request.device), request.ledIndex, _bstr_t(request.style))
+                    : MLAPI_NOT_INITIALIZED;
+                break;
+            case SdkCommand::SetColor:
+                response.result = initialized
+                    ? lpMLAPI_SetLedColor(_bstr_t(request.device), request.ledIndex, request.r, request.g, request.b)
+                    : MLAPI_NOT_INITIALIZED;
+                break;
+            case SdkCommand::Heartbeat: {
+                SAFEARRAY* types = nullptr;
+                SAFEARRAY* counts = nullptr;
+                response.result = initialized ? lpMLAPI_GetDeviceInfo(&types, &counts) : MLAPI_NOT_INITIALIZED;
+                if (response.result == MLAPI_OK && (!types || !counts)) response.result = MLAPI_ERROR;
+                if (types) SafeArrayDestroy(types);
+                if (counts) SafeArrayDestroy(counts);
+                break;
+            }
+            case SdkCommand::Shutdown:
+                response.result = initialized ? lpMLAPI_Release() : MLAPI_OK;
+                initialized = false;
+                running = false;
+                break;
+            default:
+                response.result = SDK_HOST_PROTOCOL_ERROR;
+                break;
+            }
+        }
+
+        if (!PipeWriteExact(responseWrite, &response, responseBytes)) break;
+    }
+
+    if (initialized && lpMLAPI_Release) lpMLAPI_Release();
+    if (g_hLibrary) { FreeLibrary(g_hLibrary); g_hLibrary = NULL; }
+    CloseHandle(requestRead);
+    CloseHandle(responseWrite);
+    if (comInitialized) CoUninitialize();
+    return 0;
+}
+
+static bool TryRunSdkHostFromCommandLine(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+
+    bool isHost = argc == 4 && wcscmp(argv[1], L"--sdk-host") == 0;
+    if (isHost) {
+        uintptr_t requestHandle = static_cast<uintptr_t>(_wcstoui64(argv[2], NULL, 10));
+        uintptr_t responseHandle = static_cast<uintptr_t>(_wcstoui64(argv[3], NULL, 10));
+        HANDLE requestRead = reinterpret_cast<HANDLE>(requestHandle);
+        HANDLE responseWrite = reinterpret_cast<HANDLE>(responseHandle);
+        LocalFree(argv);
+        exitCode = SdkHostMain(requestRead, responseWrite);
+        return true;
+    }
+
+    LocalFree(argv);
+    return false;
+}
+static int SdkSetStyle(const wchar_t* device, DWORD ledIndex, const wchar_t* style,
+    DWORD timeout = SDK_RENDER_TIMEOUT_MS) {
+    SdkIpcRequest request = {};
+    request.command = SdkCommand::SetStyle;
+    wcsncpy_s(request.device, device, _TRUNCATE);
+    wcsncpy_s(request.style, style, _TRUNCATE);
+    request.ledIndex = ledIndex;
+    return SendSdkCommand(request, nullptr, timeout);
+}
+
+static int SdkSetColor(const wchar_t* device, DWORD ledIndex, DWORD r, DWORD g, DWORD b,
+    DWORD timeout = SDK_RENDER_TIMEOUT_MS) {
+    SdkIpcRequest request = {};
+    request.command = SdkCommand::SetColor;
+    wcsncpy_s(request.device, device, _TRUNCATE);
+    request.ledIndex = ledIndex;
+    request.r = r;
+    request.g = g;
+    request.b = b;
+    return SendSdkCommand(request, nullptr, timeout);
+}
+
+static int SdkHeartbeat() {
+    SdkIpcRequest request = {};
+    request.command = SdkCommand::Heartbeat;
+    return SendSdkCommand(request, nullptr, SDK_RENDER_TIMEOUT_MS);
+}
+
+static void PublishHardwareSnapshot(const SdkIpcResponse& response) {
+    std::vector<HwDevice> snapshot;
+    DWORD deviceCount = min(response.deviceCount, SDK_IPC_MAX_DEVICES);
+    snapshot.reserve(deviceCount);
+    for (DWORD i = 0; i < deviceCount; ++i) {
+        HwDevice device;
+        device.type = response.devices[i].type;
+        device.friendly = response.devices[i].friendly;
+        DWORD areaCount = min(response.devices[i].areaCount, SDK_IPC_MAX_AREAS);
+        for (DWORD j = 0; j < areaCount; ++j) {
+            HwArea area;
+            area.index = response.devices[i].areas[j].index;
+            area.name = response.devices[i].areas[j].name;
+            device.areas.push_back(std::move(area));
+        }
+        snapshot.push_back(std::move(device));
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_hwMutex);
+        g_hwSnapshot = std::move(snapshot);
+    }
+
+    char message[160];
+    snprintf(message, sizeof(message), "[SDK Supervisor] Hardware snapshot published: %lu device(s)",
+        response.deviceCount);
+    Log(message);
+    for (DWORD i = 0; i < deviceCount; ++i) {
+        char deviceMessage[LOG_BUFFER_SIZE];
+        snprintf(deviceMessage, sizeof(deviceMessage),
+            "[SDK Supervisor] Device %lu: %ls (type=%ls, areas=%lu)", i,
+            response.devices[i].friendly, response.devices[i].type,
+            response.devices[i].areaCount);
+        Log(deviceMessage);
+    }
+}
+
+static int ProbeSdkOutput(const Config& cfg) {
+    if (!g_LedsEnabled.load()) {
+        return SdkSetStyle(cfg.targetDevice, cfg.targetLedIndex, L"Off");
+    }
+
+    if (g_activeSource.load() == DataSource::Searching) {
+        int result = SdkSetStyle(cfg.targetDevice, cfg.targetLedIndex, L"Breath");
+        if (result == MLAPI_OK) {
+            result = SdkSetColor(cfg.targetDevice, cfg.targetLedIndex, 255, 255, 255);
+        }
+        return result;
+    }
+
+    int result = SdkSetStyle(cfg.targetDevice, cfg.targetLedIndex, L"Steady");
+    if (result == MLAPI_OK) {
+        DWORD probeR = lastR.load();
+        DWORD probeG = lastG.load();
+        DWORD probeB = lastB.load();
+        if (probeR > 255 || probeG > 255 || probeB > 255) {
+            probeR = GetRValue(cfg.colorLow);
+            probeG = GetGValue(cfg.colorLow);
+            probeB = GetBValue(cfg.colorLow);
+        }
+        result = SdkSetColor(cfg.targetDevice, cfg.targetLedIndex, probeR, probeG, probeB);
+    }
+    return result;
+}
+
+static bool StartAndValidateSdk(const Config& cfg) {
+    if (!StartSdkHost()) return false;
+
+    SdkIpcRequest request = {};
+    request.command = SdkCommand::Initialize;
+    auto response = std::make_unique<SdkIpcResponse>();
+    ZeroMemory(response.get(), sizeof(*response));
+    int result = SendSdkCommand(request, response.get(), SDK_INIT_TIMEOUT_MS);
+    if (result != MLAPI_OK) {
+        if (result <= SDK_IPC_TIMEOUT) {
+            LogSDKError("SDK host transport/startup", result);
+        }
+        else if (response->initializeResult != MLAPI_OK) {
+            LogSDKError("MLAPI_Initialize (isolated host)", response->initializeResult);
+        }
+        else if (response->deviceInfoResult != MLAPI_OK) {
+            LogSDKError("MLAPI_GetDeviceInfo (isolated host)", response->deviceInfoResult);
+        }
+        else {
+            LogSDKError("SDK host initialize/enumerate", result);
+        }
+        TerminateSdkHost("initialization or enumeration failed");
+        return false;
+    }
+
+    PublishHardwareSnapshot(*response);
+    result = ProbeSdkOutput(cfg);
+    if (result != MLAPI_OK) {
+        LogSDKError("SDK output validation", result);
+        TerminateSdkHost("output validation failed");
+        return false;
+    }
+
+    g_lastSdkHeartbeatLog = GetTickCount64();
+    Log("[SDK Supervisor] SDK Online; enumeration and LED output validated.");
+    return true;
+}
+
+static void ShutdownSdkHost() {
+    if (!g_hSdkHostProcess) return;
+
+    SdkIpcRequest request = {};
+    request.command = SdkCommand::Shutdown;
+    int result = SendSdkCommand(request, nullptr, SDK_SHUTDOWN_TIMEOUT_MS);
+    if (result == MLAPI_OK && g_hSdkHostProcess) {
+        if (WaitForSingleObject(g_hSdkHostProcess, SDK_SHUTDOWN_TIMEOUT_MS) == WAIT_OBJECT_0) {
+            Log("[SDK Supervisor] SDK host stopped cleanly.");
+            CloseSdkHostHandles();
+            return;
+        }
+    }
+    if (g_hSdkHostProcess) TerminateSdkHost("shutdown deadline exceeded");
+}
+
+static void BeginSdkRecovery(const char* reason) {
+    if (g_Resetting_sdk.exchange(true)) return;
+
+    char message[256];
+    snprintf(message, sizeof(message), "[SDK Supervisor] Recovery requested: %s",
+        reason ? reason : "SDK failure threshold reached");
+    Log(message);
+    g_ResetStage = 0;
+    g_ResetTimer = GetTickCount64();
+}
+
 /**
- * Executes an SDK function and manages failure counters
+ * Tracks SDK health without letting one successful frame erase an unstable
+ * sequence. Transport failures and MSI timeouts enter recovery immediately;
+ * ordinary API failures still use the bounded consecutive-failure threshold.
  */
 static bool SafeSDKCall(int result, const char* funcName) {
     if (result == MLAPI_OK) {
-        g_sdkFailCount = 0; // Reset count on success
+        if (g_sdkSuccessStreak < 10) ++g_sdkSuccessStreak;
+        if (g_sdkSuccessStreak >= 10) g_sdkFailCount = 0;
         return true;
     }
 
     LogSDKError(funcName, result);
-    g_sdkFailCount++;
+    g_sdkSuccessStreak = 0;
 
-    if (g_sdkFailCount >= MAX_SDK_FAILURES && !g_Resetting_sdk) {
-        Log("[MysticFight] Critical failure threshold reached. SDK Reset triggered.");
-        g_Resetting_sdk = true;
-        g_ResetStage = 0;
-    }
+    bool immediateRecovery = result == MLAPI_TIMEOUT || result == MLAPI_NOT_INITIALIZED ||
+        result == SDK_IPC_TIMEOUT || result == SDK_IPC_BROKEN ||
+        result == SDK_HOST_LOAD_FAILED || result == SDK_HOST_PROTOCOL_ERROR ||
+        result == SDK_HOST_COM_FAILED;
+    if (immediateRecovery) g_sdkFailCount = MAX_SDK_FAILURES;
+    else if (g_sdkFailCount < MAX_SDK_FAILURES) ++g_sdkFailCount;
+
+    if (g_sdkFailCount >= MAX_SDK_FAILURES) BeginSdkRecovery(funcName);
     return false;
+}
+
+static void LogTaskControlFailure(const char* operation, HRESULT hr) {
+    if (SUCCEEDED(hr)) return;
+    char message[192];
+    snprintf(message, sizeof(message), "[SDK Supervisor] Scheduled-task %s failed: HRESULT=0x%08lX",
+        operation, static_cast<unsigned long>(hr));
+    Log(message);
+}
+
+static void AcknowledgeLedRequest(ULONGLONG& lastAcknowledgedGeneration) {
+    ULONGLONG generation = g_ledCommandGeneration.load();
+    if (generation <= lastAcknowledgedGeneration) return;
+
+    lastAcknowledgedGeneration = generation;
+    char trace[160];
+    snprintf(trace, sizeof(trace), "[LED] APPLIED generation=%llu state=%s",
+        generation, g_LedsEnabled.load() ? "ON" : "OFF");
+    Log(trace);
 }
 
 static void ShowLetsDanceNotification(HWND hWnd) {
@@ -2740,51 +3385,47 @@ static void EngineWait(DWORD ms) {
     while (PeekMessage(&m, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessage(&m); }
 }
 
-// All MSI SDK calls (init, detection, render, recovery, release) run here so a
-// hung SDK call can never freeze the UI thread. UI-facing results (tray tooltip,
-// notifications, fatal dialogs) are marshalled to the UI thread via PostMessage.
+// The engine owns the supervisor and IPC channel. The vendor SDK itself runs in
+// a killable child process, so a permanently blocked MSI call cannot strand the
+// UI or prevent bounded recovery.
 static void EngineThread(HWND hWnd) {
-    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    HRESULT coHr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    bool comInitialized = SUCCEEDED(coHr);
+    if (!comInitialized && coHr != RPC_E_CHANGED_MODE) {
+        char message[160];
+        snprintf(message, sizeof(message),
+            "[SDK Supervisor] Engine COM initialization failed: HRESULT=0x%08lX",
+            static_cast<unsigned long>(coHr));
+        Log(message);
+        if (g_hHwReadyEvent) SetEvent(g_hHwReadyEvent);
+        PostMessage(hWnd, WM_APP_FATAL, 1, 0);
+        return;
+    }
 
-    _bstr_t bstrOff(L"Off");
-    _bstr_t bstrSteady(L"Steady");
-    _bstr_t bstrBreath(L"Breath");
-    _bstr_t bstrDevice(L"");
+    Config startupConfig;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+        startupConfig = g_cfg;
+    }
 
-    // ---- Startup init ----
-    bool sdkOk = false; // whether the SDK is currently initialized (guards shutdown calls)
-    int hrInit = lpMLAPI_Initialize();
-    if (hrInit == MLAPI_OK) {
-        Log("[MysticFight] SDK Initialized successfully");
-        sdkOk = true;
-        MSIHwardwareDetection();
-        BuildHardwareSnapshot();
+    bool sdkReady = StartAndValidateSdk(startupConfig);
+    if (sdkReady) {
+        g_sdkFailCount = 0;
+        g_sdkSuccessStreak = 0;
+        g_resetCounter = 0;
         SetEvent(g_hHwReadyEvent);
         PostMessage(hWnd, WM_APP_HWREADY, 0, 0);
         PostMessage(hWnd, WM_APP_STATUS, 0, 0);
         PostMessage(hWnd, WM_APP_LETSDANCE, 0, 0);
     }
     else {
-        LogSDKError("MLAPI_Initialize (Startup)", hrInit);
-        if (hrInit == MLAPI_NO_IMPLEMENTED || hrInit == MLAPI_ERROR) {
-            Log("[MysticFight] SDK service unavailable. Attempting auto-repair...");
-            g_Resetting_sdk = true;
-            g_ResetStage = 0;
-            g_ResetTimer = GetTickCount64();
-            SetEvent(g_hHwReadyEvent); // unblock the UI's first-run wait
-        }
-        else {
-            // Unrecoverable. Signal hw-ready FIRST (so a first-run UI stops waiting),
-            // then SEND (blocking) the fatal message so it is shown even if the UI
-            // has not yet reached its message loop. The handler sets g_Running=false.
-            SetEvent(g_hHwReadyEvent);
-            SendMessage(hWnd, WM_APP_FATAL, 1, 0);
-        }
+        SetEvent(g_hHwReadyEvent); // unblock first-run settings while recovery proceeds
+        BeginSdkRecovery("startup initialization, enumeration, or output probe failed");
     }
 
-    // ---- Loop state ----
     int lastProcessedVersion = -1;
     ULONGLONG nextFrameTime = 0;
+    ULONGLONG lastAcknowledgedGeneration = 0;
     DWORD targetR = 0, targetG = 0, targetB = 0;
     bool firstRunLoop = true;
 
@@ -2800,7 +3441,6 @@ static void EngineThread(HWND hWnd) {
         }
 
         if (g_ConfigVersion != lastProcessedVersion) {
-            bstrDevice = cfgLocal.targetDevice;
             lastProcessedVersion = g_ConfigVersion;
             forceLEDRefresh();
             Log("[MysticFight] Config refreshed");
@@ -2808,54 +3448,64 @@ static void EngineThread(HWND hWnd) {
 
         ULONGLONG currentTime = GetTickCount64();
 
-        // ---- SDK recovery ----
         if (g_Resetting_sdk) {
             if (currentTime >= g_ResetTimer) {
                 switch (g_ResetStage) {
-                case 0:
-                    Log("[MysticFight] Restarting MSI Service...");
+                case 0: {
+                    sdkReady = false;
+                    TerminateSdkHost("recovery attempt");
+                    char message[160];
+                    snprintf(message, sizeof(message),
+                        "[SDK Supervisor] Recovery attempt %d/%d: restarting MSI service",
+                        g_resetCounter + 1, SDK_MAX_RESETS);
+                    Log(message);
                     PostMessage(hWnd, WM_APP_STATUS, 1, 0);
-                    ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", false);
+                    HRESULT hrTask = ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", false);
+                    LogTaskControlFailure("stop", hrTask);
                     KillProcessByName(L"LEDKeeper2.exe");
                     g_ResetTimer = currentTime + KILL_LEDKEEPER_TASK_WAIT_MS;
                     g_ResetStage = 1;
                     break;
-                case 1:
-                    ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", true);
+                }
+                case 1: {
+                    HRESULT hrTask = ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", true);
+                    LogTaskControlFailure("start", hrTask);
                     g_ResetTimer = currentTime + RESET_LEDKEEPER_TASK_DELAY_MS;
                     g_ResetStage = 2;
                     break;
+                }
                 case 2:
-                    Log("[MysticFight] Connecting to SDK...");
+                    Log("[SDK Supervisor] Connecting isolated SDK host...");
                     PostMessage(hWnd, WM_APP_STATUS, 2, 0);
 
-                    int hr = lpMLAPI_Initialize();
-
-                    if (hr == MLAPI_OK) {
-                        Log("[MysticFight] SDK Online.");
-                        sdkOk = true;
-                        MSIHwardwareDetection();
-                        BuildHardwareSnapshot();
-                        SetEvent(g_hHwReadyEvent);
-                        PostMessage(hWnd, WM_APP_HWREADY, 0, 0);
+                    if (StartAndValidateSdk(cfgLocal)) {
+                        sdkReady = true;
                         g_Resetting_sdk = false;
                         g_resetCounter = 0;
+                        g_sdkFailCount = 0;
+                        g_sdkSuccessStreak = 0;
                         g_pendingStyleChange = true;
                         forceLEDRefresh();
+                        SetEvent(g_hHwReadyEvent);
+                        PostMessage(hWnd, WM_APP_HWREADY, 0, 0);
                         PostMessage(hWnd, WM_APP_STATUS, 0, 0);
                         PostMessage(hWnd, WM_APP_LETSDANCE, 0, 0);
+                        AcknowledgeLedRequest(lastAcknowledgedGeneration);
                     }
                     else {
-                        g_resetCounter++;
-                        LogSDKError("MLAPI_Initialize", hr);
+                        ++g_resetCounter;
                         if (g_resetCounter >= SDK_MAX_RESETS) {
-                            // UI is already pumping here; SEND so the box is shown and
-                            // the handler owns g_Running=false + PostQuitMessage.
+                            Log("[SDK Supervisor] Recovery exhausted after three validated attempts.");
                             SendMessage(hWnd, WM_APP_FATAL, 2, 0);
                         }
                         else {
+                            ULONGLONG backoff = RESET_SDK_RETRY_DELAY_MS << (g_resetCounter - 1);
+                            char message[192];
+                            snprintf(message, sizeof(message),
+                                "[SDK Supervisor] Recovery attempt failed; retrying in %llums", backoff);
+                            Log(message);
                             g_ResetStage = 0;
-                            g_ResetTimer = currentTime + RESET_SDK_RETRY_DELAY_MS;
+                            g_ResetTimer = GetTickCount64() + backoff;
                         }
                     }
                     break;
@@ -2865,137 +3515,177 @@ static void EngineThread(HWND hWnd) {
             continue;
         }
 
-        // ---- COLOR LOGIC (WITH FPS COMPENSATION) ----
-        if (g_activeSource == DataSource::Searching) {
-            if (g_pendingStyleChange) {
-                g_pendingStyleChange = false;
-                if (SafeSDKCall(lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrBreath), "SetLedStyle (Search)")) {
-                    SafeSDKCall(lpMLAPI_SetLedColor(bstrDevice, cfgLocal.targetLedIndex, 255, 255, 255), "SetLedColor (Search)");
-                }
-                lastR = RGB_LED_REFRESH;
-            }
-        }
-        else if (!g_LedsEnabled) {
+        // OFF is an explicit user command and must win even while LHM is being
+        // rediscovered. Previously the Searching branch masked it indefinitely.
+        if (!g_LedsEnabled) {
             if (lastR != RGB_LEDS_OFF || g_pendingStyleChange) {
                 g_pendingStyleChange = false;
-                if (SafeSDKCall(lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrOff), "SetLedStyle (Off)")) {
+                if (SafeSDKCall(
+                    SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Off"),
+                    "SetLedStyle (Off)")) {
                     lastR = RGB_LEDS_OFF;
+                    AcknowledgeLedRequest(lastAcknowledgedGeneration);
+                }
+                else if (!g_Resetting_sdk) {
+                    g_pendingStyleChange = true;
                 }
             }
         }
-        else {
-            if (currentTime >= nextFrameTime) {
-                nextFrameTime = currentTime + (1000 / ledRefreshFPS);
+        else if (g_activeSource == DataSource::Searching) {
+            if (g_pendingStyleChange) {
+                g_pendingStyleChange = false;
+                bool applied = SafeSDKCall(
+                    SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Breath"),
+                    "SetLedStyle (Search)");
+                if (applied) {
+                    applied = SafeSDKCall(
+                        SdkSetColor(cfgLocal.targetDevice, cfgLocal.targetLedIndex, 255, 255, 255),
+                        "SetLedColor (Search)");
+                }
+                if (applied) {
+                    lastR = RGB_LED_REFRESH;
+                    AcknowledgeLedRequest(lastAcknowledgedGeneration);
+                }
+                else if (!g_Resetting_sdk) {
+                    g_pendingStyleChange = true;
+                }
+            }
+        }
+        else if (currentTime >= nextFrameTime) {
+            nextFrameTime = currentTime + (1000 / ledRefreshFPS);
+            float rawTemp = g_asyncTemp;
 
-                float rawTemp = g_asyncTemp;
+            if (rawTemp >= 0.0f) {
+                if (g_pendingStyleChange) { g_pendingStyleChange = false; forceLEDRefresh(); }
 
-                if (rawTemp >= 0.0f) {
-                    if (g_pendingStyleChange) { g_pendingStyleChange = false; forceLEDRefresh(); }
+                float temp = floorf(rawTemp * 2.0f + 0.5f) / 2.0f;
+                if (temp != lastTemp) {
+                    lastTemp = temp;
+                    float ratio = 0.0f;
+                    COLORREF c1 = 0, c2 = 0;
 
-                    float temp = floorf(rawTemp * 2.0f + 0.5f) / 2.0f;
-
-                    if (temp != lastTemp) {
-                        lastTemp = temp;
-                        float ratio = 0.0f;
-                        COLORREF c1 = 0, c2 = 0;
-
-                        if (temp <= (float)cfgLocal.tempLow) {
-                            targetR = GetRValue(cfgLocal.colorLow); targetG = GetGValue(cfgLocal.colorLow); targetB = GetBValue(cfgLocal.colorLow);
-                        }
-                        else if (temp < (float)cfgLocal.tempMed) {
-                            float range = ((float)cfgLocal.tempMed - (float)cfgLocal.tempLow);
-                            ratio = range > 0.0f ? (temp - (float)cfgLocal.tempLow) / range : 0.0f;
-                            c1 = cfgLocal.colorLow; c2 = cfgLocal.colorMed;
-                        }
-                        else if (temp < (float)cfgLocal.tempHigh) {
-                            float range = ((float)cfgLocal.tempHigh - (float)cfgLocal.tempMed);
-                            ratio = range > 0.0f ? (temp - (float)cfgLocal.tempMed) / range : 0.0f;
-                            c1 = cfgLocal.colorMed; c2 = cfgLocal.colorHigh;
-                        }
-                        else {
-                            targetR = GetRValue(cfgLocal.colorHigh); targetG = GetGValue(cfgLocal.colorHigh); targetB = GetBValue(cfgLocal.colorHigh);
-                        }
-
-                        if (c1 != 0 || c2 != 0) {
-                            double r1 = (double)GetRValue(c1), g1 = (double)GetGValue(c1), b1 = (double)GetBValue(c1);
-                            double r2 = (double)GetRValue(c2), g2 = (double)GetGValue(c2), b2 = (double)GetBValue(c2);
-                            targetR = (DWORD)sqrt(r1 * r1 * (1.0 - ratio) + r2 * r2 * ratio);
-                            targetG = (DWORD)sqrt(g1 * g1 * (1.0 - ratio) + g2 * g2 * ratio);
-                            targetB = (DWORD)sqrt(b1 * b1 * (1.0 - ratio) + b2 * b2 * ratio);
-                        }
-
-                        if (firstRunLoop) { currR = (float)targetR; currG = (float)targetG; currB = (float)targetB; firstRunLoop = false; }
+                    if (temp <= (float)cfgLocal.tempLow) {
+                        targetR = GetRValue(cfgLocal.colorLow);
+                        targetG = GetGValue(cfgLocal.colorLow);
+                        targetB = GetBValue(cfgLocal.colorLow);
+                    }
+                    else if (temp < (float)cfgLocal.tempMed) {
+                        float range = ((float)cfgLocal.tempMed - (float)cfgLocal.tempLow);
+                        ratio = range > 0.0f ? (temp - (float)cfgLocal.tempLow) / range : 0.0f;
+                        c1 = cfgLocal.colorLow; c2 = cfgLocal.colorMed;
+                    }
+                    else if (temp < (float)cfgLocal.tempHigh) {
+                        float range = ((float)cfgLocal.tempHigh - (float)cfgLocal.tempMed);
+                        ratio = range > 0.0f ? (temp - (float)cfgLocal.tempMed) / range : 0.0f;
+                        c1 = cfgLocal.colorMed; c2 = cfgLocal.colorHigh;
+                    }
+                    else {
+                        targetR = GetRValue(cfgLocal.colorHigh);
+                        targetG = GetGValue(cfgLocal.colorHigh);
+                        targetB = GetBValue(cfgLocal.colorHigh);
                     }
 
-                    float timeCompensation = 25.0f / (float)(ledRefreshFPS > 0 ? ledRefreshFPS : 25);
-                    float adjustedFactor = smoothingFactor * timeCompensation;
-                    if (adjustedFactor > 1.0f) adjustedFactor = 1.0f;
+                    if (c1 != 0 || c2 != 0) {
+                        double r1 = (double)GetRValue(c1), g1 = (double)GetGValue(c1), b1 = (double)GetBValue(c1);
+                        double r2 = (double)GetRValue(c2), g2 = (double)GetGValue(c2), b2 = (double)GetBValue(c2);
+                        targetR = (DWORD)sqrt(r1 * r1 * (1.0 - ratio) + r2 * r2 * ratio);
+                        targetG = (DWORD)sqrt(g1 * g1 * (1.0 - ratio) + g2 * g2 * ratio);
+                        targetB = (DWORD)sqrt(b1 * b1 * (1.0 - ratio) + b2 * b2 * ratio);
+                    }
 
-                    currR += ((float)targetR - currR) * adjustedFactor;
-                    currG += ((float)targetG - currG) * adjustedFactor;
-                    currB += ((float)targetB - currB) * adjustedFactor;
+                    if (firstRunLoop) {
+                        currR = (float)targetR; currG = (float)targetG; currB = (float)targetB;
+                        firstRunLoop = false;
+                    }
+                }
 
-                    DWORD sendR = (DWORD)roundf(currR), sendG = (DWORD)roundf(currG), sendB = (DWORD)roundf(currB);
+                float adjustedFactor = smoothingFactor * (25.0f / (float)ledRefreshFPS);
+                if (adjustedFactor > 1.0f) adjustedFactor = 1.0f;
+                currR += ((float)targetR - currR) * adjustedFactor;
+                currG += ((float)targetG - currG) * adjustedFactor;
+                currB += ((float)targetB - currB) * adjustedFactor;
 
-                    if (sendR != lastR || sendG != lastG || sendB != lastB) {
-                        bool success = true;
-                        if (lastR == RGB_LEDS_OFF || lastR == RGB_LED_REFRESH) {
-                            success = SafeSDKCall(lpMLAPI_SetLedStyle(bstrDevice, cfgLocal.targetLedIndex, bstrSteady), "SetLedStyle (Steady)");
-                        }
-                        if (success) {
-                            if (SafeSDKCall(lpMLAPI_SetLedColor(bstrDevice, cfgLocal.targetLedIndex, sendR, sendG, sendB), "SetLedColor")) {
-                                lastR = sendR; lastG = sendG; lastB = sendB;
-                            }
-                        }
+                DWORD sendR = (DWORD)roundf(currR);
+                DWORD sendG = (DWORD)roundf(currG);
+                DWORD sendB = (DWORD)roundf(currB);
+                if (sendR != lastR || sendG != lastG || sendB != lastB) {
+                    bool applied = true;
+                    if (lastR == RGB_LEDS_OFF || lastR == RGB_LED_REFRESH) {
+                        applied = SafeSDKCall(
+                            SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Steady"),
+                            "SetLedStyle (Steady)");
+                    }
+                    if (applied) {
+                        applied = SafeSDKCall(
+                            SdkSetColor(cfgLocal.targetDevice, cfgLocal.targetLedIndex, sendR, sendG, sendB),
+                            "SetLedColor");
+                    }
+                    if (applied) {
+                        lastR = sendR; lastG = sendG; lastB = sendB;
+                        AcknowledgeLedRequest(lastAcknowledgedGeneration);
                     }
                 }
             }
         }
 
-        DWORD dwWait;
-        if (!g_LedsEnabled) dwWait = (DWORD)MAIN_LOOP_OFF_DELAY_MS;
+        currentTime = GetTickCount64();
+        // Active render/style traffic already proves the host is responsive.
+        // Probe only after a genuinely idle interval, and much less frequently
+        // while lights are off because the next real toggle also probes at once.
+        ULONGLONG heartbeatInterval = g_LedsEnabled.load()
+            ? SDK_HEARTBEAT_ACTIVE_INTERVAL_MS
+            : SDK_HEARTBEAT_OFF_INTERVAL_MS;
+        if (!g_Resetting_sdk && currentTime - g_lastSdkProgress >= heartbeatInterval) {
+            if (SafeSDKCall(SdkHeartbeat(), "SDK heartbeat") &&
+                currentTime - g_lastSdkHeartbeatLog >= SDK_HEARTBEAT_LOG_INTERVAL_MS) {
+                char message[160];
+                snprintf(message, sizeof(message), "[SDK Supervisor] HEARTBEAT ok pid=%lu",
+                    g_sdkHostProcessId);
+                Log(message);
+                g_lastSdkHeartbeatLog = currentTime;
+            }
+        }
+
+        DWORD waitTime;
+        if (!g_LedsEnabled) waitTime = (DWORD)MAIN_LOOP_OFF_DELAY_MS;
+        else if (g_activeSource == DataSource::Searching) waitTime = 100;
         else {
             ULONGLONG now = GetTickCount64();
-            if (nextFrameTime > now) {
-                dwWait = (DWORD)min((ULONGLONG)(1000 / ledRefreshFPS), nextFrameTime - now);
-            }
-            else dwWait = 0;
+            waitTime = nextFrameTime > now
+                ? (DWORD)min((ULONGLONG)(1000 / ledRefreshFPS), nextFrameTime - now)
+                : 0;
         }
-
-        EngineWait(dwWait);
+        EngineWait(waitTime);
     }
 
-    // ---- SDK shutdown (single owner) ----
-    // Only touch the SDK if it was ever initialized, so a failed-init exit does
-    // not spam the log with NOT_INITIALIZED errors.
-    if (sdkOk && lpMLAPI_SetLedStyle) {
-        wchar_t dev[256]; int ledIdx;
+    if (sdkReady && g_hSdkHostProcess) {
+        Config cfgLocal;
         {
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-            Config& p = g_Global.profiles[g_Global.activeProfileIndex];
-            wcscpy_s(dev, p.targetDevice);
-            ledIdx = p.targetLedIndex;
+            cfgLocal = g_cfg;
         }
-        int hrStyle = lpMLAPI_SetLedStyle(_bstr_t(dev), ledIdx, bstrOff);
-        if (hrStyle == MLAPI_OK) Log("[MysticFight] LEDs power off");
-        else LogSDKError("MLAPI_SetLedStyle (Cleanup)", hrStyle);
+        int result = SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex,
+            L"Off", SDK_SHUTDOWN_TIMEOUT_MS);
+        if (result == MLAPI_OK) Log("[MysticFight] LEDs power off");
+        else LogSDKError("SetLedStyle (Cleanup)", result);
     }
-    if (sdkOk && lpMLAPI_Release) {
-        int hrRelease = lpMLAPI_Release();
-        if (hrRelease == MLAPI_OK) Log("[MysticFight] MSI SDK Released");
-        else LogSDKError("MLAPI_Release", hrRelease);
-    }
-    if (g_deviceName) { SysFreeString(g_deviceName); g_deviceName = NULL; }
+    ShutdownSdkHost();
 
     Log("[MysticFight] Engine thread BYE BYE");
-    CoUninitialize();
+    if (comInitialized) CoUninitialize();
 }
 
 // ============================================================================
 // MAIN ENTRY POINT
 // ============================================================================
 
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
+    _In_ LPSTR lpCmdLine, _In_ int nCmdShow) {
+    // The SDK helper must bypass the UI, mutex, tray and priority setup. It owns
+    // the vendor DLL and communicates only through inherited anonymous pipes.
+    int sdkHostExit = 0;
+    if (TryRunSdkHostFromCommandLine(sdkHostExit)) return sdkHostExit;
+
     // Basic Process Initialization
     INITCOMMONCONTROLSEX icce = { sizeof(icce), ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES };
     InitCommonControlsEx(&icce);
@@ -3022,10 +3712,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     try {
         {
             // Setup environment
-            if (!ExtractMSIDLL() || !(g_hLibrary = LoadLibraryW(L"MysticLight_SDK.dll")))
-                throw std::runtime_error("DLL preparation failed");
-
-            if (!BindMSISDK(g_hLibrary)) throw std::runtime_error("SDK Binding failed");
+            if (!ExtractMSIDLL()) throw std::runtime_error("DLL preparation failed");
 
             TrimLogFile();
 
@@ -3057,9 +3744,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
             Log("[MysticFight] Initializing MSI SDK and LHM HTTP Sensor Thread...");
 
-            // Synchronization events + worker threads. The engine thread owns all
-            // MSI SDK work; the sensor thread polls LHM over HTTP. This (UI) thread
-            // never blocks on the SDK or the network, so the tray stays responsive.
+            // Synchronization events + worker threads. The engine supervises the
+            // isolated SDK host; the sensor thread polls LHM over HTTP. This UI
+            // thread never blocks on the SDK or network, so the tray stays responsive.
             g_hSensorEvent  = CreateEventW(NULL, FALSE, FALSE, NULL); // auto-reset
             g_hEngineEvent  = CreateEventW(NULL, FALSE, FALSE, NULL); // auto-reset
             g_hHwReadyEvent = CreateEventW(NULL, TRUE,  FALSE, NULL); // manual-reset
@@ -3105,8 +3792,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // Termination — never block shutdown forever.
     // ====================================================================
     g_Running = false;
-    SetEvent(g_hSensorEvent); // wake the sensor thread
-    SetEvent(g_hEngineEvent); // wake the engine thread
+    if (g_hSensorEvent) SetEvent(g_hSensorEvent); // wake the sensor thread
+    if (g_hEngineEvent) SetEvent(g_hEngineEvent); // wake the engine thread
 
     // Bounded wait for both workers. A wedged blocking call (SDK or WinHTTP)
     // cannot be cancelled from here, so if a worker does not stop in time we
