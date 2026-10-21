@@ -1,3 +1,5 @@
+<div align="justify">
+  
 # MysticFight
 
 <img src="rgb.png" width="64" height="64" align="right" />
@@ -30,3 +32,4 @@ For this tool to work, you MUST have the following installed/running:
 2. **LibreHardwareMonitor:** [Download here](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/latest). Must be running (minimized on tray) to provide temperature data via Web Server (You must enable Remote Web Server in LHM options menu). <i>Note: Yes, I know there is a LibreHardwareMonitorLib available, but I don't have the time or inclination to mess around with CLR DLL wrappers such when LHM client works perfectly well for this task, is lightweight and useful for other popular monitoring applications such as RainMeter</i>.
 
 <p align="center"><img src="pepinazo.jpeg"/></p>
+</div>
