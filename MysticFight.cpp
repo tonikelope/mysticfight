@@ -419,7 +419,10 @@ std::atomic<bool> g_SettingsOpen{ false };
 std::atomic<bool> g_AboutOpen{ false };
 std::atomic<bool> g_pendingStyleChange{ true };
 std::atomic<int> g_ConfigVersion{ 0 };
-std::atomic<ULONGLONG> g_ledCommandGeneration{ 0 };
+// Desired LED state and its diagnostic generation are one logical value.
+// Guard them together so the engine never acknowledges a mixed snapshot.
+std::mutex g_ledRequestMutex;
+ULONGLONG g_ledCommandGeneration = 0;
 
 // LED Real-time State Tracking
 std::atomic<DWORD> lastR{ RGB_LED_REFRESH }, lastG{ RGB_LED_REFRESH }, lastB{ RGB_LED_REFRESH };
@@ -630,11 +633,16 @@ static void ShowNotification(HWND hWnd, const wchar_t* title, const wchar_t* inf
  * Toggles the LED state and updates UI/Hardware
  */
 static void ToggleLights(HWND hWnd) {
-    bool enabled = !g_LedsEnabled.load();
-    g_LedsEnabled = enabled;
-    ULONGLONG generation = g_ledCommandGeneration.fetch_add(1) + 1;
-    g_pendingStyleChange = true;
-    lastR = RGB_LED_REFRESH; // publish desired refresh before waking the engine
+    bool enabled;
+    ULONGLONG generation;
+    {
+        std::lock_guard<std::mutex> lock(g_ledRequestMutex);
+        enabled = !g_LedsEnabled.load();
+        g_LedsEnabled = enabled;
+        generation = ++g_ledCommandGeneration;
+        lastR = RGB_LED_REFRESH;
+        g_pendingStyleChange = true;
+    }
 
     char trace[160];
     snprintf(trace, sizeof(trace), "[LED] REQUEST generation=%llu state=%s",
@@ -1828,25 +1836,29 @@ static void LogAllLHMTemperatureSensors() {
 /**
  * Primary sensor polling function with state management
  */
-static float GetCPUTempFast() {
-    ULONGLONG currentTime = GetTickCount64();
-
-    if (g_activeSource == DataSource::Searching) {
-        if (currentTime - g_lastDataSourceSearchRetry <= LHM_RETRY_DELAY_MS) return -1.0f;
-        g_lastDataSourceSearchRetry = currentTime;
-    }
-
+static float GetCPUTempFast(int& sampledConfigVersion) {
     wchar_t localSensorID[SENSOR_ID_LEN];
     wchar_t localURL[256];
     {
         std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+        sampledConfigVersion = g_ConfigVersion.load();
         wcscpy_s(localSensorID, g_cfg.sensorID);
         wcscpy_s(localURL, g_cfg.webServerUrl);
+    }
+
+    ULONGLONG currentTime = GetTickCount64();
+    if (g_activeSource == DataSource::Searching) {
+        if (currentTime - g_lastDataSourceSearchRetry <= LHM_RETRY_DELAY_MS) return -1.0f;
+        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+        if (sampledConfigVersion != g_ConfigVersion.load()) return -1.0f;
+        g_lastDataSourceSearchRetry = currentTime;
     }
 
     std::string jsonStr = FetchLHMJson(localURL, HTTP_NORMAL_TIMEOUT);
 
     if (jsonStr.empty()) {
+        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+        if (sampledConfigVersion != g_ConfigVersion.load()) return -1.0f;
         if (g_activeSource == DataSource::HTTP) {
             g_httpConnectionDrops++;
             if (g_httpConnectionDrops >= 2) {
@@ -1860,14 +1872,22 @@ static float GetCPUTempFast() {
         return -1.0f;
     }
 
-    if (g_activeSource == DataSource::Searching) {
+    bool sourceDetected = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+        if (sampledConfigVersion != g_ConfigVersion.load()) return -1.0f;
+        if (g_activeSource == DataSource::Searching) {
+            g_activeSource = DataSource::HTTP;
+            g_pendingStyleChange = true;
+            sourceDetected = true;
+        }
+        g_httpConnectionDrops = 0;
+    }
+    if (sourceDetected) {
         Log("[MysticFight] LHM HTTP Data Source detected");
-        g_activeSource = DataSource::HTTP;
-        g_pendingStyleChange = true;
         LogAllLHMTemperatureSensors();
     }
 
-    g_httpConnectionDrops = 0;
     return ParseLHMJsonForTemp(jsonStr, localSensorID);
 }
 
@@ -1876,7 +1896,14 @@ static float GetCPUTempFast() {
  */
 static void SensorThread() {
     while (g_Running) {
-        g_asyncTemp = GetCPUTempFast();
+        int sampledConfigVersion = -1;
+        float sampledTemp = GetCPUTempFast(sampledConfigVersion);
+        {
+            // Config writers use the same mutex while advancing the version.
+            // An HTTP result from an older profile/config is therefore discarded.
+            std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+            if (sampledConfigVersion == g_ConfigVersion.load()) g_asyncTemp = sampledTemp;
+        }
 
         DWORD waitMs = (DWORD)SENSOR_LOOP_OFF_DELAY_MS;
 
@@ -1935,18 +1962,17 @@ static void SwitchActiveProfile(HWND hWnd, int index) {
     {
         std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
         g_Global.activeProfileIndex = index;
+        g_ConfigVersion++;
+        g_lastDataSourceSearchRetry = 0;
+        g_activeSource = DataSource::Searching;
+        g_asyncTemp = -1.0f;
+        g_pendingStyleChange = true;
     }
 
     SaveSettings();
-    g_ConfigVersion++;
-    g_lastDataSourceSearchRetry = 0;
-    g_activeSource = DataSource::Searching;
-    g_asyncTemp = -1.0f;
-    g_pendingStyleChange = true;
 
     SetEvent(g_hSensorEvent);
     SetEvent(g_hEngineEvent);
-    forceLEDRefresh();
 
     wchar_t msg[128];
     swprintf_s(msg, T(STR_NOTIF_SWITCHED), g_cfg.label);
@@ -2412,7 +2438,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             g_NotificationsEnabled = (IsDlgButtonChecked(hDlg, IDC_CHK_NOTIFICATIONS) == BST_CHECKED);
             SaveSettings();
             g_ConfigVersion++;
-            forceLEDRefresh();
+            g_asyncTemp = -1.0f;
             SetEvent(g_hSensorEvent);
             SetEvent(g_hEngineEvent);
             EndDialog(hDlg, IDOK);
@@ -2423,13 +2449,13 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             {
                 std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
                 g_Global = s_snapshot;
+                g_ConfigVersion++;
+                g_asyncTemp = -1.0f;
             }
             g_Language = s_langSnapshot; // revert any live language change
             // The engine runs in parallel and may have latched an edited color
             // that was committed live on a tab switch. Force it to re-render the
             // restored config instead of waiting for the next temperature change.
-            g_ConfigVersion++;
-            forceLEDRefresh();
             SetEvent(g_hEngineEvent);
             SetEvent(g_hSensorEvent);
             EndDialog(hDlg, IDCANCEL);
@@ -3355,15 +3381,33 @@ static void LogTaskControlFailure(const char* operation, HRESULT hr) {
     Log(message);
 }
 
-static void AcknowledgeLedRequest(ULONGLONG& lastAcknowledgedGeneration) {
-    ULONGLONG generation = g_ledCommandGeneration.load();
-    if (generation <= lastAcknowledgedGeneration) return;
+struct LedRequestSnapshot {
+    ULONGLONG generation;
+    bool enabled;
+};
 
-    lastAcknowledgedGeneration = generation;
+static LedRequestSnapshot CaptureLedRequest() {
+    std::lock_guard<std::mutex> lock(g_ledRequestMutex);
+    return { g_ledCommandGeneration, g_LedsEnabled.load() };
+}
+
+static bool IsLedRequestCurrent(const LedRequestSnapshot& request) {
+    std::lock_guard<std::mutex> lock(g_ledRequestMutex);
+    return request.generation == g_ledCommandGeneration &&
+        request.enabled == g_LedsEnabled.load();
+}
+
+static bool AcknowledgeLedRequest(ULONGLONG& lastAcknowledgedGeneration,
+    const LedRequestSnapshot& appliedRequest) {
+    if (!IsLedRequestCurrent(appliedRequest)) return false;
+    if (appliedRequest.generation <= lastAcknowledgedGeneration) return true;
+
+    lastAcknowledgedGeneration = appliedRequest.generation;
     char trace[160];
     snprintf(trace, sizeof(trace), "[LED] APPLIED generation=%llu state=%s",
-        generation, g_LedsEnabled.load() ? "ON" : "OFF");
+        appliedRequest.generation, appliedRequest.enabled ? "ON" : "OFF");
     Log(trace);
+    return true;
 }
 
 static void ShowLetsDanceNotification(HWND hWnd) {
@@ -3431,18 +3475,21 @@ static void EngineThread(HWND hWnd) {
 
     while (g_Running) {
         Config cfgLocal;
+        int configVersion;
         int ledRefreshFPS;
         float smoothingFactor;
         {
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
             cfgLocal = g_cfg;
+            configVersion = g_ConfigVersion.load();
             ledRefreshFPS = g_Global.ledRefreshFPS;
             smoothingFactor = g_Global.smoothingFactor;
         }
 
-        if (g_ConfigVersion != lastProcessedVersion) {
-            lastProcessedVersion = g_ConfigVersion;
+        if (configVersion != lastProcessedVersion) {
+            lastProcessedVersion = configVersion;
             forceLEDRefresh();
+            g_pendingStyleChange = true;
             Log("[MysticFight] Config refreshed");
         }
 
@@ -3490,7 +3537,6 @@ static void EngineThread(HWND hWnd) {
                         PostMessage(hWnd, WM_APP_HWREADY, 0, 0);
                         PostMessage(hWnd, WM_APP_STATUS, 0, 0);
                         PostMessage(hWnd, WM_APP_LETSDANCE, 0, 0);
-                        AcknowledgeLedRequest(lastAcknowledgedGeneration);
                     }
                     else {
                         ++g_resetCounter;
@@ -3518,13 +3564,19 @@ static void EngineThread(HWND hWnd) {
         // OFF is an explicit user command and must win even while LHM is being
         // rediscovered. Previously the Searching branch masked it indefinitely.
         if (!g_LedsEnabled) {
-            if (lastR != RGB_LEDS_OFF || g_pendingStyleChange) {
-                g_pendingStyleChange = false;
-                if (SafeSDKCall(
+            bool styleChange = g_pendingStyleChange.exchange(false);
+            if (lastR != RGB_LEDS_OFF || styleChange) {
+                LedRequestSnapshot request = CaptureLedRequest();
+                if (request.enabled) {
+                    g_pendingStyleChange = true;
+                }
+                else if (SafeSDKCall(
                     SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Off"),
                     "SetLedStyle (Off)")) {
                     lastR = RGB_LEDS_OFF;
-                    AcknowledgeLedRequest(lastAcknowledgedGeneration);
+                    if (!AcknowledgeLedRequest(lastAcknowledgedGeneration, request)) {
+                        g_pendingStyleChange = true;
+                    }
                 }
                 else if (!g_Resetting_sdk) {
                     g_pendingStyleChange = true;
@@ -3532,22 +3584,29 @@ static void EngineThread(HWND hWnd) {
             }
         }
         else if (g_activeSource == DataSource::Searching) {
-            if (g_pendingStyleChange) {
-                g_pendingStyleChange = false;
-                bool applied = SafeSDKCall(
-                    SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Breath"),
-                    "SetLedStyle (Search)");
-                if (applied) {
-                    applied = SafeSDKCall(
-                        SdkSetColor(cfgLocal.targetDevice, cfgLocal.targetLedIndex, 255, 255, 255),
-                        "SetLedColor (Search)");
-                }
-                if (applied) {
-                    lastR = RGB_LED_REFRESH;
-                    AcknowledgeLedRequest(lastAcknowledgedGeneration);
-                }
-                else if (!g_Resetting_sdk) {
+            if (g_pendingStyleChange.exchange(false)) {
+                LedRequestSnapshot request = CaptureLedRequest();
+                if (!request.enabled) {
                     g_pendingStyleChange = true;
+                }
+                else {
+                    bool applied = SafeSDKCall(
+                        SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Breath"),
+                        "SetLedStyle (Search)");
+                    if (applied) {
+                        applied = SafeSDKCall(
+                            SdkSetColor(cfgLocal.targetDevice, cfgLocal.targetLedIndex, 255, 255, 255),
+                            "SetLedColor (Search)");
+                    }
+                    if (applied) {
+                        lastR = RGB_LED_REFRESH;
+                        if (!AcknowledgeLedRequest(lastAcknowledgedGeneration, request)) {
+                            g_pendingStyleChange = true;
+                        }
+                    }
+                    else if (!g_Resetting_sdk) {
+                        g_pendingStyleChange = true;
+                    }
                 }
             }
         }
@@ -3556,7 +3615,7 @@ static void EngineThread(HWND hWnd) {
             float rawTemp = g_asyncTemp;
 
             if (rawTemp >= 0.0f) {
-                if (g_pendingStyleChange) { g_pendingStyleChange = false; forceLEDRefresh(); }
+                if (g_pendingStyleChange.exchange(false)) forceLEDRefresh();
 
                 float temp = floorf(rawTemp * 2.0f + 0.5f) / 2.0f;
                 if (temp != lastTemp) {
@@ -3609,20 +3668,28 @@ static void EngineThread(HWND hWnd) {
                 DWORD sendG = (DWORD)roundf(currG);
                 DWORD sendB = (DWORD)roundf(currB);
                 if (sendR != lastR || sendG != lastG || sendB != lastB) {
-                    bool applied = true;
-                    if (lastR == RGB_LEDS_OFF || lastR == RGB_LED_REFRESH) {
-                        applied = SafeSDKCall(
-                            SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Steady"),
-                            "SetLedStyle (Steady)");
+                    LedRequestSnapshot request = CaptureLedRequest();
+                    if (!request.enabled) {
+                        g_pendingStyleChange = true;
                     }
-                    if (applied) {
-                        applied = SafeSDKCall(
-                            SdkSetColor(cfgLocal.targetDevice, cfgLocal.targetLedIndex, sendR, sendG, sendB),
-                            "SetLedColor");
-                    }
-                    if (applied) {
-                        lastR = sendR; lastG = sendG; lastB = sendB;
-                        AcknowledgeLedRequest(lastAcknowledgedGeneration);
+                    else {
+                        bool applied = true;
+                        if (lastR == RGB_LEDS_OFF || lastR == RGB_LED_REFRESH) {
+                            applied = SafeSDKCall(
+                                SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Steady"),
+                                "SetLedStyle (Steady)");
+                        }
+                        if (applied) {
+                            applied = SafeSDKCall(
+                                SdkSetColor(cfgLocal.targetDevice, cfgLocal.targetLedIndex, sendR, sendG, sendB),
+                                "SetLedColor");
+                        }
+                        if (applied) {
+                            lastR = sendR; lastG = sendG; lastB = sendB;
+                            if (!AcknowledgeLedRequest(lastAcknowledgedGeneration, request)) {
+                                g_pendingStyleChange = true;
+                            }
+                        }
                     }
                 }
             }
