@@ -160,7 +160,7 @@ enum StrId {
     STR_TAB_SHORTCUTS, STR_TAB_ADVANCED,
     // Profile layer
     STR_LBL_PROFILE_NAME, STR_CHK_ACTIVE, STR_GRP_MSI, STR_LBL_DEVICE, STR_LBL_AREA,
-    STR_GRP_SOURCE, STR_LBL_DATA_SOURCE, STR_LBL_TEMP_SENS,
+    STR_GRP_SOURCE,
     STR_GRP_THRESHOLDS, STR_LBL_LOW, STR_LBL_MED, STR_LBL_HIGH, STR_LBL_COLOR_HEX,
     STR_BTN_RESET_DEFAULTS,
     // Advanced layer
@@ -197,11 +197,11 @@ static const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
     {
         L"Shortcuts", L"Advanced",
         L"Profile Label:", L"Set as Active Profile", L"MSI Hardware Control", L"Device:", L"Area:",
-        L"Data Source", L"Data Source:", L"Temperature Sensor:",
+        L"Data Source",
         L"Temperature Thresholds and Colors", L"LOW:", L"MEDIUM:", L"HIGH:", L"Color (hex):",
         L"Reset Defaults",
         L"Performance & Advanced Settings", L"Sensor Update:", L"LED Refresh:", L"Smoothing:",
-        L"Default Data Sources", L"LibreHardwareMonitor URL:",
+        L"Data Sources", L"LibreHardwareMonitor",
         L"Language", L"Language:",
         L"Global Hotkeys Configuration", L"Toggle ON/OFF:", L"Activate Profile %d:", L"Reset Hotkeys",
         L"Run on Windows startup", L"Show notifications", L"Save", L"Cancel",
@@ -220,11 +220,11 @@ static const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
     {
         L"Atajos", L"Avanzado",
         L"Etiqueta del perfil:", L"Establecer como perfil activo", L"Control de hardware MSI", L"Dispositivo:", L"Área:",
-        L"Origen de datos", L"Origen de datos:", L"Sensor de temperatura:",
+        L"Origen de datos",
         L"Umbrales de temperatura y colores", L"BAJA:", L"MEDIA:", L"ALTA:", L"Color (hex):",
         L"Restaurar valores",
         L"Rendimiento y ajustes avanzados", L"Actualización sensor:", L"Refresco LED:", L"Suavizado:",
-        L"Orígenes de datos predeterminados", L"URL de LibreHardwareMonitor:",
+        L"Orígenes de datos", L"LibreHardwareMonitor",
         L"Idioma", L"Idioma:",
         L"Configuración de atajos globales", L"Activar/Desactivar:", L"Activar perfil %d:", L"Restaurar atajos",
         L"Ejecutar al inicio de Windows", L"Mostrar notificaciones", L"Guardar", L"Cancelar",
@@ -2105,7 +2105,7 @@ static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
         IDC_EDIT_LABEL, IDC_CHK_ACTIVE_PROFILE, IDC_COMBO_DEVICE, IDC_COMBO_AREA,
         IDC_COMBO_DATA_SOURCE, IDC_SENSOR_ID, IDC_TEMP_LOW, IDC_TEMP_MED, IDC_TEMP_HIGH,
         IDC_HEX_LOW, IDC_HEX_MED, IDC_HEX_HIGH, IDC_BTN_RESET,
-        IDC_LBL_PROFILE_NAME, IDC_LBL_DEVICE, IDC_LBL_AREA, IDC_LBL_DATA_SOURCE, IDC_LBL_TEMP_SENS,
+        IDC_LBL_PROFILE_NAME, IDC_LBL_DEVICE, IDC_LBL_AREA,
         IDC_LBL_LOW, IDC_LBL_MED, IDC_LBL_HIGH, IDC_LBL_C1, IDC_LBL_C2, IDC_LBL_C3,
         IDC_LBL_HEX1, IDC_LBL_HEX2, IDC_LBL_HEX3
     };
@@ -2139,8 +2139,6 @@ static void ApplyDialogTranslations(HWND hDlg) {
     SetDlgItemTextW(hDlg, IDC_LBL_DEVICE, T(STR_LBL_DEVICE));
     SetDlgItemTextW(hDlg, IDC_LBL_AREA, T(STR_LBL_AREA));
     SetDlgItemTextW(hDlg, IDC_GRP_SOURCE, T(STR_GRP_SOURCE));
-    SetDlgItemTextW(hDlg, IDC_LBL_DATA_SOURCE, T(STR_LBL_DATA_SOURCE));
-    SetDlgItemTextW(hDlg, IDC_LBL_TEMP_SENS, T(STR_LBL_TEMP_SENS));
     SetDlgItemTextW(hDlg, IDC_GRP_THRESHOLDS, T(STR_GRP_THRESHOLDS));
     SetDlgItemTextW(hDlg, IDC_LBL_LOW, T(STR_LBL_LOW));
     SetDlgItemTextW(hDlg, IDC_LBL_MED, T(STR_LBL_MED));

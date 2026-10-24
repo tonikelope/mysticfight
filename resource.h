@@ -62,8 +62,6 @@
 #define IDC_LBL_PROFILE_NAME            2300
 #define IDC_LBL_DEVICE                  2301
 #define IDC_LBL_AREA                    2302
-#define IDC_LBL_TEMP_SENS               2303
-#define IDC_LBL_DATA_SOURCE             2304
 #define IDC_LBL_LOW                     2305
 #define IDC_LBL_MED                     2306
 #define IDC_LBL_HIGH                    2307
