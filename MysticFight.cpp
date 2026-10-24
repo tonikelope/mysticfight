@@ -160,11 +160,12 @@ enum StrId {
     STR_TAB_SHORTCUTS, STR_TAB_ADVANCED,
     // Profile layer
     STR_LBL_PROFILE_NAME, STR_CHK_ACTIVE, STR_GRP_MSI, STR_LBL_DEVICE, STR_LBL_AREA,
-    STR_GRP_SOURCE, STR_LBL_TEMP_SENS, STR_LBL_WEB_SRV,
+    STR_GRP_SOURCE, STR_LBL_DATA_SOURCE, STR_LBL_TEMP_SENS,
     STR_GRP_THRESHOLDS, STR_LBL_LOW, STR_LBL_MED, STR_LBL_HIGH, STR_LBL_COLOR_HEX,
     STR_BTN_RESET_DEFAULTS,
     // Advanced layer
     STR_GRP_ADVANCED, STR_LBL_ADV_SENSOR, STR_LBL_ADV_LED, STR_LBL_ADV_SMOOTH,
+    STR_GRP_DATA_SOURCES, STR_LBL_LHM_SERVER,
     STR_GRP_LANGUAGE, STR_LBL_LANGUAGE,
     // Shortcuts layer
     STR_GRP_SHORTCUTS, STR_LBL_TOGGLE, STR_LBL_ACT_PROFILE, STR_BTN_RESET_HOTKEYS,
@@ -196,10 +197,11 @@ static const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
     {
         L"Shortcuts", L"Advanced",
         L"Profile Label:", L"Set as Active Profile", L"MSI Hardware Control", L"Device:", L"Area:",
-        L"LibreHardwareMonitor (Data source: HTTP)", L"Temperature Sensor:", L"Web Server:",
+        L"Data Source", L"Data Source:", L"Temperature Sensor:",
         L"Temperature Thresholds and Colors", L"LOW:", L"MEDIUM:", L"HIGH:", L"Color (hex):",
         L"Reset Defaults",
         L"Performance & Advanced Settings", L"Sensor Update:", L"LED Refresh:", L"Smoothing:",
+        L"Default Data Sources", L"LibreHardwareMonitor URL:",
         L"Language", L"Language:",
         L"Global Hotkeys Configuration", L"Toggle ON/OFF:", L"Activate Profile %d:", L"Reset Hotkeys",
         L"Run on Windows startup", L"Show notifications", L"Save", L"Cancel",
@@ -218,10 +220,11 @@ static const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
     {
         L"Atajos", L"Avanzado",
         L"Etiqueta del perfil:", L"Establecer como perfil activo", L"Control de hardware MSI", L"Dispositivo:", L"Área:",
-        L"LibreHardwareMonitor (Fuente de datos: HTTP)", L"Sensor de temperatura:", L"Servidor web:",
+        L"Origen de datos", L"Origen de datos:", L"Sensor de temperatura:",
         L"Umbrales de temperatura y colores", L"BAJA:", L"MEDIA:", L"ALTA:", L"Color (hex):",
         L"Restaurar valores",
         L"Rendimiento y ajustes avanzados", L"Actualización sensor:", L"Refresco LED:", L"Suavizado:",
+        L"Orígenes de datos predeterminados", L"URL de LibreHardwareMonitor:",
         L"Idioma", L"Idioma:",
         L"Configuración de atajos globales", L"Activar/Desactivar:", L"Activar perfil %d:", L"Restaurar atajos",
         L"Ejecutar al inicio de Windows", L"Mostrar notificaciones", L"Guardar", L"Cancelar",
@@ -304,6 +307,7 @@ struct GlobalConfig {
     Config profiles[5];
     int activeProfileIndex;
     AppHotkeys hotkeys;
+    wchar_t lhmServerUrl[256];
     // Global performance/advanced settings (shared by all profiles)
     int sensorUpdateMS;
     int ledRefreshFPS;
@@ -961,6 +965,7 @@ static void SaveSettings() {
     WritePrivateProfileStringW(L"Global", L"ActiveProfile", std::to_wstring(g_Global.activeProfileIndex).c_str(), INI_FILE);
     WritePrivateProfileStringW(L"Global", L"Notifications", g_NotificationsEnabled ? L"1" : L"0", INI_FILE);
     WritePrivateProfileStringW(L"Global", L"Language", std::to_wstring(g_Language.load()).c_str(), INI_FILE);
+    WritePrivateProfileStringW(L"Global", L"LibreHardwareMonitorUrl", g_Global.lhmServerUrl, INI_FILE);
 
     // Advanced settings are now global (shared by all profiles)
     WritePrivateProfileStringW(L"Global", L"SensorUpdateMS", std::to_wstring(g_Global.sensorUpdateMS).c_str(), INI_FILE);
@@ -995,7 +1000,8 @@ static void SaveSettings() {
         WritePrivateProfileStringW(section.c_str(), L"ColorMed", hM, INI_FILE);
         WritePrivateProfileStringW(section.c_str(), L"ColorHigh", hH, INI_FILE);
 
-        WritePrivateProfileStringW(section.c_str(), L"WebServerUrl", p.webServerUrl, INI_FILE);
+        // Keep the legacy profile key synchronized for backward compatibility.
+        WritePrivateProfileStringW(section.c_str(), L"WebServerUrl", g_Global.lhmServerUrl, INI_FILE);
     }
 
     WritePrivateProfileStringW(L"Hotkeys", L"Toggle", std::to_wstring(g_Global.hotkeys.toggleLEDs).c_str(), INI_FILE);
@@ -1106,6 +1112,17 @@ static void LoadSettings() {
     if (lang < 0 || lang >= LANG_COUNT) lang = DEF_LANGUAGE;
     g_Language = lang;
 
+    // Migrate the active profile's legacy URL when the new global key is absent.
+    std::wstring legacySection = L"Settings";
+    if (g_Global.activeProfileIndex > 0) legacySection += L"_" + std::to_wstring(g_Global.activeProfileIndex);
+    wchar_t legacyServerUrl[256];
+    GetPrivateProfileStringW(legacySection.c_str(), L"WebServerUrl", DEF_SERVER_URL,
+        legacyServerUrl, 256, INI_FILE);
+    if (legacyServerUrl[0] == L'\0') wcscpy_s(legacyServerUrl, DEF_SERVER_URL);
+    GetPrivateProfileStringW(L"Global", L"LibreHardwareMonitorUrl", legacyServerUrl,
+        g_Global.lhmServerUrl, 256, INI_FILE);
+    if (g_Global.lhmServerUrl[0] == L'\0') wcscpy_s(g_Global.lhmServerUrl, DEF_SERVER_URL);
+
     // Advanced settings are now global. For backward compatibility, fall back to
     // the old per-profile values (profile 0) when the global keys are absent.
     g_Global.sensorUpdateMS = GetPrivateProfileIntW(L"Global", L"SensorUpdateMS",
@@ -1168,7 +1185,7 @@ static void LoadSettings() {
         p.colorLow = HexToColor(hL); p.colorMed = HexToColor(hM); p.colorHigh = HexToColor(hH);
 
         GetPrivateProfileStringW(section.c_str(), L"SensorID", L"", p.sensorID, SENSOR_ID_LEN, INI_FILE);
-        GetPrivateProfileStringW(section.c_str(), L"WebServerUrl", DEF_SERVER_URL, p.webServerUrl, 256, INI_FILE);
+        wcscpy_s(p.webServerUrl, g_Global.lhmServerUrl);
 
         wchar_t defLabel[64]; swprintf_s(defLabel, T(STR_DEFAULT_PROFILE), i + 1);
         GetPrivateProfileStringW(section.c_str(), L"Label", defLabel, p.label, 64, INI_FILE);
@@ -1457,7 +1474,7 @@ static void LoadProfileToUI(HWND hDlg, int profileIndex, int tempActiveIndex) {
     SetDlgItemInt(hDlg, IDC_TEMP_MED, p.tempMed, TRUE);
     SetDlgItemInt(hDlg, IDC_TEMP_HIGH, p.tempHigh, TRUE);
     SetDlgItemTextW(hDlg, IDC_EDIT_LABEL, p.label);
-    SetDlgItemTextW(hDlg, IDC_EDIT_SERVER, p.webServerUrl);
+    SendMessage(GetDlgItem(hDlg, IDC_COMBO_DATA_SOURCE), CB_SETCURSEL, 0, 0);
 
     wchar_t hexBuf[10];
     ColorToHex(p.colorLow, hexBuf, 10);  SetDlgItemTextW(hDlg, IDC_HEX_LOW, hexBuf);
@@ -1502,6 +1519,7 @@ static void LoadGlobalAdvancedToUI(HWND hDlg) {
     else if (g_Global.smoothingFactor > 0.2f) SendMessage(hSmooth, CB_SETCURSEL, 3, 0);
     else SendMessage(hSmooth, CB_SETCURSEL, 2, 0);
 
+    SetDlgItemTextW(hDlg, IDC_EDIT_LHM_SERVER, g_Global.lhmServerUrl);
     SendMessage(GetDlgItem(hDlg, IDC_COMBO_LANGUAGE), CB_SETCURSEL, g_Language.load(), 0);
 }
 
@@ -1528,6 +1546,12 @@ static void SaveGlobalAdvancedFromUI(HWND hDlg) {
     else if (idxSmooth == 3) g_Global.smoothingFactor = 0.4f;
     else g_Global.smoothingFactor = 0.15f;
 
+    GetDlgItemTextW(hDlg, IDC_EDIT_LHM_SERVER, g_Global.lhmServerUrl, 256);
+    if (g_Global.lhmServerUrl[0] == L'\0') wcscpy_s(g_Global.lhmServerUrl, DEF_SERVER_URL);
+    for (Config& profile : g_Global.profiles) {
+        wcscpy_s(profile.webServerUrl, g_Global.lhmServerUrl);
+    }
+
     int idxLang = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_LANGUAGE), CB_GETCURSEL, 0, 0);
     if (idxLang < 0 || idxLang >= LANG_COUNT) idxLang = LANG_EN;
     g_Language = idxLang;
@@ -1552,8 +1576,6 @@ static void SaveUIToProfile(HWND hDlg, int profileIndex) {
     p.colorMed = HexToColor(buf);
     GetDlgItemTextW(hDlg, IDC_HEX_HIGH, buf, 10);
     p.colorHigh = HexToColor(buf);
-
-    GetDlgItemTextW(hDlg, IDC_EDIT_SERVER, p.webServerUrl, 256);
 
     int idxDev = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_GETCURSEL, 0, 0);
     if (idxDev != CB_ERR) {
@@ -2081,9 +2103,9 @@ static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
     const int profileCtrls[] = {
         IDC_GRP_MSI, IDC_GRP_SOURCE, IDC_GRP_THRESHOLDS,
         IDC_EDIT_LABEL, IDC_CHK_ACTIVE_PROFILE, IDC_COMBO_DEVICE, IDC_COMBO_AREA,
-        IDC_SENSOR_ID, IDC_EDIT_SERVER, IDC_TEMP_LOW, IDC_TEMP_MED, IDC_TEMP_HIGH,
+        IDC_COMBO_DATA_SOURCE, IDC_SENSOR_ID, IDC_TEMP_LOW, IDC_TEMP_MED, IDC_TEMP_HIGH,
         IDC_HEX_LOW, IDC_HEX_MED, IDC_HEX_HIGH, IDC_BTN_RESET,
-        IDC_LBL_PROFILE_NAME, IDC_LBL_DEVICE, IDC_LBL_AREA, IDC_LBL_TEMP_SENS, IDC_LBL_WEB_SRV,
+        IDC_LBL_PROFILE_NAME, IDC_LBL_DEVICE, IDC_LBL_AREA, IDC_LBL_DATA_SOURCE, IDC_LBL_TEMP_SENS,
         IDC_LBL_LOW, IDC_LBL_MED, IDC_LBL_HIGH, IDC_LBL_C1, IDC_LBL_C2, IDC_LBL_C3,
         IDC_LBL_HEX1, IDC_LBL_HEX2, IDC_LBL_HEX3
     };
@@ -2096,7 +2118,8 @@ static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
     const int advancedCtrls[] = {
         IDC_GRP_ADVANCED, IDC_LBL_ADV_SENSOR, IDC_COMBO_SENSOR_UPDATE,
         IDC_LBL_ADV_LED, IDC_COMBO_LED_FPS, IDC_LBL_ADV_SMOOTH, IDC_COMBO_SMOOTHING,
-        IDC_BTN_RESET_ADVANCED, IDC_GRP_LANGUAGE, IDC_LBL_LANGUAGE, IDC_COMBO_LANGUAGE
+        IDC_BTN_RESET_ADVANCED, IDC_GRP_DATA_SOURCES, IDC_LBL_LHM_SERVER, IDC_EDIT_LHM_SERVER,
+        IDC_GRP_LANGUAGE, IDC_LBL_LANGUAGE, IDC_COMBO_LANGUAGE
     };
 
     for (int id : profileCtrls) { HWND h = GetDlgItem(hDlg, id); if (h) ShowWindow(h, layer == LAYER_PROFILE ? SW_SHOW : SW_HIDE); }
@@ -2116,8 +2139,8 @@ static void ApplyDialogTranslations(HWND hDlg) {
     SetDlgItemTextW(hDlg, IDC_LBL_DEVICE, T(STR_LBL_DEVICE));
     SetDlgItemTextW(hDlg, IDC_LBL_AREA, T(STR_LBL_AREA));
     SetDlgItemTextW(hDlg, IDC_GRP_SOURCE, T(STR_GRP_SOURCE));
+    SetDlgItemTextW(hDlg, IDC_LBL_DATA_SOURCE, T(STR_LBL_DATA_SOURCE));
     SetDlgItemTextW(hDlg, IDC_LBL_TEMP_SENS, T(STR_LBL_TEMP_SENS));
-    SetDlgItemTextW(hDlg, IDC_LBL_WEB_SRV, T(STR_LBL_WEB_SRV));
     SetDlgItemTextW(hDlg, IDC_GRP_THRESHOLDS, T(STR_GRP_THRESHOLDS));
     SetDlgItemTextW(hDlg, IDC_LBL_LOW, T(STR_LBL_LOW));
     SetDlgItemTextW(hDlg, IDC_LBL_MED, T(STR_LBL_MED));
@@ -2133,6 +2156,8 @@ static void ApplyDialogTranslations(HWND hDlg) {
     SetDlgItemTextW(hDlg, IDC_LBL_ADV_LED, T(STR_LBL_ADV_LED));
     SetDlgItemTextW(hDlg, IDC_LBL_ADV_SMOOTH, T(STR_LBL_ADV_SMOOTH));
     SetDlgItemTextW(hDlg, IDC_BTN_RESET_ADVANCED, T(STR_BTN_RESET_DEFAULTS));
+    SetDlgItemTextW(hDlg, IDC_GRP_DATA_SOURCES, T(STR_GRP_DATA_SOURCES));
+    SetDlgItemTextW(hDlg, IDC_LBL_LHM_SERVER, T(STR_LBL_LHM_SERVER));
     SetDlgItemTextW(hDlg, IDC_GRP_LANGUAGE, T(STR_GRP_LANGUAGE));
     SetDlgItemTextW(hDlg, IDC_LBL_LANGUAGE, T(STR_LBL_LANGUAGE));
 
@@ -2299,6 +2324,10 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         SendMessage(hLedFPS, CB_ADDSTRING, 0, (LPARAM)L"25 FPS");
         SendMessage(hLedFPS, CB_ADDSTRING, 0, (LPARAM)L"20 FPS");
         SendMessage(hLedFPS, CB_ADDSTRING, 0, (LPARAM)L"15 FPS");
+
+        HWND hDataSource = GetDlgItem(hDlg, IDC_COMBO_DATA_SOURCE);
+        SendMessage(hDataSource, CB_ADDSTRING, 0, (LPARAM)L"LibreHardwareMonitor");
+        SendMessage(hDataSource, CB_SETCURSEL, 0, 0);
 
         // Smoothing combo is filled by ApplyDialogTranslations (its values are words).
 
@@ -2487,6 +2516,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             SendMessage(GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE), CB_SETCURSEL, 1, 0);
             SendMessage(GetDlgItem(hDlg, IDC_COMBO_LED_FPS), CB_SETCURSEL, 0, 0);
             SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_SETCURSEL, 2, 0);
+            SetDlgItemTextW(hDlg, IDC_EDIT_LHM_SERVER, DEF_SERVER_URL);
             return TRUE;
         }
     } break;

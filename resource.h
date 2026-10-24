@@ -37,7 +37,7 @@
 #define IDC_COMBO_DEVICE                2102
 #define IDC_COMBO_AREA                  2103
 #define IDC_SENSOR_ID                   2104
-#define IDC_EDIT_SERVER                 2105
+#define IDC_EDIT_LHM_SERVER             2105
 #define IDC_TEMP_LOW                    2106
 #define IDC_TEMP_MED                    2107
 #define IDC_TEMP_HIGH                   2108
@@ -48,6 +48,7 @@
 #define IDC_COMBO_LED_FPS               2113
 #define IDC_COMBO_SMOOTHING             2114
 #define IDC_COMBO_LANGUAGE              2115
+#define IDC_COMBO_DATA_SOURCE           2116
 
 // Profile Groups (CRITICAL: Added IDC_GRP_THRESHOLDS)
 #define IDC_GRP_MSI                     2200
@@ -55,13 +56,14 @@
 #define IDC_GRP_ADVANCED                2202
 #define IDC_GRP_THRESHOLDS              2203
 #define IDC_GRP_LANGUAGE                2204
+#define IDC_GRP_DATA_SOURCES            2205
 
 // Profile Labels (Static text needs IDs to be hidden)
 #define IDC_LBL_PROFILE_NAME            2300
 #define IDC_LBL_DEVICE                  2301
 #define IDC_LBL_AREA                    2302
 #define IDC_LBL_TEMP_SENS               2303
-#define IDC_LBL_WEB_SRV                 2304
+#define IDC_LBL_DATA_SOURCE             2304
 #define IDC_LBL_LOW                     2305
 #define IDC_LBL_MED                     2306
 #define IDC_LBL_HIGH                    2307
@@ -75,6 +77,7 @@
 #define IDC_LBL_ADV_LED                 2315
 #define IDC_LBL_ADV_SMOOTH              2316
 #define IDC_LBL_LANGUAGE                2317
+#define IDC_LBL_LHM_SERVER              2318
 
 // --- SHORTCUTS LAYER ---
 #define IDC_GRP_SHORTCUTS               3000
