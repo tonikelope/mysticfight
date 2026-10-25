@@ -138,9 +138,11 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="MysticFight.cpp" />
+    <ClCompile Include="RazerOrnataController.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="MysticFight.h" />
+    <ClInclude Include="RazerOrnataController.h" />
     <ClInclude Include="resource.h" />
   </ItemGroup>
   <ItemGroup>

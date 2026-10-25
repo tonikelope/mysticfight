@@ -4,7 +4,7 @@
 
 <img src="rgb.png" width="64" height="64" align="right" />
 
-MSI Mystic Light Temperature Profile Replacement.
+Temperature-driven RGB control for MSI Mystic Light and the Razer Ornata V3.
 
 ## ❓ Why MysticFight?
 Let's be honest: the official **Mystic Light** software is often unreliable, and "fails more than a fairground shotgun". 
@@ -17,6 +17,9 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * **Real-time Monitoring:** Temperature tracking via HTTP.
 * **VERY Lightweight:** No heavy dashboards; just a simple tray app that stays out of your way.
 * **Customizable Device and LED area:** Choose the one you prefer. <i>Please note that MSI Mystic Light SDK may not recognise all areas available on your device (you will have to wait for MSI to update the public SDK)</i>.
+* **Independent controllers per profile:** Control the MSI motherboard, the Razer Ornata V3, both, or neither.
+* **Native Razer Ornata V3 support:** Direct Windows HID control with no Synapse, Chroma Runtime, OpenRGB, extra service, or kernel driver. Razer output is opt-in, begins with a manual one-color safety test, and uses only volatile custom RGB frames.
+* **Independent refresh rates:** MSI and Razer can each use 15, 20, or 25 FPS while sharing the same thermal color and smoothing engine.
 * **Customizable Temperature Sensor:** Choose the one you prefer.
 * **Customizable Temperature and Colors Thresholds:** RMS interpolation with adaptive color transition smoothing.
 * **5 profiles settings:** You can set a custom global shortcut keys to change between profiles.
@@ -27,9 +30,11 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 ## ⚠️ Requirements
 For this tool to work, you MUST have the following installed/running:
 
-1. **MSI Center:** [Download here](https://www.msi.com/Landing/MSI-Center). (Just installed, its not required to load with Windows. But remember you must install and enable the **Mystic Light** module inside it to provide the underlying drivers for SDK).
+1. **MSI Center (only for MSI control):** [Download here](https://www.msi.com/Landing/MSI-Center). (Just installed, its not required to load with Windows. But remember you must install and enable the **Mystic Light** module inside it to provide the underlying drivers for SDK).
    * Disable **both** options in Mystic Light config: overwrite third part RGB and power saving mode. (It is highly recommended to also disable automatic updates for MSI Center and Mystic Light).
 2. **LibreHardwareMonitor:** [Download here](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/latest). Must be running (minimized on tray) to provide temperature data via Web Server (You must enable Remote Web Server in LHM options menu). <i>Note: Yes, I know there is a LibreHardwareMonitorLib available, but I don't have the time or inclination to mess around with CLR DLL wrappers such when LHM client works perfectly well for this task, is lightweight and useful for other popular monitoring applications such as RainMeter</i>.
+
+The Razer protocol scope and safety decisions are documented in [RAZER_ORNATA_V3_PROTOCOL.md](RAZER_ORNATA_V3_PROTOCOL.md).
 
 <p align="center"><img src="pepinazo.jpeg"/></p>
 </div>
