@@ -357,7 +357,7 @@ typedef int (*LPMLAPI_Release)();
 // with --sdk-host; only that child loads and calls the vendor DLL. Fixed-size
 // packets keep the protocol simple and deterministic across anonymous pipes.
 const DWORD SDK_IPC_MAGIC = 0x4D465344; // "MFSD"
-const DWORD SDK_IPC_VERSION = 2;
+const DWORD SDK_IPC_VERSION = 3;
 const int SDK_IPC_TIMEOUT = -10001;
 const int SDK_IPC_BROKEN = -10002;
 const int SDK_HOST_LOAD_FAILED = -10003;
@@ -389,6 +389,7 @@ struct SdkIpcArea {
     DWORD index;
     wchar_t name[128];
     wchar_t animatedReleaseStyle[128];
+    wchar_t supportedStylePreview[256];
 };
 
 struct SdkIpcDevice {
@@ -480,6 +481,9 @@ struct HwArea {
     // Exact SDK-advertised style used when releasing this area to an
     // autonomous animated effect. Empty means release must fall back to Off.
     std::wstring animatedReleaseStyle;
+    // Truncated, diagnostic-only list returned by MLAPI_GetLedInfo. It is
+    // captured during the existing enumeration and never triggers SDK calls.
+    std::wstring supportedStylePreview;
 };
 struct HwDevice { std::wstring type; std::wstring friendly; std::vector<HwArea> areas; };
 std::vector<HwDevice> g_hwSnapshot;
@@ -1778,29 +1782,49 @@ static void SaveUIToProfile(HWND hDlg, int profileIndex) {
 // MSI SDK HARDWARE DETECTION & MANAGEMENT
 // ============================================================================
 
-static std::wstring LowercaseCopy(std::wstring value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-        [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
-    return value;
+static std::wstring NormalizeMsiStyleName(const std::wstring& value) {
+    std::wstring normalized;
+    normalized.reserve(value.size());
+    for (const wchar_t ch : value) {
+        if (std::iswalnum(ch)) {
+            normalized.push_back(static_cast<wchar_t>(std::towlower(ch)));
+        }
+    }
+    return normalized;
 }
 
 static int AnimatedMsiStyleScore(const std::wstring& style) {
-    const std::wstring lower = LowercaseCopy(style);
-    if (lower == L"rainbow") return 600;
-    if (lower.find(L"rainbow") != std::wstring::npos) return 500;
-    // MSI motherboard profiles commonly expose the spectrum-like autonomous
-    // effect as ColorCycle rather than Rainbow. Preserve the exact spelling
-    // returned by MLAPI_GetLedInfo when sending it back to the SDK.
-    if (lower == L"color cycle" || lower == L"colorcycle") return 400;
-    if (lower.find(L"color cycle") != std::wstring::npos ||
-        lower.find(L"colorcycle") != std::wstring::npos) return 300;
-    if (lower == L"color shift" || lower == L"colorshift") return 200;
-    if (lower.find(L"color shift") != std::wstring::npos ||
-        lower.find(L"colorshift") != std::wstring::npos) return 100;
+    const std::wstring normalized = NormalizeMsiStyleName(style);
+    const auto score = [&](const wchar_t* name, const int exact, const int partial) {
+        if (normalized == name) return exact;
+        return normalized.find(name) != std::wstring::npos ? partial : 0;
+    };
+
+    // Prefer the closest autonomous spectrum effect advertised by this exact
+    // LED area. MSI uses different English labels across boards/generations.
+    // Always retain and send the original SDK spelling, never these aliases.
+    int value = score(L"rainbow", 1000, 950);
+    if (value != 0) return value;
+    value = score(L"spectrum", 900, 850);
+    if (value != 0) return value;
+    value = score(L"colorcycle", 800, 750);
+    if (value != 0) return value;
+    value = score(L"colorring", 700, 650);
+    if (value != 0) return value;
+    value = score(L"colorstep", 600, 550);
+    if (value != 0) return value;
+    value = score(L"colorswitch", 500, 450);
+    if (value != 0) return value;
+    value = score(L"colorshift", 400, 350);
+    if (value != 0) return value;
+    value = score(L"wave", 300, 250);
+    if (value != 0) return value;
     return 0;
 }
 
-static std::wstring SelectAnimatedMsiStyle(SAFEARRAY* styles) {
+static std::wstring SelectAnimatedMsiStyle(SAFEARRAY* styles,
+    std::wstring* supportedStylePreview) {
+    if (supportedStylePreview) supportedStylePreview->clear();
     if (!styles || SafeArrayGetDim(styles) != 1) return {};
 
     LONG lowerBound = 0;
@@ -1816,6 +1840,11 @@ static std::wstring SelectAnimatedMsiStyle(SAFEARRAY* styles) {
     // Some COM producers omit the explicit vartype while still tagging the
     // SAFEARRAY as BSTR. Accept that standard descriptor form as well.
     if (type == VT_EMPTY && (styles->fFeatures & FADF_BSTR) != 0) type = VT_BSTR;
+    if (type == VT_EMPTY && (styles->fFeatures & FADF_VARIANT) != 0) type = VT_VARIANT;
+    // MLAPI_GetLedInfo documents a SAFEARRAY of strings. A few SDK builds omit
+    // both vartype flags, so use the element width as the final safe fallback.
+    if (type == VT_EMPTY && styles->cbElements == sizeof(BSTR)) type = VT_BSTR;
+    if (type == VT_EMPTY && styles->cbElements == sizeof(VARIANT)) type = VT_VARIANT;
 
     std::wstring selected;
     int selectedScore = 0;
@@ -1823,6 +1852,19 @@ static std::wstring SelectAnimatedMsiStyle(SAFEARRAY* styles) {
     auto consider = [&](const BSTR value) {
         if (!value) return;
         const std::wstring candidate(value, SysStringLen(value));
+        if (supportedStylePreview && !candidate.empty() && supportedStylePreview->size() < 240) {
+            size_t remaining = 240 - supportedStylePreview->size();
+            if (!supportedStylePreview->empty()) {
+                if (remaining > 2) {
+                    supportedStylePreview->append(L", ");
+                    remaining -= 2;
+                }
+                else {
+                    remaining = 0;
+                }
+            }
+            if (remaining > 0) supportedStylePreview->append(candidate, 0, remaining);
+        }
         const int score = AnimatedMsiStyleScore(candidate);
         if (score > selectedScore) {
             selected = candidate;
@@ -1842,6 +1884,11 @@ static std::wstring SelectAnimatedMsiStyle(SAFEARRAY* styles) {
             const VARIANT& value = lock.data[i];
             if (V_VT(&value) == VT_BSTR) consider(V_BSTR(&value));
         }
+    }
+    else if (supportedStylePreview) {
+        *supportedStylePreview = L"<unreadable SAFEARRAY type=" +
+            std::to_wstring(static_cast<unsigned int>(type)) + L", elementBytes=" +
+            std::to_wstring(styles->cbElements) + L">";
     }
 
     return selected;
@@ -1902,7 +1949,8 @@ static int BuildHardwareSnapshot() {
                                 area.name = ledName
                                     ? std::wstring(ledName, SysStringLen(ledName))
                                     : std::wstring();
-                                area.animatedReleaseStyle = SelectAnimatedMsiStyle(pStyles);
+                                area.animatedReleaseStyle = SelectAnimatedMsiStyle(
+                                    pStyles, &area.supportedStylePreview);
                                 dev.areas.push_back(std::move(area));
                                 if (pStyles) SafeArrayDestroy(pStyles);
                                 if (ledName) SysFreeString(ledName);
@@ -3575,6 +3623,8 @@ static void CopySnapshotToResponse(SdkIpcResponse& response) {
             wcsncpy_s(target.areas[j].name, source.areas[j].name.c_str(), _TRUNCATE);
             wcsncpy_s(target.areas[j].animatedReleaseStyle,
                 source.areas[j].animatedReleaseStyle.c_str(), _TRUNCATE);
+            wcsncpy_s(target.areas[j].supportedStylePreview,
+                source.areas[j].supportedStylePreview.c_str(), _TRUNCATE);
         }
     }
 }
@@ -3729,6 +3779,7 @@ static void PublishHardwareSnapshot(const SdkIpcResponse& response) {
             area.index = response.devices[i].areas[j].index;
             area.name = response.devices[i].areas[j].name;
             area.animatedReleaseStyle = response.devices[i].areas[j].animatedReleaseStyle;
+            area.supportedStylePreview = response.devices[i].areas[j].supportedStylePreview;
             device.areas.push_back(std::move(area));
         }
         snapshot.push_back(std::move(device));
@@ -3756,9 +3807,12 @@ static void PublishHardwareSnapshot(const SdkIpcResponse& response) {
             const wchar_t* style = response.devices[i].areas[j].animatedReleaseStyle[0] == L'\0'
                 ? L"<none; will fall back to Off>"
                 : response.devices[i].areas[j].animatedReleaseStyle;
+            const wchar_t* supported = response.devices[i].areas[j].supportedStylePreview[0] == L'\0'
+                ? L"<empty>"
+                : response.devices[i].areas[j].supportedStylePreview;
             snprintf(areaMessage, sizeof(areaMessage),
-                "[SDK Supervisor] Area %lu release animation candidate: %ls",
-                response.devices[i].areas[j].index, style);
+                "[SDK Supervisor] Area %lu styles: %ls | release animation candidate: %ls",
+                response.devices[i].areas[j].index, supported, style);
             Log(areaMessage);
         }
     }
@@ -4192,7 +4246,7 @@ static void EngineThread(HWND hWnd) {
                     if (releaseStyle.empty()) {
                         releaseStyle = L"Off";
                         if (!msiReleaseFallbackLogged) {
-                            Log("[MysticFight] MSI target exposes no Rainbow/ColorCycle/Color Shift style; releasing to Off.");
+                            Log("[MysticFight] MSI target exposes no supported autonomous color animation; releasing to Off.");
                             msiReleaseFallbackLogged = true;
                         }
                     }
@@ -4395,7 +4449,7 @@ static void EngineThread(HWND hWnd) {
                 msiControlledLedIndex);
             if (releaseStyle.empty()) {
                 releaseStyle = L"Off";
-                Log("[MysticFight] MSI target exposes no Rainbow/ColorCycle/Color Shift style; releasing to Off.");
+                Log("[MysticFight] MSI target exposes no supported autonomous color animation; releasing to Off.");
             }
         }
         const int result = SdkSetStyle(msiControlledDevice.c_str(),
