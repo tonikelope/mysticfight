@@ -5053,7 +5053,20 @@ static void RazerThread(HWND hWnd) {
             }
         }
         if (!anyOpen) {
-            WaitForSingleObject(g_hRazerEvent, 250);
+            // A missing KVM-routed device must not turn the worker into a poll
+            // loop. Sleep until either read-only detection or the earliest
+            // throttled reopen is due; config/shutdown events still wake us.
+            ULONGLONG nextWake = nextDetection;
+            for (const auto& key : selectedKeys) {
+                const auto it = runtimes.find(key);
+                if (it != runtimes.end() && it->second->present &&
+                    it->second->nextOpenAttempt > now) {
+                    nextWake = (std::min)(nextWake, it->second->nextOpenAttempt);
+                }
+            }
+            const DWORD waitMs = nextWake <= now ? 1 : static_cast<DWORD>(
+                (std::min<ULONGLONG>)(detectionIntervalMs, nextWake - now));
+            WaitForSingleObject(g_hRazerEvent, waitMs);
             continue;
         }
 
@@ -5201,10 +5214,10 @@ static void RazerThread(HWND hWnd) {
                 runtime.lastAppliedGeneration < request.generation ||
                 runtime.lastAppliedEnabled != request.enabled;
             ULONGLONG deviceWake = runtime.nextFrame;
-            if (requestPending) {
-                deviceWake = !runtime.controller.IsOpen() && runtime.nextOpenAttempt > now
-                    ? runtime.nextOpenAttempt : now;
+            if (!runtime.controller.IsOpen() && runtime.nextOpenAttempt > now) {
+                deviceWake = runtime.nextOpenAttempt;
             }
+            else if (requestPending) deviceWake = now;
             if (deviceWake == 0) deviceWake = now;
             nextWake = (std::min)(nextWake, deviceWake);
         }

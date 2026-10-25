@@ -109,8 +109,11 @@ release command.
   the active profile, its PID and 91-byte control collection are whitelisted,
   and a valid sensor colour or explicit global Off request exists.
 - Disconnects close only that device's handle and return it to read-only
-  detection. Transient failures retry at a quiet interval while the application
-  remains active.
+  detection. Definitive Windows removal/invalid-handle errors abort the current
+  transfer immediately; other possibly transient errors keep the bounded retry
+  policy. Reopen attempts and read-only detection are throttled to a five-second
+  interval without a polling loop, including when a KVM leaves a stale device
+  interface visible.
 - Windows `HidD_SetFeature`/`HidD_GetFeature` calls are synchronous and isolated
   from MSI and the UI. No claim is made that Windows provides a cancellable
   per-call HID deadline.

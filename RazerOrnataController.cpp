@@ -28,6 +28,15 @@ constexpr DEVPROPKEY kDeviceContainerId = {
 constexpr std::uint8_t kStatusBusy = 0x01;
 constexpr std::uint8_t kStatusSuccessful = 0x02;
 constexpr std::uint8_t kStatusNotSupported = 0x05;
+
+constexpr bool IsDefinitiveDisconnectError(const DWORD error) {
+    return error == ERROR_DEVICE_NOT_CONNECTED || error == ERROR_INVALID_HANDLE ||
+        error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+}
+static_assert(IsDefinitiveDisconnectError(ERROR_DEVICE_NOT_CONNECTED));
+static_assert(IsDefinitiveDisconnectError(ERROR_INVALID_HANDLE));
+static_assert(!IsDefinitiveDisconnectError(ERROR_GEN_FAILURE));
+
 using ControlReport = std::array<std::uint8_t, kReportSize>;
 
 struct DeviceProfile {
@@ -546,7 +555,11 @@ bool RazerOrnataController::SendReport(std::array<std::uint8_t, kReportSize>& re
         std::copy(report.begin(), report.end(), feature.begin() + 1);
         if (!HidD_SetFeature(handle, feature.data(), static_cast<ULONG>(feature.size()))) {
             finalError = GetLastError();
-            Sleep(kRetryDelayMs);
+            if (IsDefinitiveDisconnectError(finalError)) {
+                lastError_ = FormatWin32Error(L"HidD_SetFeature", finalError);
+                return false;
+            }
+            if (attempt + 1 < kMaxAttempts) Sleep(kRetryDelayMs);
             continue;
         }
 
@@ -554,13 +567,17 @@ bool RazerOrnataController::SendReport(std::array<std::uint8_t, kReportSize>& re
         feature.fill(0);
         if (!HidD_GetFeature(handle, feature.data(), static_cast<ULONG>(feature.size()))) {
             finalError = GetLastError();
-            Sleep(kRetryDelayMs);
+            if (IsDefinitiveDisconnectError(finalError)) {
+                lastError_ = FormatWin32Error(L"HidD_GetFeature", finalError);
+                return false;
+            }
+            if (attempt + 1 < kMaxAttempts) Sleep(kRetryDelayMs);
             continue;
         }
 
         if (!ResponseMatches(feature, report)) {
             lastError_ = L"Razer response did not match the request";
-            Sleep(kRetryDelayMs);
+            if (attempt + 1 < kMaxAttempts) Sleep(kRetryDelayMs);
             continue;
         }
 
@@ -576,7 +593,7 @@ bool RazerOrnataController::SendReport(std::array<std::uint8_t, kReportSize>& re
         wchar_t statusError[96] = {};
         swprintf_s(statusError, L"Razer device returned status 0x%02X", status);
         lastError_ = statusError;
-        Sleep(kRetryDelayMs);
+        if (attempt + 1 < kMaxAttempts) Sleep(kRetryDelayMs);
     }
 
     if (lastError_.empty()) lastError_ = FormatWin32Error(L"Razer HID transfer", finalError);
