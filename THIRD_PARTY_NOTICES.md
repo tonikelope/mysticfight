@@ -13,6 +13,7 @@ under GPLv3, a compatible later version of the GNU General Public License.
 
 MysticFight does not bundle or load either project at runtime. The implementation
 is intentionally restricted to detection of Razer VID `0x1532`, Ornata V3 PIDs
-`0x02A1` and `0x028F`, and the volatile extended custom-frame commands needed
-for ten RGB zones. It contains no firmware, bootloader, EEPROM, macro, polling,
-or persistent-lighting command path.
+`0x02A1` and `0x028F`, Ornata V3 X PIDs `0x0294` and `0x02A2`, and the volatile
+extended custom-frame commands needed for their model-specific RGB zones. It
+contains no firmware, bootloader, EEPROM, macro, polling, or persistent-lighting
+command path.

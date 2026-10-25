@@ -12,15 +12,20 @@ Primary references:
 - USB vendor ID: `0x1532` (Razer).
 - Product ID `0x02A1`: `RazerOrnataV3` in current OpenRazer.
 - Product ID `0x028F`: `RazerOrnataV3_Alternate` in current OpenRazer.
-- Both variants declare a `1 x 10` lighting matrix.
-- Both recipes address keyboard interface index 2 with a nominal 600 us wait.
-- On Windows, interface 2 is selected by `&mi_02` in the HID device path and
+- Product ID `0x0294`: `RazerOrnataV3X` in current OpenRazer.
+- Product ID `0x02A2`: `RazerOrnataV3X_Alternate` in current OpenRazer.
+- Both V3 variants declare a `1 x 10` lighting matrix; both V3 X variants
+  declare a single-zone `1 x 1` matrix.
+- The V3 recipes address keyboard interface index 2; the V3 X recipes use
+  interface index 1. Both use a nominal 600 us wait.
+- On Windows, the corresponding interface is selected by `&mi_02` or `&mi_01`
+  in the HID device path and
   must expose a 91-byte feature buffer: one report-ID byte followed by the
   90-byte Razer control report.
 
-MysticFight requires all four checks (VID, whitelisted PID, `MI_02`, feature
-length 91). Detection opens only a zero-access inspection handle and sends no
-feature report.
+MysticFight requires all four checks (VID, whitelisted PID, the model-specific
+interface, and feature length 91). Detection opens only a zero-access inspection
+handle and sends no feature report.
 
 ## 90-byte control report
 
@@ -45,13 +50,14 @@ command ID match. Status `0x02` (successful) and `0x01` (busy/accepted) are
 success; `0x05` (not supported) stops retries. Other failures use at most five
 attempts with 10 ms between retries.
 
-## Volatile ten-zone frame used by MysticFight
+## Volatile model-specific frame used by MysticFight
 
-Both Ornata V3 PIDs use transaction ID `0x1F` for these recipes.
+All supported Ornata V3 and V3 X PIDs use transaction ID `0x1F` for these recipes.
 
 1. Extended custom row: class `0x0F`, command `0x03`, data size `0x47`.
-   Arguments 2, 3 and 4 are row `0`, first column `0` and last column `9`.
-   Arguments 5 through 34 contain ten consecutive `R,G,B` triples.
+   Arguments 2, 3 and 4 are row `0`, first column `0` and the model-specific
+   last column (`9` for V3, `0` for V3 X). The following bytes contain ten
+   `R,G,B` triples for V3 or one triple for V3 X.
 2. Extended custom effect: class `0x0F`, command `0x02`, data size `0x0C`.
    Arguments 0 and 1 are zero (no variable storage); argument 2 is custom
    effect `0x08`.
@@ -64,8 +70,8 @@ before sending.
 
 The OpenRazer static-effect recipe uses variable storage (`VARSTORE=1`) for
 these devices. Because that may be persistent, MysticFight deliberately does
-not implement it. A uniform visually static color is produced by repeating one
-RGB triple across the volatile ten-zone custom frame.
+not implement it. A uniform visually static color is produced with the
+model-specific volatile custom frame (ten zones on V3, one zone on V3 X).
 
 ## Timing and safety decisions
 

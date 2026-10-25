@@ -32,7 +32,8 @@ constexpr void FinalizeControlReport(ControlReport& report) {
 }
 
 constexpr ControlReport BuildCustomFrameReport(
-    const std::array<RazerOrnataController::Rgb, RazerOrnataController::kZoneCount>& colors) {
+    const std::array<RazerOrnataController::Rgb, RazerOrnataController::kZoneCount>& colors,
+    const std::size_t zoneCount) {
     ControlReport frame = {};
     frame[1] = kTransactionId;
     frame[5] = 0x47;
@@ -40,8 +41,8 @@ constexpr ControlReport BuildCustomFrameReport(
     frame[7] = 0x03;
     frame[10] = 0x00; // row
     frame[11] = 0x00; // first zone
-    frame[12] = 0x09; // last zone
-    for (std::size_t i = 0; i < colors.size(); ++i) {
+    frame[12] = static_cast<std::uint8_t>(zoneCount - 1); // last zone
+    for (std::size_t i = 0; i < zoneCount; ++i) {
         const std::size_t offset = 13 + (i * 3);
         frame[offset] = colors[i].red;
         frame[offset + 1] = colors[i].green;
@@ -64,18 +65,34 @@ constexpr ControlReport BuildCustomEffectReport() {
 
 constexpr std::array<RazerOrnataController::Rgb, RazerOrnataController::kZoneCount>
     kBlackProtocolTest = {};
-constexpr ControlReport kBlackFrameProtocolTest = BuildCustomFrameReport(kBlackProtocolTest);
+constexpr ControlReport kBlackV3FrameProtocolTest =
+    BuildCustomFrameReport(kBlackProtocolTest, RazerOrnataController::kZoneCount);
+constexpr ControlReport kBlackV3XFrameProtocolTest = BuildCustomFrameReport(kBlackProtocolTest, 1);
 constexpr ControlReport kCustomEffectProtocolTest = BuildCustomEffectReport();
 static_assert(kReportSize == 90 && kFeatureReportSize == 91);
-static_assert(kBlackFrameProtocolTest[5] == 0x47 &&
-    kBlackFrameProtocolTest[10] == 0 && kBlackFrameProtocolTest[12] == 9 &&
-    kBlackFrameProtocolTest[88] == 0x42);
+static_assert(kBlackV3FrameProtocolTest[5] == 0x47 &&
+    kBlackV3FrameProtocolTest[10] == 0 && kBlackV3FrameProtocolTest[12] == 9 &&
+    kBlackV3FrameProtocolTest[88] == 0x42);
+static_assert(kBlackV3XFrameProtocolTest[5] == 0x47 &&
+    kBlackV3XFrameProtocolTest[10] == 0 && kBlackV3XFrameProtocolTest[12] == 0 &&
+    kBlackV3XFrameProtocolTest[88] == 0x4B);
 static_assert(kCustomEffectProtocolTest[5] == 0x0C &&
     kCustomEffectProtocolTest[10] == 0x08 && kCustomEffectProtocolTest[88] == 0x09);
 
 bool IsSupportedProduct(const USHORT productId) {
     return productId == RazerOrnataController::kProductIdOrnataV3 ||
-        productId == RazerOrnataController::kProductIdOrnataV3Alternate;
+        productId == RazerOrnataController::kProductIdOrnataV3Alternate ||
+        productId == RazerOrnataController::kProductIdOrnataV3X ||
+        productId == RazerOrnataController::kProductIdOrnataV3XAlternate;
+}
+
+bool IsOrnataV3X(const USHORT productId) {
+    return productId == RazerOrnataController::kProductIdOrnataV3X ||
+        productId == RazerOrnataController::kProductIdOrnataV3XAlternate;
+}
+
+std::size_t ZoneCountForProduct(const USHORT productId) {
+    return IsOrnataV3X(productId) ? 1 : RazerOrnataController::kZoneCount;
 }
 
 std::wstring ToLower(std::wstring value) {
@@ -84,9 +101,12 @@ std::wstring ToLower(std::wstring value) {
     return value;
 }
 
-bool IsPreferredInterface(const std::wstring& path) {
+bool IsPreferredInterface(const std::wstring& path, const USHORT productId) {
     const std::wstring lower = ToLower(path);
-    return lower.find(L"&mi_02") != std::wstring::npos;
+    // OpenRazer addresses Ornata V3/V3 Alt on interface 2, while the
+    // single-zone Ornata V3 X/V3 X Alt variants use interface 1.
+    const wchar_t* marker = IsOrnataV3X(productId) ? L"&mi_01" : L"&mi_02";
+    return lower.find(marker) != std::wstring::npos;
 }
 
 std::wstring FormatWin32Error(const wchar_t* operation, DWORD error) {
@@ -149,10 +169,10 @@ std::vector<Candidate> EnumerateCandidates(std::wstring& error) {
         }
 
         const std::wstring path = detail->DevicePath;
-        // Upstream addresses both Ornata V3 PIDs on USB interface 2. Requiring
-        // MI_02 as well as the exact feature size avoids selecting a keyboard
-        // input collection accidentally.
-        if (!IsPreferredInterface(path)) continue;
+        // Avoid touching unrelated HID collections. Identity and the exact
+        // model-specific control interface are verified below using read-only
+        // inspection; no feature report is sent during detection.
+        if (ToLower(path).find(L"vid_1532") == std::wstring::npos) continue;
 
         HANDLE handle = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
             nullptr, OPEN_EXISTING, 0, nullptr);
@@ -178,6 +198,7 @@ std::vector<Candidate> EnumerateCandidates(std::wstring& error) {
 
         if (!attributesOk || attributes.VendorID != RazerOrnataController::kVendorId ||
             !IsSupportedProduct(attributes.ProductID) || !capsOk ||
+            !IsPreferredInterface(path, attributes.ProductID) ||
             caps.FeatureReportByteLength != kFeatureReportSize) {
             continue;
         }
@@ -185,7 +206,8 @@ std::vector<Candidate> EnumerateCandidates(std::wstring& error) {
         Candidate candidate;
         candidate.path = path;
         candidate.productId = attributes.ProductID;
-        candidate.productName = productBuffer[0] ? productBuffer : L"Razer Ornata V3";
+        candidate.productName = productBuffer[0] ? productBuffer :
+            (IsOrnataV3X(attributes.ProductID) ? L"Razer Ornata V3 X" : L"Razer Ornata V3");
         candidates.push_back(std::move(candidate));
     }
 
@@ -229,7 +251,8 @@ RazerOrnataController::DetectionResult RazerOrnataController::Detect() {
 bool RazerOrnataController::Open(const DetectionResult& detection) {
     Close();
     if (!detection.detected || !IsSupportedProduct(detection.productId) ||
-        detection.devicePath.empty() || !IsPreferredInterface(detection.devicePath)) {
+        detection.devicePath.empty() ||
+        !IsPreferredInterface(detection.devicePath, detection.productId)) {
         lastError_ = L"Rejected unverified Razer HID identity";
         return false;
     }
@@ -260,6 +283,7 @@ bool RazerOrnataController::Open(const DetectionResult& detection) {
     }
 
     handle_ = handle;
+    productId_ = detection.productId;
     customEffectActive_ = false;
     haveLastFrame_ = false;
     lastError_.clear();
@@ -270,6 +294,7 @@ void RazerOrnataController::Close() {
     HANDLE handle = static_cast<HANDLE>(handle_);
     if (handle != INVALID_HANDLE_VALUE && handle != nullptr) CloseHandle(handle);
     handle_ = INVALID_HANDLE_VALUE;
+    productId_ = 0;
     customEffectActive_ = false;
     haveLastFrame_ = false;
 }
@@ -293,9 +318,10 @@ bool RazerOrnataController::SetZoneColors(const std::array<Rgb, kZoneCount>& col
     }
     if (haveLastFrame_ && colors == lastFrame_) return true;
 
-    // OpenRazer's Ornata V3 recipe: transaction 0x1F, extended matrix row 0,
-    // columns 0..9, followed by the volatile custom-frame effect selector.
-    auto frame = BuildCustomFrameReport(colors);
+    // OpenRazer's Ornata recipe: transaction 0x1F, extended matrix row 0,
+    // model-specific columns (0..9 for V3, 0 for V3 X), followed by the
+    // volatile custom-frame effect selector.
+    auto frame = BuildCustomFrameReport(colors, ZoneCountForProduct(productId_));
     if (!SendReport(frame)) return false;
 
     if (!customEffectActive_) {
@@ -310,7 +336,7 @@ bool RazerOrnataController::SetZoneColors(const std::array<Rgb, kZoneCount>& col
 }
 
 bool RazerOrnataController::IsWhitelistedReport(
-    const std::array<std::uint8_t, kReportSize>& report) {
+    const std::array<std::uint8_t, kReportSize>& report) const {
     if (report[0] != 0 || report[1] != kTransactionId || report[2] != 0 ||
         report[3] != 0 || report[4] != 0 || report[89] != 0) {
         return false;
@@ -321,9 +347,10 @@ bool RazerOrnataController::IsWhitelistedReport(
     if (crc != report[88]) return false;
 
     if (report[5] == 0x47 && report[6] == 0x0F && report[7] == 0x03) {
+        const std::size_t zoneCount = ZoneCountForProduct(productId_);
         if (report[8] != 0 || report[9] != 0 || report[10] != 0 ||
-            report[11] != 0 || report[12] != 9) return false;
-        for (std::size_t i = 43; i <= 87; ++i) {
+            report[11] != 0 || report[12] != zoneCount - 1) return false;
+        for (std::size_t i = 13 + (zoneCount * 3); i <= 87; ++i) {
             if (report[i] != 0) return false;
         }
         return true;

@@ -207,7 +207,7 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
     {
         L"Shortcuts", L"Advanced",
         L"Profile Label:", L"Set as Active Profile", L"MSI Hardware Control", L"Control MSI motherboard",
-        L"Device:", L"Area:", L"Razer Keyboard", L"Control Razer Ornata V3", L"Detected: Razer Ornata V3 (PID 0x%04X)",
+        L"Device:", L"Area:", L"Razer Keyboard", L"Control Razer Ornata V3", L"Detected: %ls (PID 0x%04X)",
         L"Test uniform color", L"Safe test required", L"Testing one static color...", L"Safe test passed",
         L"Data Source",
         L"Temperature Thresholds and Colors", L"LOW:", L"MEDIUM:", L"HIGH:", L"Color (hex):",
@@ -237,7 +237,7 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
     {
         L"Atajos", L"Avanzado",
         L"Etiqueta del perfil:", L"Establecer como perfil activo", L"Control de hardware MSI", L"Controlar placa base MSI",
-        L"Dispositivo:", L"Área:", L"Teclado Razer", L"Controlar Razer Ornata V3", L"Detectado: Razer Ornata V3 (PID 0x%04X)",
+        L"Dispositivo:", L"Área:", L"Teclado Razer", L"Controlar Razer Ornata V3", L"Detectado: %ls (PID 0x%04X)",
         L"Probar color uniforme", L"Prueba segura requerida", L"Probando un único color estático...", L"Prueba segura superada",
         L"Origen de datos",
         L"Umbrales de temperatura y colores", L"BAJA:", L"MEDIA:", L"ALTA:", L"Color (hex):",
@@ -2234,11 +2234,13 @@ static void UpdateRazerPanelLayout(HWND hDlg) {
 
     wchar_t detectedText[160] = {};
     unsigned int productId = 0;
+    std::wstring productName;
     {
         std::lock_guard<std::mutex> lock(g_razerDetectionMutex);
         productId = g_razerDetection.productId;
+        productName = g_razerDetection.productName;
     }
-    swprintf_s(detectedText, T(STR_RAZER_DETECTED), productId);
+    swprintf_s(detectedText, T(STR_RAZER_DETECTED), productName.c_str(), productId);
     SetDlgItemTextW(hDlg, IDC_LBL_RAZER_DEVICE, detectedText);
 
     const bool testPassed = g_razerStaticTestPassed.load();
@@ -4138,11 +4140,11 @@ static bool SameRazerDetection(const RazerOrnataController::DetectionResult& lef
 }
 
 static void PublishRazerDetection(HWND hWnd,
-    const RazerOrnataController::DetectionResult& detection) {
+    const RazerOrnataController::DetectionResult& detection, const bool forcePublish = false) {
     bool changed = false;
     {
         std::lock_guard<std::mutex> lock(g_razerDetectionMutex);
-        changed = !SameRazerDetection(g_razerDetection, detection);
+        changed = forcePublish || !SameRazerDetection(g_razerDetection, detection);
         g_razerDetection = detection;
     }
     g_razerDetected = detection.detected;
@@ -4151,7 +4153,7 @@ static void PublishRazerDetection(HWND hWnd,
     if (detection.detected) {
         char message[192] = {};
         snprintf(message, sizeof(message),
-            "[Razer HID] Detected Ornata V3 VID=1532 PID=%04X on verified MI_02 feature interface (read-only scan)",
+            "[Razer HID] Detected Ornata family VID=1532 PID=%04X on verified model-specific feature interface (read-only scan)",
             detection.productId);
         Log(message);
     }
@@ -4207,6 +4209,7 @@ static void RazerThread(HWND hWnd) {
     ULONGLONG nextFrame = 0;
     ULONGLONG lastAcknowledgedLedGeneration = 0;
     ULONGLONG lastProcessedTestGeneration = 0;
+    bool detectionPublished = false;
 
     while (g_Running) {
         const int configVersion = g_ConfigVersion.load();
@@ -4225,7 +4228,8 @@ static void RazerThread(HWND hWnd) {
         ULONGLONG now = GetTickCount64();
         if (now >= nextDetection) {
             auto currentDetection = RazerOrnataController::Detect();
-            PublishRazerDetection(hWnd, currentDetection);
+            PublishRazerDetection(hWnd, currentDetection, !detectionPublished);
+            detectionPublished = true;
             if (!SameRazerDetection(detection, currentDetection)) {
                 controller.Close();
                 nextOpenAttempt = now;

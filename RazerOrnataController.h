@@ -10,6 +10,8 @@ public:
     static constexpr std::uint16_t kVendorId = 0x1532;
     static constexpr std::uint16_t kProductIdOrnataV3 = 0x02A1;
     static constexpr std::uint16_t kProductIdOrnataV3Alternate = 0x028F;
+    static constexpr std::uint16_t kProductIdOrnataV3X = 0x0294;
+    static constexpr std::uint16_t kProductIdOrnataV3XAlternate = 0x02A2;
     static constexpr std::size_t kZoneCount = 10;
 
     struct DetectionResult {
@@ -51,9 +53,10 @@ public:
 
 private:
     bool SendReport(std::array<std::uint8_t, 90>& report);
-    static bool IsWhitelistedReport(const std::array<std::uint8_t, 90>& report);
+    bool IsWhitelistedReport(const std::array<std::uint8_t, 90>& report) const;
 
     void* handle_ = reinterpret_cast<void*>(static_cast<std::intptr_t>(-1));
+    std::uint16_t productId_ = 0;
     bool customEffectActive_ = false;
     bool haveLastFrame_ = false;
     std::array<Rgb, kZoneCount> lastFrame_{};
