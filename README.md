@@ -55,7 +55,7 @@ The exact Razer protocol scope and safety decisions are documented in [RAZER_HID
 
 ## Acknowledgements
 
-The documented Razer HID command structures used by MysticFight were informed by the excellent reverse-engineering work of the [OpenRazer project](https://github.com/openrazer/openrazer) and cross-checked against [openrazer-win](https://github.com/Ar4ikov/openrazer-win). MysticFight does not bundle or require either project; on Windows it communicates directly with only the explicitly supported devices above.
+The documented Razer HID command structures used by MysticFight were informed by the excellent reverse-engineering work of the [OpenRazer project](https://github.com/openrazer/openrazer) and cross-checked against [openrazer-win](https://github.com/Ar4ikov/openrazer-win). MysticFight does not bundle or require either project. On Windows it communicates directly with only the explicitly supported devices above.
 
 <p align="center"><img src="pepinazo.jpeg"/></p>
 </div>
