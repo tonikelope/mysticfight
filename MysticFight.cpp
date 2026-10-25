@@ -3401,9 +3401,9 @@ static void FinalCleanup(HWND hWnd) {
 
     CoUninitialize();
 
-    // Note: g_hSensorEvent is intentionally NOT closed here. This runs during
-    // shutdown when the sensor thread may still be wedged in a blocking call and
-    // could reference the event; the OS reclaims the handle on process exit.
+    // Worker synchronization events are intentionally not closed here. During
+    // shutdown a worker may still be wedged in a bounded external call and could
+    // reference them; the OS reclaims all four handles on process exit.
 
     if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); g_hMutex = NULL; }
 

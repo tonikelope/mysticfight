@@ -103,8 +103,9 @@ release command.
 - Razer output defaults to 25 FPS and is independently selectable as 15, 20 or
   25 FPS per physical device. FPS is a maximum transition cadence, not a
   continuous write rate: identical frames are suppressed at both the worker and
-  controller boundaries, and a settled colour wakes again only for sensor,
-  configuration, device-detection or shutdown work.
+  controller boundaries. LibreHardwareMonitor sampling continues independently;
+  a settled Razer worker wakes only for a sensor/source change, configuration,
+  device detection/retry or shutdown work.
 - The Razer worker is separate from the UI, sensor and MSI SDK workers. It owns
   one controller per selected device, samples only the newest temperature and
   queues no stale frames.
