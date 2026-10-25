@@ -13,7 +13,9 @@ public:
     static constexpr std::uint16_t kProductIdOrnataV3Alternate = 0x028F;
     static constexpr std::uint16_t kProductIdOrnataV3X = 0x0294;
     static constexpr std::uint16_t kProductIdOrnataV3XAlternate = 0x02A2;
-    static constexpr std::size_t kZoneCount = 10;
+    static constexpr std::uint16_t kProductIdOrnataV3Tenkeyless = 0x02A3;
+    static constexpr std::uint16_t kProductIdTartarusPro = 0x0244;
+    static constexpr std::size_t kMaxZoneCount = 21;
 
     struct DetectedDevice {
         std::wstring deviceKey;
@@ -59,7 +61,7 @@ public:
     // Persistent writes are limited to the two documented release states used
     // when MysticFight relinquishes a device it actually controlled.
     bool SetUniformColor(std::uint8_t red, std::uint8_t green, std::uint8_t blue);
-    bool SetZoneColors(const std::array<Rgb, kZoneCount>& colors);
+    bool SetZoneColors(const std::array<Rgb, kMaxZoneCount>& colors);
     // Explicitly applies the documented persistent NONE (lights off) effect.
     bool SetLightsOff();
     // Explicitly restores the documented persistent Spectrum Cycling effect.
@@ -75,6 +77,6 @@ private:
     std::uint16_t productId_ = 0;
     bool customEffectActive_ = false;
     bool haveLastFrame_ = false;
-    std::array<Rgb, kZoneCount> lastFrame_{};
+    std::array<Rgb, kMaxZoneCount> lastFrame_{};
     std::wstring lastError_;
 };

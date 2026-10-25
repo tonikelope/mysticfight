@@ -4,7 +4,7 @@
 
 <img src="rgb.png" width="64" height="64" align="right" />
 
-Temperature-driven RGB control for MSI Mystic Light and the Razer Ornata V3 / V3 X.
+Temperature-driven RGB control for MSI Mystic Light and explicitly supported Razer HID devices.
 
 ## ❓ Why MysticFight?
 Let's be honest: the official **Mystic Light** software is often unreliable, and "fails more than a fairground shotgun". 
@@ -18,10 +18,10 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * **VERY Lightweight:** No heavy dashboards; just a simple tray app that stays out of your way.
 * **Customizable Device and LED area:** Choose the one you prefer. <i>Please note that MSI Mystic Light SDK may not recognise all areas available on your device (you will have to wait for MSI to update the public SDK)</i>.
 * **Independent controllers per profile:** Control the MSI motherboard and any individually selected compatible Razer device. New profiles select no Razer device by default.
-* **Native Razer Ornata V3 / V3 X support:** Direct Windows HID control with no Synapse, Chroma Runtime, OpenRGB, extra service, or kernel driver. Settings inventories every physical Razer HID device in a fixed-height scrollable list; only models with a validated protocol are selectable.
-* **True multi-device Razer control:** Every detected physical device is shown by its reported product name and PID, and tracked internally by a stable device key. Profiles can independently select none, one, or several compatible Razer devices.
+* **Native Razer HID support:** Direct Windows HID control with no Synapse, Chroma Runtime, OpenRGB, extra service, or kernel driver. The validated models are Ornata V3, Ornata V3 X, Ornata V3 Tenkeyless and Tartarus Pro (exact PIDs below).
+* **True multi-device Razer control:** Every detected physical Razer HID device is shown by its reported product name and PID, and tracked internally by a stable device key. Profiles can independently select none, one, or several supported devices. Detected models outside the explicit compatibility table remain visible but disabled: MysticFight never guesses that two Razer products share a protocol.
 * **Configurable device hand-off:** When a profile stops using an MSI or Razer device (or MysticFight exits normally), Advanced settings can leave it powered off or return it to an autonomous animated effect (an exact MSI SDK-advertised style, or Razer Spectrum Cycling). The default is lights off, and MysticFight never hands off a device it did not successfully control first.
-* **Independent refresh rates:** MSI and every physical Razer device can independently use 15, 20, or 25 FPS while sharing the same thermal color and smoothing engine. The Razer scheduler keeps a separate deadline per device, so a 15 FPS device is not quantized by a 25 FPS device.
+* **Independent refresh rates:** MSI and every selected, supported Razer device can independently use 15, 20, or 25 FPS while sharing the same thermal color and smoothing engine. The Razer scheduler keeps a separate deadline per device, so a 15 FPS device is not quantized by a 25 FPS device.
 * **Customizable Temperature Sensor:** Choose the one you prefer.
 * **Customizable Temperature and Colors Thresholds:** RMS interpolation with adaptive color transition smoothing.
 * **5 profiles settings:** You can set a custom global shortcut keys to change between profiles.
@@ -36,11 +36,24 @@ For this tool to work, you MUST have the following installed/running:
    * Disable **both** options in Mystic Light config: overwrite third part RGB and power saving mode. (It is highly recommended to also disable automatic updates for MSI Center and Mystic Light).
 2. **LibreHardwareMonitor:** [Download here](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/latest). Must be running (minimized on tray) to provide temperature data via Web Server (You must enable Remote Web Server in LHM options menu). <i>Note: Yes, I know there is a LibreHardwareMonitorLib available, but I don't have the time or inclination to mess around with CLR DLL wrappers such when LHM client works perfectly well for this task, is lightweight and useful for other popular monitoring applications such as RainMeter</i>.
 
-The Razer protocol scope and safety decisions are documented in [RAZER_ORNATA_V3_PROTOCOL.md](RAZER_ORNATA_V3_PROTOCOL.md).
+### Supported Razer devices
+
+| Device | USB PID | Lighting geometry |
+| --- | --- | --- |
+| Razer Ornata V3 | `0x02A1` | 10 zones |
+| Razer Ornata V3 (Alternate) | `0x028F` | 10 zones |
+| Razer Ornata V3 X | `0x0294` | 1 zone |
+| Razer Ornata V3 X (Alternate) | `0x02A2` | 1 zone |
+| Razer Ornata V3 Tenkeyless | `0x02A3` | 8 zones |
+| Razer Tartarus Pro | `0x0244` | 21 zones |
+
+Compatibility means temperature-driven uniform colour plus the configurable Off/Spectrum release behaviour; it does not imply support for every feature exposed by the device. Other Razer models are detected for inventory purposes but are deliberately not written to until their complete command recipe, transport interface and lighting geometry have been validated.
+
+The exact Razer protocol scope and safety decisions are documented in [RAZER_HID_PROTOCOL.md](RAZER_HID_PROTOCOL.md).
 
 ## Acknowledgements
 
-The documented Razer HID command structures used by MysticFight were informed by the excellent reverse-engineering work of the [OpenRazer project](https://github.com/openrazer/openrazer). MysticFight does not bundle or require OpenRazer; on Windows it communicates directly with the explicitly supported devices.
+The documented Razer HID command structures used by MysticFight were informed by the excellent reverse-engineering work of the [OpenRazer project](https://github.com/openrazer/openrazer) and cross-checked against [openrazer-win](https://github.com/Ar4ikov/openrazer-win). MysticFight does not bundle or require either project; on Windows it communicates directly with only the explicitly supported devices above.
 
 <p align="center"><img src="pepinazo.jpeg"/></p>
 </div>

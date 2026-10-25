@@ -16,6 +16,7 @@ namespace {
 constexpr std::size_t kReportSize = 90;
 constexpr std::size_t kFeatureReportSize = kReportSize + 1; // leading report ID
 constexpr std::uint8_t kTransactionId = 0x1F;
+constexpr std::uint8_t kBacklightLed = 0x05;
 constexpr int kMaxAttempts = 5;
 constexpr DWORD kInterTransferDelayMs = 1;
 constexpr DWORD kRetryDelayMs = 10;
@@ -29,6 +30,28 @@ constexpr std::uint8_t kStatusSuccessful = 0x02;
 constexpr std::uint8_t kStatusNotSupported = 0x05;
 using ControlReport = std::array<std::uint8_t, kReportSize>;
 
+struct DeviceProfile {
+    USHORT productId;
+    std::size_t zoneCount;
+    std::uint8_t preferredInterface;
+};
+
+constexpr std::array<DeviceProfile, 6> kSupportedDeviceProfiles = {{
+    { RazerOrnataController::kProductIdTartarusPro, 21, 2 },
+    { RazerOrnataController::kProductIdOrnataV3Alternate, 10, 2 },
+    { RazerOrnataController::kProductIdOrnataV3X, 1, 1 },
+    { RazerOrnataController::kProductIdOrnataV3, 10, 2 },
+    { RazerOrnataController::kProductIdOrnataV3XAlternate, 1, 1 },
+    { RazerOrnataController::kProductIdOrnataV3Tenkeyless, 8, 2 },
+}};
+
+constexpr const DeviceProfile* ProfileForProduct(const USHORT productId) {
+    for (const auto& profile : kSupportedDeviceProfiles) {
+        if (profile.productId == productId) return &profile;
+    }
+    return nullptr;
+}
+
 constexpr void FinalizeControlReport(ControlReport& report) {
     std::uint8_t crc = 0;
     for (std::size_t i = 2; i <= 87; ++i) crc ^= report[i];
@@ -37,7 +60,7 @@ constexpr void FinalizeControlReport(ControlReport& report) {
 }
 
 constexpr ControlReport BuildCustomFrameReport(
-    const std::array<RazerOrnataController::Rgb, RazerOrnataController::kZoneCount>& colors,
+    const std::array<RazerOrnataController::Rgb, RazerOrnataController::kMaxZoneCount>& colors,
     const std::size_t zoneCount) {
     ControlReport frame = {};
     frame[1] = kTransactionId;
@@ -68,40 +91,44 @@ constexpr ControlReport BuildCustomEffectReport() {
     return activate;
 }
 
-constexpr ControlReport BuildSpectrumEffectReport() {
+constexpr ControlReport BuildSpectrumEffectReport(const std::uint8_t led) {
     ControlReport spectrum = {};
     spectrum[1] = kTransactionId;
     spectrum[5] = 0x06;
     spectrum[6] = 0x0F;
     spectrum[7] = 0x02;
     spectrum[8] = 0x01; // VARSTORE: restore the standalone device effect
-    spectrum[9] = 0x00; // ZERO_LED
+    spectrum[9] = led;
     spectrum[10] = 0x03; // OpenRazer extended-matrix Spectrum Cycling
     FinalizeControlReport(spectrum);
     return spectrum;
 }
 
-constexpr ControlReport BuildLightsOffEffectReport() {
+constexpr ControlReport BuildLightsOffEffectReport(const std::uint8_t led) {
     ControlReport off = {};
     off[1] = kTransactionId;
     off[5] = 0x06;
     off[6] = 0x0F;
     off[7] = 0x02;
     off[8] = 0x01; // VARSTORE: persist the released standalone state
-    off[9] = 0x00; // ZERO_LED
+    off[9] = led;
     off[10] = 0x00; // OpenRazer extended-matrix NONE effect
     FinalizeControlReport(off);
     return off;
 }
 
-constexpr std::array<RazerOrnataController::Rgb, RazerOrnataController::kZoneCount>
+constexpr std::array<RazerOrnataController::Rgb, RazerOrnataController::kMaxZoneCount>
     kBlackProtocolTest = {};
 constexpr ControlReport kBlackV3FrameProtocolTest =
-    BuildCustomFrameReport(kBlackProtocolTest, RazerOrnataController::kZoneCount);
+    BuildCustomFrameReport(kBlackProtocolTest, 10);
 constexpr ControlReport kBlackV3XFrameProtocolTest = BuildCustomFrameReport(kBlackProtocolTest, 1);
+constexpr ControlReport kBlackV3TenkeylessFrameProtocolTest =
+    BuildCustomFrameReport(kBlackProtocolTest, 8);
+constexpr ControlReport kBlackTartarusProFrameProtocolTest =
+    BuildCustomFrameReport(kBlackProtocolTest, 21);
 constexpr ControlReport kCustomEffectProtocolTest = BuildCustomEffectReport();
-constexpr ControlReport kSpectrumEffectProtocolTest = BuildSpectrumEffectReport();
-constexpr ControlReport kLightsOffEffectProtocolTest = BuildLightsOffEffectReport();
+constexpr ControlReport kSpectrumEffectProtocolTest = BuildSpectrumEffectReport(kBacklightLed);
+constexpr ControlReport kLightsOffEffectProtocolTest = BuildLightsOffEffectReport(kBacklightLed);
 static_assert(kReportSize == 90 && kFeatureReportSize == 91);
 static_assert(kBlackV3FrameProtocolTest[5] == 0x47 &&
     kBlackV3FrameProtocolTest[10] == 0 && kBlackV3FrameProtocolTest[12] == 9 &&
@@ -109,29 +136,32 @@ static_assert(kBlackV3FrameProtocolTest[5] == 0x47 &&
 static_assert(kBlackV3XFrameProtocolTest[5] == 0x47 &&
     kBlackV3XFrameProtocolTest[10] == 0 && kBlackV3XFrameProtocolTest[12] == 0 &&
     kBlackV3XFrameProtocolTest[88] == 0x4B);
+static_assert(kBlackV3TenkeylessFrameProtocolTest[5] == 0x47 &&
+    kBlackV3TenkeylessFrameProtocolTest[10] == 0 &&
+    kBlackV3TenkeylessFrameProtocolTest[12] == 7 &&
+    kBlackV3TenkeylessFrameProtocolTest[88] == 0x4C);
+static_assert(kBlackTartarusProFrameProtocolTest[5] == 0x47 &&
+    kBlackTartarusProFrameProtocolTest[10] == 0 &&
+    kBlackTartarusProFrameProtocolTest[12] == 20 &&
+    kBlackTartarusProFrameProtocolTest[88] == 0x5F);
 static_assert(kCustomEffectProtocolTest[5] == 0x0C &&
     kCustomEffectProtocolTest[10] == 0x08 && kCustomEffectProtocolTest[88] == 0x09);
 static_assert(kSpectrumEffectProtocolTest[5] == 0x06 &&
-    kSpectrumEffectProtocolTest[8] == 0x01 && kSpectrumEffectProtocolTest[10] == 0x03 &&
-    kSpectrumEffectProtocolTest[88] == 0x09);
+    kSpectrumEffectProtocolTest[8] == 0x01 && kSpectrumEffectProtocolTest[9] == 0x05 &&
+    kSpectrumEffectProtocolTest[10] == 0x03 &&
+    kSpectrumEffectProtocolTest[88] == 0x0C);
 static_assert(kLightsOffEffectProtocolTest[5] == 0x06 &&
-    kLightsOffEffectProtocolTest[8] == 0x01 && kLightsOffEffectProtocolTest[10] == 0x00 &&
-    kLightsOffEffectProtocolTest[88] == 0x0A);
+    kLightsOffEffectProtocolTest[8] == 0x01 && kLightsOffEffectProtocolTest[9] == 0x05 &&
+    kLightsOffEffectProtocolTest[10] == 0x00 &&
+    kLightsOffEffectProtocolTest[88] == 0x0F);
 
 bool IsSupportedProduct(const USHORT productId) {
-    return productId == RazerOrnataController::kProductIdOrnataV3 ||
-        productId == RazerOrnataController::kProductIdOrnataV3Alternate ||
-        productId == RazerOrnataController::kProductIdOrnataV3X ||
-        productId == RazerOrnataController::kProductIdOrnataV3XAlternate;
-}
-
-bool IsOrnataV3X(const USHORT productId) {
-    return productId == RazerOrnataController::kProductIdOrnataV3X ||
-        productId == RazerOrnataController::kProductIdOrnataV3XAlternate;
+    return ProfileForProduct(productId) != nullptr;
 }
 
 std::size_t ZoneCountForProduct(const USHORT productId) {
-    return IsOrnataV3X(productId) ? 1 : RazerOrnataController::kZoneCount;
+    const auto* profile = ProfileForProduct(productId);
+    return profile ? profile->zoneCount : 0;
 }
 
 std::wstring ToLower(std::wstring value) {
@@ -141,10 +171,12 @@ std::wstring ToLower(std::wstring value) {
 }
 
 bool IsPreferredInterface(const std::wstring& path, const USHORT productId) {
+    const auto* profile = ProfileForProduct(productId);
+    if (!profile) return false;
     const std::wstring lower = ToLower(path);
-    // OpenRazer addresses Ornata V3/V3 Alt on interface 2, while the
-    // single-zone Ornata V3 X/V3 X Alt variants use interface 1.
-    const wchar_t* marker = IsOrnataV3X(productId) ? L"&mi_01" : L"&mi_02";
+    // OpenRazer addresses the supported V3/V3 Alt/V3 TKL/Tartarus Pro models
+    // on interface 2; the single-zone V3 X/V3 X Alt variants use interface 1.
+    const wchar_t* marker = profile->preferredInterface == 1 ? L"&mi_01" : L"&mi_02";
     return lower.find(marker) != std::wstring::npos;
 }
 
@@ -402,22 +434,26 @@ bool RazerOrnataController::IsOpen() const {
 
 bool RazerOrnataController::SetUniformColor(std::uint8_t red, std::uint8_t green,
     std::uint8_t blue) {
-    std::array<Rgb, kZoneCount> colors = {};
+    std::array<Rgb, kMaxZoneCount> colors = {};
     colors.fill({ red, green, blue });
     return SetZoneColors(colors);
 }
 
-bool RazerOrnataController::SetZoneColors(const std::array<Rgb, kZoneCount>& colors) {
+bool RazerOrnataController::SetZoneColors(const std::array<Rgb, kMaxZoneCount>& colors) {
     if (!IsOpen()) {
         lastError_ = L"Razer HID handle is not open";
         return false;
     }
     if (haveLastFrame_ && colors == lastFrame_) return true;
 
-    // OpenRazer's Ornata recipe: transaction 0x1F, extended matrix row 0,
-    // model-specific columns (0..9 for V3, 0 for V3 X), followed by the
-    // volatile custom-frame effect selector.
-    auto frame = BuildCustomFrameReport(colors, ZoneCountForProduct(productId_));
+    // These explicitly whitelisted OpenRazer recipes share transaction 0x1F
+    // and one extended-matrix row. The last column is model-specific.
+    const std::size_t zoneCount = ZoneCountForProduct(productId_);
+    if (zoneCount == 0 || zoneCount > kMaxZoneCount) {
+        lastError_ = L"Razer HID product has no whitelisted lighting geometry";
+        return false;
+    }
+    auto frame = BuildCustomFrameReport(colors, zoneCount);
     if (!SendReport(frame)) return false;
 
     if (!customEffectActive_) {
@@ -436,7 +472,7 @@ bool RazerOrnataController::SetSpectrumCycling() {
         lastError_ = L"Razer HID handle is not open";
         return false;
     }
-    auto spectrum = BuildSpectrumEffectReport();
+    auto spectrum = BuildSpectrumEffectReport(kBacklightLed);
     if (!SendReport(spectrum)) return false;
     customEffectActive_ = false;
     haveLastFrame_ = false;
@@ -448,7 +484,7 @@ bool RazerOrnataController::SetLightsOff() {
         lastError_ = L"Razer HID handle is not open";
         return false;
     }
-    auto off = BuildLightsOffEffectReport();
+    auto off = BuildLightsOffEffectReport(kBacklightLed);
     if (!SendReport(off)) return false;
     customEffectActive_ = false;
     haveLastFrame_ = false;
@@ -468,6 +504,7 @@ bool RazerOrnataController::IsWhitelistedReport(
 
     if (report[5] == 0x47 && report[6] == 0x0F && report[7] == 0x03) {
         const std::size_t zoneCount = ZoneCountForProduct(productId_);
+        if (zoneCount == 0 || zoneCount > kMaxZoneCount) return false;
         if (report[8] != 0 || report[9] != 0 || report[10] != 0 ||
             report[11] != 0 || report[12] != zoneCount - 1) return false;
         for (std::size_t i = 13 + (zoneCount * 3); i <= 87; ++i) {
@@ -485,7 +522,7 @@ bool RazerOrnataController::IsWhitelistedReport(
     }
 
     if (report[5] == 0x06 && report[6] == 0x0F && report[7] == 0x02) {
-        if (report[8] != 0x01 || report[9] != 0 ||
+        if (report[8] != 0x01 || report[9] != kBacklightLed ||
             (report[10] != 0x00 && report[10] != 0x03)) return false;
         for (std::size_t i = 11; i <= 87; ++i) {
             if (report[i] != 0) return false;

@@ -4,7 +4,7 @@
  * Author: Gemini (& tonikelope, at least i want to believe it).
  *
  * Description:
- * This application synchronizes independent MSI and Razer Ornata V3 RGB
+ * This application synchronizes independent MSI and supported Razer HID RGB
  * controllers with temperatures retrieved via LibreHardwareMonitor (LHM).
  * ============================================================================
  */
