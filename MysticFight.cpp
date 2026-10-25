@@ -176,7 +176,7 @@ enum StrId {
     // Advanced layer
     STR_GRP_ADVANCED, STR_GRP_LIGHTING_CONTROLLERS,
     STR_LBL_ADV_SENSOR, STR_LBL_ADV_LED, STR_LBL_ADV_RAZER, STR_LBL_ADV_SMOOTH,
-    STR_LBL_ADV_RELEASE, STR_RELEASE_OFF, STR_RELEASE_MSI_RAINBOW, STR_RELEASE_RAZER_SPECTRUM,
+    STR_LBL_ADV_RELEASE, STR_RELEASE_OFF, STR_RELEASE_RAZER_SPECTRUM,
     STR_GRP_DATA_SOURCES, STR_LBL_LHM_SERVER,
     STR_GRP_LANGUAGE, STR_LBL_LANGUAGE,
     // Shortcuts layer
@@ -214,7 +214,7 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Temperature Thresholds and Colors", L"LOW:", L"MEDIUM:", L"HIGH:", L"Color (hex):",
         L"Reset Defaults",
         L"Shared Thermal Engine", L"Controllers", L"Sensor Update:", L"MSI motherboard:", L"Razer devices:", L"Smoothing:",
-        L"On release:", L"Lights off", L"Rainbow", L"Spectrum Cycling",
+        L"On release:", L"Lights off", L"Spectrum Cycling",
         L"Data Sources", L"LibreHardwareMonitor",
         L"Language", L"Language:",
         L"Global Hotkeys Configuration", L"Toggle ON/OFF:", L"Activate Profile %d:", L"Reset Hotkeys",
@@ -239,7 +239,7 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Umbrales de temperatura y colores", L"BAJA:", L"MEDIA:", L"ALTA:", L"Color (hex):",
         L"Restaurar valores",
         L"Motor térmico compartido", L"Controladoras", L"Actualización sensor:", L"Placa base MSI:", L"Dispositivos Razer:", L"Suavizado:",
-        L"Al liberar:", L"Apagar luces", L"Arcoíris", L"Spectrum Cycling",
+        L"Al liberar:", L"Apagar luces", L"Spectrum Cycling",
         L"Orígenes de datos", L"LibreHardwareMonitor",
         L"Idioma", L"Idioma:",
         L"Configuración de atajos globales", L"Activar/Desactivar:", L"Activar perfil %d:", L"Restaurar atajos",
@@ -337,6 +337,9 @@ struct GlobalConfig {
     int razerRefreshFPS = 0;
     float smoothingFactor = 0.0f;
     ReleaseEffect msiReleaseEffect = DEF_MSI_RELEASE_EFFECT;
+    // Exact style name advertised by MLAPI_GetLedInfo. Empty preserves the
+    // legacy automatic choice for configurations created before this setting.
+    std::wstring msiReleaseStyle;
     ReleaseEffect razerReleaseEffect = DEF_RAZER_RELEASE_EFFECT;
 };
 
@@ -357,7 +360,7 @@ typedef int (*LPMLAPI_Release)();
 // with --sdk-host; only that child loads and calls the vendor DLL. Fixed-size
 // packets keep the protocol simple and deterministic across anonymous pipes.
 const DWORD SDK_IPC_MAGIC = 0x4D465344; // "MFSD"
-const DWORD SDK_IPC_VERSION = 3;
+const DWORD SDK_IPC_VERSION = 4;
 const int SDK_IPC_TIMEOUT = -10001;
 const int SDK_IPC_BROKEN = -10002;
 const int SDK_HOST_LOAD_FAILED = -10003;
@@ -389,7 +392,9 @@ struct SdkIpcArea {
     DWORD index;
     wchar_t name[128];
     wchar_t animatedReleaseStyle[128];
-    wchar_t supportedStylePreview[256];
+    // Unit-separator-delimited exact style names. A whole name is omitted if
+    // the fixed diagnostic/inventory payload is full; names are never cut.
+    wchar_t supportedStyles[512];
 };
 
 struct SdkIpcDevice {
@@ -481,9 +486,9 @@ struct HwArea {
     // Exact SDK-advertised style used when releasing this area to an
     // autonomous animated effect. Empty means release must fall back to Off.
     std::wstring animatedReleaseStyle;
-    // Truncated, diagnostic-only list returned by MLAPI_GetLedInfo. It is
-    // captured during the existing enumeration and never triggers SDK calls.
-    std::wstring supportedStylePreview;
+    // Exact styles captured during the existing enumeration. Reading this
+    // cache from Settings never triggers an SDK call.
+    std::vector<std::wstring> supportedStyles;
 };
 struct HwDevice { std::wstring type; std::wstring friendly; std::vector<HwArea> areas; };
 std::vector<HwDevice> g_hwSnapshot;
@@ -1031,6 +1036,8 @@ static void SaveSettings() {
     WritePrivateProfileStringW(L"Global", L"RazerRefreshFPS", std::to_wstring(g_Global.razerRefreshFPS).c_str(), INI_FILE);
     WritePrivateProfileStringW(L"Global", L"MsiReleaseEffect",
         std::to_wstring(static_cast<int>(g_Global.msiReleaseEffect)).c_str(), INI_FILE);
+    WritePrivateProfileStringW(L"Global", L"MsiReleaseStyle",
+        g_Global.msiReleaseStyle.c_str(), INI_FILE);
     WritePrivateProfileStringW(L"Global", L"RazerReleaseEffect",
         std::to_wstring(static_cast<int>(g_Global.razerReleaseEffect)).c_str(), INI_FILE);
     WritePrivateProfileStringW(L"Global", L"RazerSettingsVersion", L"1", INI_FILE);
@@ -1210,6 +1217,11 @@ static void LoadSettings() {
         static_cast<int>(DEF_RAZER_RELEASE_EFFECT), INI_FILE);
     g_Global.msiReleaseEffect = msiReleaseEffect == static_cast<int>(ReleaseEffect::Animated)
         ? ReleaseEffect::Animated : ReleaseEffect::Off;
+    g_Global.msiReleaseStyle = ReadIniString(L"Global", L"MsiReleaseStyle");
+    if (g_Global.msiReleaseStyle.size() >= 128) {
+        Log("[Config] Invalid MsiReleaseStyle; using automatic selection.");
+        g_Global.msiReleaseStyle.clear();
+    }
     g_Global.razerReleaseEffect = razerReleaseEffect == static_cast<int>(ReleaseEffect::Animated)
         ? ReleaseEffect::Animated : ReleaseEffect::Off;
     {
@@ -1555,6 +1567,7 @@ static void PopulateSensorList(HWND hDlg, const wchar_t* webServerUrl, const wch
 
 // Forward declarations for UI synchronization
 static void PopulateAreaList(HWND hDlg, const wchar_t* deviceType, int targetLedIndex);
+static void PopulateMsiReleaseCombo(HWND hDlg);
 
 struct RazerUiDevice {
     RazerOrnataController::DetectedDevice device;
@@ -1673,8 +1686,6 @@ static void LoadGlobalAdvancedToUI(HWND hDlg) {
     SetComboByVal(IDC_COMBO_SENSOR_UPDATE, g_Global.sensorUpdateMS, { 250, 500, 1000 });
     SetComboByVal(IDC_COMBO_LED_FPS, g_Global.ledRefreshFPS, { 25, 20, 15 });
     SetComboByVal(IDC_COMBO_RAZER_FPS, g_Global.razerRefreshFPS, { 25, 20, 15 });
-    SendMessage(GetDlgItem(hDlg, IDC_COMBO_MSI_RELEASE), CB_SETCURSEL,
-        static_cast<WPARAM>(g_Global.msiReleaseEffect), 0);
     SendMessage(GetDlgItem(hDlg, IDC_COMBO_RAZER_RELEASE), CB_SETCURSEL,
         static_cast<WPARAM>(g_Global.razerReleaseEffect), 0);
 
@@ -1710,9 +1721,21 @@ static void SaveGlobalAdvancedFromUI(HWND hDlg) {
     else if (idxRazerFPS == 1) g_Global.razerRefreshFPS = 20;
     else g_Global.razerRefreshFPS = 15;
 
-    g_Global.msiReleaseEffect = SendMessage(
-        GetDlgItem(hDlg, IDC_COMBO_MSI_RELEASE), CB_GETCURSEL, 0, 0) == 1
-        ? ReleaseEffect::Animated : ReleaseEffect::Off;
+    HWND msiReleaseCombo = GetDlgItem(hDlg, IDC_COMBO_MSI_RELEASE);
+    const int msiReleaseSelection = static_cast<int>(SendMessage(
+        msiReleaseCombo, CB_GETCURSEL, 0, 0));
+    if (msiReleaseSelection != CB_ERR) {
+        const auto style = reinterpret_cast<const wchar_t*>(SendMessage(
+            msiReleaseCombo, CB_GETITEMDATA, msiReleaseSelection, 0));
+        if (style && style != reinterpret_cast<const wchar_t*>(CB_ERR)) {
+            g_Global.msiReleaseEffect = ReleaseEffect::Animated;
+            g_Global.msiReleaseStyle = style;
+        }
+        else {
+            g_Global.msiReleaseEffect = ReleaseEffect::Off;
+            g_Global.msiReleaseStyle.clear();
+        }
+    }
     g_Global.razerReleaseEffect = SendMessage(
         GetDlgItem(hDlg, IDC_COMBO_RAZER_RELEASE), CB_GETCURSEL, 0, 0) == 1
         ? ReleaseEffect::Animated : ReleaseEffect::Off;
@@ -1823,8 +1846,8 @@ static int AnimatedMsiStyleScore(const std::wstring& style) {
 }
 
 static std::wstring SelectAnimatedMsiStyle(SAFEARRAY* styles,
-    std::wstring* supportedStylePreview) {
-    if (supportedStylePreview) supportedStylePreview->clear();
+    std::vector<std::wstring>* supportedStyles) {
+    if (supportedStyles) supportedStyles->clear();
     if (!styles || SafeArrayGetDim(styles) != 1) return {};
 
     LONG lowerBound = 0;
@@ -1852,19 +1875,7 @@ static std::wstring SelectAnimatedMsiStyle(SAFEARRAY* styles,
     auto consider = [&](const BSTR value) {
         if (!value) return;
         const std::wstring candidate(value, SysStringLen(value));
-        if (supportedStylePreview && !candidate.empty() && supportedStylePreview->size() < 240) {
-            size_t remaining = 240 - supportedStylePreview->size();
-            if (!supportedStylePreview->empty()) {
-                if (remaining > 2) {
-                    supportedStylePreview->append(L", ");
-                    remaining -= 2;
-                }
-                else {
-                    remaining = 0;
-                }
-            }
-            if (remaining > 0) supportedStylePreview->append(candidate, 0, remaining);
-        }
+        if (supportedStyles && !candidate.empty()) supportedStyles->push_back(candidate);
         const int score = AnimatedMsiStyleScore(candidate);
         if (score > selectedScore) {
             selected = candidate;
@@ -1884,11 +1895,6 @@ static std::wstring SelectAnimatedMsiStyle(SAFEARRAY* styles,
             const VARIANT& value = lock.data[i];
             if (V_VT(&value) == VT_BSTR) consider(V_BSTR(&value));
         }
-    }
-    else if (supportedStylePreview) {
-        *supportedStylePreview = L"<unreadable SAFEARRAY type=" +
-            std::to_wstring(static_cast<unsigned int>(type)) + L", elementBytes=" +
-            std::to_wstring(styles->cbElements) + L">";
     }
 
     return selected;
@@ -1950,7 +1956,7 @@ static int BuildHardwareSnapshot() {
                                     ? std::wstring(ledName, SysStringLen(ledName))
                                     : std::wstring();
                                 area.animatedReleaseStyle = SelectAnimatedMsiStyle(
-                                    pStyles, &area.supportedStylePreview);
+                                    pStyles, &area.supportedStyles);
                                 dev.areas.push_back(std::move(area));
                                 if (pStyles) SafeArrayDestroy(pStyles);
                                 if (ledName) SysFreeString(ledName);
@@ -2050,6 +2056,84 @@ static void PopulateDeviceList(HWND hDlg) {
 
     int finalCount = (int)SendMessage(hComboDev, CB_GETCOUNT, 0, 0);
     EnableWindow(hComboDev, finalCount > 1);
+}
+
+static void PopulateMsiReleaseCombo(HWND hDlg) {
+    HWND combo = GetDlgItem(hDlg, IDC_COMBO_MSI_RELEASE);
+    if (!combo) return;
+
+    bool selectOff = false;
+    std::wstring selectedStyle;
+    const int previousSelection = static_cast<int>(SendMessage(combo, CB_GETCURSEL, 0, 0));
+    if (previousSelection != CB_ERR) {
+        const auto previousStyle = reinterpret_cast<const wchar_t*>(SendMessage(
+            combo, CB_GETITEMDATA, previousSelection, 0));
+        if (previousStyle && previousStyle != reinterpret_cast<const wchar_t*>(CB_ERR)) {
+            selectedStyle = previousStyle;
+        }
+        else {
+            selectOff = true;
+        }
+    }
+    else {
+        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+        selectOff = g_Global.msiReleaseEffect == ReleaseEffect::Off;
+        selectedStyle = g_Global.msiReleaseStyle;
+    }
+
+    std::vector<std::wstring> availableStyles;
+    std::wstring automaticStyle;
+    std::set<std::wstring> seen;
+    {
+        std::lock_guard<std::mutex> lock(g_hwMutex);
+        for (const auto& device : g_hwSnapshot) {
+            for (const auto& area : device.areas) {
+                if (automaticStyle.empty() && !area.animatedReleaseStyle.empty()) {
+                    automaticStyle = area.animatedReleaseStyle;
+                }
+                for (const auto& style : area.supportedStyles) {
+                    const std::wstring normalized = NormalizeMsiStyleName(style);
+                    if (normalized.empty() || normalized == L"off" || !seen.insert(normalized).second) {
+                        continue;
+                    }
+                    availableStyles.push_back(style);
+                }
+            }
+        }
+    }
+
+    if (!selectOff && selectedStyle.empty()) selectedStyle = automaticStyle;
+
+    ClearComboHeapData(combo);
+    const int offIndex = static_cast<int>(SendMessage(combo, CB_ADDSTRING, 0,
+        reinterpret_cast<LPARAM>(T(STR_RELEASE_OFF))));
+    if (offIndex != CB_ERR) SendMessage(combo, CB_SETITEMDATA, offIndex, 0);
+
+    int selectedIndex = selectOff ? offIndex : CB_ERR;
+    const std::wstring normalizedSelected = NormalizeMsiStyleName(selectedStyle);
+    for (const auto& style : availableStyles) {
+        wchar_t* storedStyle = HeapDupString(style.c_str());
+        if (!storedStyle) continue;
+        const int index = static_cast<int>(SendMessage(combo, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(style.c_str())));
+        if (index == CB_ERR || index == CB_ERRSPACE) {
+            if (storedStyle) HeapFree(GetProcessHeap(), 0, storedStyle);
+            continue;
+        }
+        if (SendMessage(combo, CB_SETITEMDATA, index,
+            reinterpret_cast<LPARAM>(storedStyle)) == CB_ERR) {
+            HeapFree(GetProcessHeap(), 0, storedStyle);
+            SendMessage(combo, CB_DELETESTRING, index, 0);
+            continue;
+        }
+        if (!normalizedSelected.empty() &&
+            NormalizeMsiStyleName(style) == normalizedSelected) {
+            selectedIndex = index;
+        }
+    }
+
+    if (selectedIndex != CB_ERR) SendMessage(combo, CB_SETCURSEL, selectedIndex, 0);
+    EnableWindow(combo, !availableStyles.empty());
 }
 
 // The settings dialog remains usable during SDK recovery, but hardware target
@@ -2652,16 +2736,17 @@ static void ApplyDialogTranslations(HWND hDlg) {
     SendMessage(hSmooth, CB_ADDSTRING, 0, (LPARAM)T(STR_SMOOTH_FAST));
     if (sel >= 0) SendMessage(hSmooth, CB_SETCURSEL, sel, 0);
 
-    auto translateReleaseCombo = [&](const int id, const StrId animatedLabel) {
-        HWND combo = GetDlgItem(hDlg, id);
+    PopulateMsiReleaseCombo(hDlg);
+
+    auto translateRazerReleaseCombo = [&](const StrId animatedLabel) {
+        HWND combo = GetDlgItem(hDlg, IDC_COMBO_RAZER_RELEASE);
         const int selection = static_cast<int>(SendMessage(combo, CB_GETCURSEL, 0, 0));
         SendMessage(combo, CB_RESETCONTENT, 0, 0);
         SendMessage(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(T(STR_RELEASE_OFF)));
         SendMessage(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(T(animatedLabel)));
         if (selection >= 0) SendMessage(combo, CB_SETCURSEL, selection, 0);
     };
-    translateReleaseCombo(IDC_COMBO_MSI_RELEASE, STR_RELEASE_MSI_RAINBOW);
-    translateReleaseCombo(IDC_COMBO_RAZER_RELEASE, STR_RELEASE_RAZER_SPECTRUM);
+    translateRazerReleaseCombo(STR_RELEASE_RAZER_SPECTRUM);
 }
 
 static bool ValidateHotkeys(HWND hDlg) {
@@ -2882,6 +2967,9 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                 LoadProfileToUI(hDlg, s_currentTab, s_tempActiveIndex);
                 SetMsiHardwareControlsEnabled(hDlg, !g_Resetting_sdk.load());
             }
+            else if (LayerForTab(s_currentTab) == LAYER_ADVANCED) {
+                PopulateMsiReleaseCombo(hDlg);
+            }
         }
         break;
     }
@@ -3046,6 +3134,9 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             }
             SetMsiHardwareControlsEnabled(hDlg, !g_Resetting_sdk.load());
         }
+        else if (s_currentTab == 6) {
+            PopulateMsiReleaseCombo(hDlg);
+        }
         return (INT_PTR)TRUE;
     }
 
@@ -3068,6 +3159,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         if (hBrushHigh) { DeleteObject(hBrushHigh); hBrushHigh = NULL; }
         ClearComboHeapData(GetDlgItem(hDlg, IDC_SENSOR_ID));
         ClearComboHeapData(GetDlgItem(hDlg, IDC_COMBO_DEVICE));
+        ClearComboHeapData(GetDlgItem(hDlg, IDC_COMBO_MSI_RELEASE));
         g_razerUiDevices.clear();
         RemovePropW(hDlg, L"MysticFight.RazerExpanded");
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_LOW), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
@@ -3623,8 +3715,19 @@ static void CopySnapshotToResponse(SdkIpcResponse& response) {
             wcsncpy_s(target.areas[j].name, source.areas[j].name.c_str(), _TRUNCATE);
             wcsncpy_s(target.areas[j].animatedReleaseStyle,
                 source.areas[j].animatedReleaseStyle.c_str(), _TRUNCATE);
-            wcsncpy_s(target.areas[j].supportedStylePreview,
-                source.areas[j].supportedStylePreview.c_str(), _TRUNCATE);
+            std::wstring serializedStyles;
+            for (const auto& style : source.areas[j].supportedStyles) {
+                if (style.empty() || style.size() >= _countof(target.areas[j].animatedReleaseStyle)) {
+                    continue;
+                }
+                const size_t required = style.size() + (serializedStyles.empty() ? 0 : 1);
+                if (serializedStyles.size() + required >= _countof(target.areas[j].supportedStyles)) {
+                    break;
+                }
+                if (!serializedStyles.empty()) serializedStyles.push_back(L'\x1f');
+                serializedStyles.append(style);
+            }
+            wcscpy_s(target.areas[j].supportedStyles, serializedStyles.c_str());
         }
     }
 }
@@ -3765,6 +3868,23 @@ static int SdkHeartbeat() {
     return SendSdkCommand(request, nullptr, SDK_RENDER_TIMEOUT_MS);
 }
 
+static std::vector<std::wstring> ParseMsiStyleInventory(const wchar_t* serialized) {
+    std::vector<std::wstring> styles;
+    if (!serialized || !*serialized) return styles;
+
+    const std::wstring input(serialized);
+    size_t start = 0;
+    while (start <= input.size()) {
+        const size_t end = input.find(L'\x1f', start);
+        std::wstring style = input.substr(start,
+            end == std::wstring::npos ? std::wstring::npos : end - start);
+        if (!style.empty()) styles.push_back(std::move(style));
+        if (end == std::wstring::npos) break;
+        start = end + 1;
+    }
+    return styles;
+}
+
 static void PublishHardwareSnapshot(const SdkIpcResponse& response) {
     std::vector<HwDevice> snapshot;
     DWORD deviceCount = min(response.deviceCount, SDK_IPC_MAX_DEVICES);
@@ -3779,7 +3899,8 @@ static void PublishHardwareSnapshot(const SdkIpcResponse& response) {
             area.index = response.devices[i].areas[j].index;
             area.name = response.devices[i].areas[j].name;
             area.animatedReleaseStyle = response.devices[i].areas[j].animatedReleaseStyle;
-            area.supportedStylePreview = response.devices[i].areas[j].supportedStylePreview;
+            area.supportedStyles = ParseMsiStyleInventory(
+                response.devices[i].areas[j].supportedStyles);
             device.areas.push_back(std::move(area));
         }
         snapshot.push_back(std::move(device));
@@ -3807,24 +3928,35 @@ static void PublishHardwareSnapshot(const SdkIpcResponse& response) {
             const wchar_t* style = response.devices[i].areas[j].animatedReleaseStyle[0] == L'\0'
                 ? L"<none; will fall back to Off>"
                 : response.devices[i].areas[j].animatedReleaseStyle;
-            const wchar_t* supported = response.devices[i].areas[j].supportedStylePreview[0] == L'\0'
-                ? L"<empty>"
-                : response.devices[i].areas[j].supportedStylePreview;
+            std::wstring supported;
+            for (const auto& supportedStyle : ParseMsiStyleInventory(
+                response.devices[i].areas[j].supportedStyles)) {
+                if (!supported.empty()) supported.append(L", ");
+                supported.append(supportedStyle);
+            }
+            if (supported.empty()) supported = L"<empty>";
             snprintf(areaMessage, sizeof(areaMessage),
                 "[SDK Supervisor] Area %lu styles: %ls | release animation candidate: %ls",
-                response.devices[i].areas[j].index, supported, style);
+                response.devices[i].areas[j].index, supported.c_str(), style);
             Log(areaMessage);
         }
     }
 }
 
-static std::wstring FindMsiAnimatedReleaseStyle(const std::wstring& deviceType,
-    const DWORD ledIndex) {
+static std::wstring FindMsiReleaseStyle(const std::wstring& deviceType,
+    const DWORD ledIndex, const std::wstring& preferredStyle) {
     std::lock_guard<std::mutex> lock(g_hwMutex);
     for (const auto& device : g_hwSnapshot) {
         if (device.type != deviceType) continue;
         for (const auto& area : device.areas) {
-            if (area.index == ledIndex) return area.animatedReleaseStyle;
+            if (area.index != ledIndex) continue;
+            if (preferredStyle.empty()) return area.animatedReleaseStyle;
+
+            const std::wstring normalizedPreferred = NormalizeMsiStyleName(preferredStyle);
+            for (const auto& supported : area.supportedStyles) {
+                if (NormalizeMsiStyleName(supported) == normalizedPreferred) return supported;
+            }
+            return {};
         }
         break;
     }
@@ -4137,14 +4269,12 @@ static void EngineThread(HWND hWnd) {
         int configVersion;
         int ledRefreshFPS;
         float smoothingFactor;
-        ReleaseEffect msiReleaseEffect;
         {
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
             cfgLocal = g_cfg;
             configVersion = g_ConfigVersion.load();
             ledRefreshFPS = g_Global.ledRefreshFPS;
             smoothingFactor = g_Global.smoothingFactor;
-            msiReleaseEffect = g_Global.msiReleaseEffect;
         }
 
         if (configVersion != lastProcessedVersion) {
@@ -4239,14 +4369,30 @@ static void EngineThread(HWND hWnd) {
             msiControlledLedIndex == static_cast<DWORD>(cfgLocal.targetLedIndex);
         if (msiControlledSinceRelease && !controlledTargetStillSelected) {
             if (currentTime >= msiNextReleaseAttempt) {
+                ReleaseEffect msiReleaseEffect;
+                std::wstring msiReleaseStyle;
+                {
+                    std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+                    msiReleaseEffect = g_Global.msiReleaseEffect;
+                    msiReleaseStyle = g_Global.msiReleaseStyle;
+                }
                 std::wstring releaseStyle = L"Off";
                 if (msiReleaseEffect == ReleaseEffect::Animated) {
-                    releaseStyle = FindMsiAnimatedReleaseStyle(
-                        msiControlledDevice, msiControlledLedIndex);
+                    releaseStyle = FindMsiReleaseStyle(
+                        msiControlledDevice, msiControlledLedIndex, msiReleaseStyle);
                     if (releaseStyle.empty()) {
                         releaseStyle = L"Off";
                         if (!msiReleaseFallbackLogged) {
-                            Log("[MysticFight] MSI target exposes no supported autonomous color animation; releasing to Off.");
+                            if (msiReleaseStyle.empty()) {
+                                Log("[MysticFight] MSI target exposes no supported automatic color animation; releasing to Off.");
+                            }
+                            else {
+                                char message[256] = {};
+                                snprintf(message, sizeof(message),
+                                    "[MysticFight] MSI target does not expose configured release style %ls; releasing to Off.",
+                                    msiReleaseStyle.c_str());
+                                Log(message);
+                            }
                             msiReleaseFallbackLogged = true;
                         }
                     }
@@ -4438,18 +4584,29 @@ static void EngineThread(HWND hWnd) {
     if (sdkReady && g_hSdkHostProcess && msiControlledSinceRelease &&
         !g_windows_shutdown.load()) {
         ReleaseEffect releaseEffect;
+        std::wstring configuredReleaseStyle;
         {
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
             releaseEffect = g_Global.msiReleaseEffect;
+            configuredReleaseStyle = g_Global.msiReleaseStyle;
         }
 
         std::wstring releaseStyle = L"Off";
         if (releaseEffect == ReleaseEffect::Animated) {
-            releaseStyle = FindMsiAnimatedReleaseStyle(msiControlledDevice,
-                msiControlledLedIndex);
+            releaseStyle = FindMsiReleaseStyle(msiControlledDevice,
+                msiControlledLedIndex, configuredReleaseStyle);
             if (releaseStyle.empty()) {
                 releaseStyle = L"Off";
-                Log("[MysticFight] MSI target exposes no supported autonomous color animation; releasing to Off.");
+                if (configuredReleaseStyle.empty()) {
+                    Log("[MysticFight] MSI target exposes no supported automatic color animation; releasing to Off.");
+                }
+                else {
+                    char message[256] = {};
+                    snprintf(message, sizeof(message),
+                        "[MysticFight] MSI target does not expose configured release style %ls; releasing to Off.",
+                        configuredReleaseStyle.c_str());
+                    Log(message);
+                }
             }
         }
         const int result = SdkSetStyle(msiControlledDevice.c_str(),
