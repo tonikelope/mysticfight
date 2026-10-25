@@ -2466,9 +2466,12 @@ static float GetCPUTempFast(int& sampledConfigVersion) {
  */
 static void SensorThread() {
     while (g_Running) {
+        const DataSource sourceBeforeSample = g_activeSource.load();
         int sampledConfigVersion = -1;
         float sampledTemp = GetCPUTempFast(sampledConfigVersion);
         bool temperatureChanged = false;
+        bool msiConsumesSensor = false;
+        bool razerConsumesSensor = false;
         {
             // Config writers use the same mutex while advancing the version.
             // An HTTP result from an older profile/config is therefore discarded.
@@ -2476,12 +2479,20 @@ static void SensorThread() {
             if (sampledConfigVersion == g_ConfigVersion.load()) {
                 const float previousTemp = g_asyncTemp.exchange(sampledTemp);
                 temperatureChanged = previousTemp != sampledTemp;
+                const bool lightsEnabled = g_LedsEnabled.load();
+                msiConsumesSensor = lightsEnabled && g_cfg.controlMsi;
+                razerConsumesSensor = lightsEnabled && g_cfg.controlRazer;
             }
         }
-        // Razer rendering is event-driven while its output is stable. Wake it
-        // only when a fresh sample can change the target; auto-reset event
-        // coalescing is intentional because the worker consumes the latest value.
-        if (temperatureChanged && g_hRazerEvent) SetEvent(g_hRazerEvent);
+        const bool sourceChanged = sourceBeforeSample != g_activeSource.load();
+        // Both renderers are event-driven while their output is stable. Wake
+        // them only when a fresh sample or source transition can change the
+        // target; event coalescing is intentional because workers consume the
+        // latest state rather than queueing stale samples.
+        if (temperatureChanged || sourceChanged) {
+            if (msiConsumesSensor && g_hEngineEvent) SetEvent(g_hEngineEvent);
+            if (razerConsumesSensor && g_hRazerEvent) SetEvent(g_hRazerEvent);
+        }
 
         DWORD waitMs = (DWORD)SENSOR_LOOP_OFF_DELAY_MS;
 
@@ -4339,6 +4350,13 @@ static void EngineWait(DWORD ms) {
     while (PeekMessage(&m, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessage(&m); }
 }
 
+static void EngineWaitUntil(const ULONGLONG deadline) {
+    const ULONGLONG now = GetTickCount64();
+    const DWORD waitMs = deadline <= now ? 1 : static_cast<DWORD>(
+        (std::min<ULONGLONG>)(MAXDWORD - 1, deadline - now));
+    EngineWait(waitMs);
+}
+
 // The engine owns the supervisor and IPC channel. The vendor SDK itself runs in
 // a killable child process, so a permanently blocked MSI call cannot strand the
 // UI or prevent bounded recovery.
@@ -4398,6 +4416,7 @@ static void EngineThread(HWND hWnd) {
     ULONGLONG lastAcknowledgedGeneration = 0;
     DWORD targetR = 0, targetG = 0, targetB = 0;
     bool firstRunLoop = true;
+    bool colorTransitionActive = true;
 
     while (g_Running) {
         Config cfgLocal;
@@ -4415,6 +4434,8 @@ static void EngineThread(HWND hWnd) {
         if (configVersion != lastProcessedVersion) {
             lastProcessedVersion = configVersion;
             forceLEDRefresh();
+            colorTransitionActive = true;
+            nextFrameTime = 0;
             g_pendingStyleChange = true;
             Log("[MysticFight] Config refreshed");
         }
@@ -4471,6 +4492,8 @@ static void EngineThread(HWND hWnd) {
                         g_sdkSuccessStreak = 0;
                         g_pendingStyleChange = true;
                         forceLEDRefresh();
+                        colorTransitionActive = true;
+                        nextFrameTime = 0;
                         SetEvent(g_hHwReadyEvent);
                         PostMessage(hWnd, WM_APP_HWREADY, 0, 0);
                         PostMessage(hWnd, WM_APP_STATUS, 0, 0);
@@ -4574,7 +4597,8 @@ static void EngineThread(HWND hWnd) {
                     g_lastSdkHeartbeatLog = currentTime;
                 }
             }
-            EngineWait((DWORD)MAIN_LOOP_OFF_DELAY_MS);
+            if (g_Resetting_sdk) EngineWait(1);
+            else EngineWaitUntil(g_lastSdkProgress + SDK_HEARTBEAT_OFF_INTERVAL_MS);
             continue;
         }
 
@@ -4630,17 +4654,22 @@ static void EngineThread(HWND hWnd) {
                 }
             }
         }
-        else if (currentTime >= nextFrameTime) {
-            nextFrameTime = currentTime + (1000 / ledRefreshFPS);
+        else if (currentTime >= nextFrameTime || g_pendingStyleChange.load()) {
+            const ULONGLONG frameIntervalMs = 1000 / ledRefreshFPS;
+            nextFrameTime = currentTime + frameIntervalMs;
             float rawTemp = g_asyncTemp;
 
             if (rawTemp >= 0.0f) {
-                if (g_pendingStyleChange.exchange(false)) forceLEDRefresh();
+                if (g_pendingStyleChange.exchange(false)) {
+                    forceLEDRefresh();
+                    colorTransitionActive = true;
+                }
 
                 float temp = floorf(rawTemp * 2.0f + 0.5f) / 2.0f;
                 if (temp != lastTemp) {
                     lastTemp = temp;
                     CalculateThermalTargetColor(cfgLocal, temp, targetR, targetG, targetB);
+                    colorTransitionActive = true;
 
                     if (firstRunLoop) {
                         currR = (float)targetR; currG = (float)targetG; currB = (float)targetB;
@@ -4648,14 +4677,25 @@ static void EngineThread(HWND hWnd) {
                     }
                 }
 
-                const float adjustedFactor = AdjustedSmoothingFactor(smoothingFactor, ledRefreshFPS);
-                currR = SmoothColorChannel(currR.load(), targetR, adjustedFactor);
-                currG = SmoothColorChannel(currG.load(), targetG, adjustedFactor);
-                currB = SmoothColorChannel(currB.load(), targetB, adjustedFactor);
+                if (colorTransitionActive) {
+                    const float adjustedFactor = AdjustedSmoothingFactor(
+                        smoothingFactor, ledRefreshFPS);
+                    currR = SmoothColorChannel(currR.load(), targetR, adjustedFactor);
+                    currG = SmoothColorChannel(currG.load(), targetG, adjustedFactor);
+                    currB = SmoothColorChannel(currB.load(), targetB, adjustedFactor);
+                }
 
                 DWORD sendR = (DWORD)roundf(currR);
                 DWORD sendG = (DWORD)roundf(currG);
                 DWORD sendB = (DWORD)roundf(currB);
+                if (sendR == targetR && sendG == targetG && sendB == targetB) {
+                    // Stop the animation clock at the exact visible colour.
+                    // Further work is driven by sensor/configuration events.
+                    currR = static_cast<float>(targetR);
+                    currG = static_cast<float>(targetG);
+                    currB = static_cast<float>(targetB);
+                    colorTransitionActive = false;
+                }
                 if (sendR != lastR || sendG != lastG || sendB != lastB) {
                     LedRequestSnapshot request = CaptureLedRequest();
                     if (!request.enabled) {
@@ -4683,7 +4723,12 @@ static void EngineThread(HWND hWnd) {
                         }
                     }
                 }
+
+                const bool outputPending = sendR != lastR || sendG != lastG ||
+                    sendB != lastB;
+                if (!colorTransitionActive && !outputPending) nextFrameTime = 0;
             }
+            else nextFrameTime = 0;
         }
 
         currentTime = GetTickCount64();
@@ -4704,16 +4749,35 @@ static void EngineThread(HWND hWnd) {
             }
         }
 
-        DWORD waitTime;
-        if (!g_LedsEnabled) waitTime = (DWORD)MAIN_LOOP_OFF_DELAY_MS;
-        else if (g_activeSource == DataSource::Searching) waitTime = 100;
-        else {
-            ULONGLONG now = GetTickCount64();
-            waitTime = nextFrameTime > now
-                ? (DWORD)min((ULONGLONG)(1000 / ledRefreshFPS), nextFrameTime - now)
-                : 0;
+        if (g_Resetting_sdk) {
+            EngineWait(1);
+            continue;
         }
-        EngineWait(waitTime);
+
+        currentTime = GetTickCount64();
+        ULONGLONG nextWake = g_lastSdkProgress + heartbeatInterval;
+        const bool lightsEnabled = g_LedsEnabled.load();
+        const DataSource activeSource = g_activeSource.load();
+        const float latestTemperature = g_asyncTemp.load();
+        if (lightsEnabled && activeSource != DataSource::Searching &&
+            latestTemperature >= 0.0f) {
+            const DWORD desiredR = static_cast<DWORD>(roundf(currR.load()));
+            const DWORD desiredG = static_cast<DWORD>(roundf(currG.load()));
+            const DWORD desiredB = static_cast<DWORD>(roundf(currB.load()));
+            const bool outputPending = desiredR != lastR || desiredG != lastG ||
+                desiredB != lastB;
+            if (colorTransitionActive || outputPending) {
+                if (nextFrameTime == 0) nextFrameTime = currentTime;
+                nextWake = (std::min)(nextWake, nextFrameTime);
+            }
+        }
+        if (g_pendingStyleChange.load()) {
+            ULONGLONG retryDelay = 1000 / ledRefreshFPS;
+            if (!lightsEnabled) retryDelay = MAIN_LOOP_OFF_DELAY_MS;
+            else if (activeSource == DataSource::Searching) retryDelay = 100;
+            nextWake = (std::min)(nextWake, currentTime + retryDelay);
+        }
+        EngineWaitUntil(nextWake);
     }
 
     if (sdkReady && g_hSdkHostProcess && msiControlledSinceRelease) {
