@@ -213,7 +213,7 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Data Source",
         L"Temperature Thresholds and Colors", L"LOW:", L"MEDIUM:", L"HIGH:", L"Color (hex):",
         L"Reset Defaults",
-        L"Shared Thermal Engine", L"Controllers", L"Sensor Update:", L"MSI motherboard:", L"Razer devices:", L"Smoothing:",
+        L"Shared Thermal Engine", L"Controllers", L"Sensor Update:", L"MSI device", L"FPS:", L"Smoothing:",
         L"On release:", L"Lights off", L"Spectrum Cycling",
         L"Data Sources", L"LibreHardwareMonitor",
         L"Language", L"Language:",
@@ -238,7 +238,7 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Origen de datos",
         L"Umbrales de temperatura y colores", L"BAJA:", L"MEDIA:", L"ALTA:", L"Color (hex):",
         L"Restaurar valores",
-        L"Motor térmico compartido", L"Controladoras", L"Actualización sensor:", L"Placa base MSI:", L"Dispositivos Razer:", L"Suavizado:",
+        L"Motor térmico compartido", L"Controladoras", L"Actualización sensor:", L"Dispositivo MSI", L"FPS:", L"Suavizado:",
         L"Al liberar:", L"Apagar luces", L"Spectrum Cycling",
         L"Orígenes de datos", L"LibreHardwareMonitor",
         L"Idioma", L"Idioma:",
@@ -326,6 +326,11 @@ struct AppHotkeys {
     WORD profile5 = 0;
 };
 
+struct RazerDeviceSettings {
+    int refreshFPS = DEF_RAZER_REFRESH_FPS;
+    ReleaseEffect releaseEffect = DEF_RAZER_RELEASE_EFFECT;
+};
+
 struct GlobalConfig {
     Config profiles[5] = {};
     int activeProfileIndex = 0;
@@ -334,13 +339,14 @@ struct GlobalConfig {
     // Global performance/advanced settings (shared by all profiles)
     int sensorUpdateMS = 0;
     int ledRefreshFPS = 0;
-    int razerRefreshFPS = 0;
     float smoothingFactor = 0.0f;
     ReleaseEffect msiReleaseEffect = DEF_MSI_RELEASE_EFFECT;
     // Exact style name advertised by MLAPI_GetLedInfo. Empty preserves the
     // legacy automatic choice for configurations created before this setting.
     std::wstring msiReleaseStyle;
-    ReleaseEffect razerReleaseEffect = DEF_RAZER_RELEASE_EFFECT;
+    // Razer timing and release behavior are independent for every physical
+    // device. Unknown/new devices always start at 25 FPS with lights off.
+    std::map<std::wstring, RazerDeviceSettings> razerDeviceSettings;
 };
 
 
@@ -1022,6 +1028,54 @@ static std::wstring ReadIniString(const wchar_t* section, const wchar_t* key) {
     }
 }
 
+static std::wstring RazerDeviceSettingsSection(const std::wstring& deviceKey) {
+    // Stable FNV-1a over UTF-16 code units keeps arbitrary container IDs out of
+    // INI section names. DeviceKey is also stored and verified against a hash
+    // collision before any values are accepted.
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (const wchar_t value : deviceKey) {
+        hash ^= static_cast<std::uint16_t>(value);
+        hash *= 1099511628211ULL;
+    }
+    wchar_t section[40] = {};
+    swprintf_s(section, L"RazerDevice_%016llX",
+        static_cast<unsigned long long>(hash));
+    return section;
+}
+
+static RazerDeviceSettings ReadRazerDeviceSettings(const std::wstring& deviceKey) {
+    RazerDeviceSettings settings;
+    const std::wstring section = RazerDeviceSettingsSection(deviceKey);
+    if (ReadIniString(section.c_str(), L"DeviceKey") != deviceKey) return settings;
+
+    const int refreshFPS = GetPrivateProfileIntW(section.c_str(), L"RefreshFPS",
+        DEF_RAZER_REFRESH_FPS, INI_FILE);
+    if (refreshFPS == 15 || refreshFPS == 20 || refreshFPS == 25) {
+        settings.refreshFPS = refreshFPS;
+    }
+    const int releaseEffect = GetPrivateProfileIntW(section.c_str(), L"ReleaseEffect",
+        static_cast<int>(DEF_RAZER_RELEASE_EFFECT), INI_FILE);
+    settings.releaseEffect = releaseEffect == static_cast<int>(ReleaseEffect::Animated)
+        ? ReleaseEffect::Animated : ReleaseEffect::Off;
+    return settings;
+}
+
+static bool EnsureRazerDeviceSettings(
+    const std::vector<RazerOrnataController::DetectedDevice>& devices) {
+    bool added = false;
+    std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+    for (const auto& device : devices) {
+        if (!device.controllable || device.deviceKey.empty() ||
+            g_Global.razerDeviceSettings.contains(device.deviceKey)) {
+            continue;
+        }
+        g_Global.razerDeviceSettings.emplace(device.deviceKey,
+            ReadRazerDeviceSettings(device.deviceKey));
+        added = true;
+    }
+    return added;
+}
+
 static void SaveSettings() {
     std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
 
@@ -1033,20 +1087,28 @@ static void SaveSettings() {
     // Advanced settings are now global (shared by all profiles)
     WritePrivateProfileStringW(L"Global", L"SensorUpdateMS", std::to_wstring(g_Global.sensorUpdateMS).c_str(), INI_FILE);
     WritePrivateProfileStringW(L"Global", L"LedRefreshFPS", std::to_wstring(g_Global.ledRefreshFPS).c_str(), INI_FILE);
-    WritePrivateProfileStringW(L"Global", L"RazerRefreshFPS", std::to_wstring(g_Global.razerRefreshFPS).c_str(), INI_FILE);
     WritePrivateProfileStringW(L"Global", L"MsiReleaseEffect",
         std::to_wstring(static_cast<int>(g_Global.msiReleaseEffect)).c_str(), INI_FILE);
     WritePrivateProfileStringW(L"Global", L"MsiReleaseStyle",
         g_Global.msiReleaseStyle.c_str(), INI_FILE);
-    WritePrivateProfileStringW(L"Global", L"RazerReleaseEffect",
-        std::to_wstring(static_cast<int>(g_Global.razerReleaseEffect)).c_str(), INI_FILE);
-    WritePrivateProfileStringW(L"Global", L"RazerSettingsVersion", L"1", INI_FILE);
+    WritePrivateProfileStringW(L"Global", L"RazerSettingsVersion", L"2", INI_FILE);
+    WritePrivateProfileStringW(L"Global", L"RazerRefreshFPS", nullptr, INI_FILE);
+    WritePrivateProfileStringW(L"Global", L"RazerReleaseEffect", nullptr, INI_FILE);
     // Remove obsolete safety-gate state left by pre-inventory builds.
     WritePrivateProfileStringW(L"Global", L"RazerStaticTestPassed", nullptr, INI_FILE);
     WritePrivateProfileStringW(L"Global", L"RazerWriteConsent", nullptr, INI_FILE);
     {
         wchar_t sfBuf[32]; swprintf_s(sfBuf, L"%.3f", g_Global.smoothingFactor);
         WritePrivateProfileStringW(L"Global", L"SmoothingFactor", sfBuf, INI_FILE);
+    }
+
+    for (const auto& [deviceKey, settings] : g_Global.razerDeviceSettings) {
+        const std::wstring section = RazerDeviceSettingsSection(deviceKey);
+        WritePrivateProfileStringW(section.c_str(), L"DeviceKey", deviceKey.c_str(), INI_FILE);
+        WritePrivateProfileStringW(section.c_str(), L"RefreshFPS",
+            std::to_wstring(settings.refreshFPS).c_str(), INI_FILE);
+        WritePrivateProfileStringW(section.c_str(), L"ReleaseEffect",
+            std::to_wstring(static_cast<int>(settings.releaseEffect)).c_str(), INI_FILE);
     }
 
     for (int i = 0; i < 5; i++) {
@@ -1206,15 +1268,8 @@ static void LoadSettings() {
         GetPrivateProfileIntW(L"Settings", L"SensorUpdateMS", DEF_SENSOR_UPDATE_MS, INI_FILE), INI_FILE);
     g_Global.ledRefreshFPS = GetPrivateProfileIntW(L"Global", L"LedRefreshFPS",
         GetPrivateProfileIntW(L"Settings", L"LedRefreshFPS", DEF_LED_REFRESH_FPS, INI_FILE), INI_FILE);
-    const int razerSettingsVersion = GetPrivateProfileIntW(
-        L"Global", L"RazerSettingsVersion", 0, INI_FILE);
-    g_Global.razerRefreshFPS = razerSettingsVersion < 1
-        ? DEF_RAZER_REFRESH_FPS
-        : GetPrivateProfileIntW(L"Global", L"RazerRefreshFPS", DEF_RAZER_REFRESH_FPS, INI_FILE);
     const int msiReleaseEffect = GetPrivateProfileIntW(L"Global", L"MsiReleaseEffect",
         static_cast<int>(DEF_MSI_RELEASE_EFFECT), INI_FILE);
-    const int razerReleaseEffect = GetPrivateProfileIntW(L"Global", L"RazerReleaseEffect",
-        static_cast<int>(DEF_RAZER_RELEASE_EFFECT), INI_FILE);
     g_Global.msiReleaseEffect = msiReleaseEffect == static_cast<int>(ReleaseEffect::Animated)
         ? ReleaseEffect::Animated : ReleaseEffect::Off;
     g_Global.msiReleaseStyle = ReadIniString(L"Global", L"MsiReleaseStyle");
@@ -1222,8 +1277,6 @@ static void LoadSettings() {
         Log("[Config] Invalid MsiReleaseStyle; using automatic selection.");
         g_Global.msiReleaseStyle.clear();
     }
-    g_Global.razerReleaseEffect = razerReleaseEffect == static_cast<int>(ReleaseEffect::Animated)
-        ? ReleaseEffect::Animated : ReleaseEffect::Off;
     {
         wchar_t sfOld[32]; GetPrivateProfileStringW(L"Settings", L"SmoothingFactor", L"", sfOld, 32, INI_FILE);
         float defSmooth = (wcslen(sfOld) > 0) ? (float)_wtof(sfOld) : DEF_SMOOTHING_FACTOR;
@@ -1244,11 +1297,6 @@ static void LoadSettings() {
         g_Global.ledRefreshFPS != 25) {
         Log("[Config] Invalid LedRefreshFPS; using factory default.");
         g_Global.ledRefreshFPS = DEF_LED_REFRESH_FPS;
-    }
-    if (g_Global.razerRefreshFPS != 15 && g_Global.razerRefreshFPS != 20 &&
-        g_Global.razerRefreshFPS != 25) {
-        Log("[Config] Invalid RazerRefreshFPS; using factory default.");
-        g_Global.razerRefreshFPS = DEF_RAZER_REFRESH_FPS;
     }
     if (!(g_Global.smoothingFactor > 0.0f && g_Global.smoothingFactor <= 1.0f)) {
         Log("[Config] Invalid SmoothingFactor; using factory default.");
@@ -1574,6 +1622,7 @@ struct RazerUiDevice {
 };
 std::vector<RazerUiDevice> g_razerUiDevices;
 bool g_razerListUpdating = false;
+std::wstring g_advancedRazerDeviceKey;
 
 static std::set<std::wstring> ParseRazerDeviceIds(const wchar_t* value) {
     std::set<std::wstring> result;
@@ -1634,6 +1683,132 @@ static void SaveRazerSelectionsFromUI(HWND hDlg, Config& profile) {
     profile.razerDeviceIds = std::move(serialized);
 }
 
+static void SaveAdvancedRazerDeviceSettings(HWND hDlg) {
+    if (g_advancedRazerDeviceKey.empty()) return;
+
+    const int fpsSelection = static_cast<int>(SendMessage(
+        GetDlgItem(hDlg, IDC_COMBO_RAZER_FPS), CB_GETCURSEL, 0, 0));
+    const int releaseSelection = static_cast<int>(SendMessage(
+        GetDlgItem(hDlg, IDC_COMBO_RAZER_RELEASE), CB_GETCURSEL, 0, 0));
+    if (fpsSelection == CB_ERR || releaseSelection == CB_ERR) return;
+
+    RazerDeviceSettings settings;
+    if (fpsSelection == 1) settings.refreshFPS = 20;
+    else if (fpsSelection == 2) settings.refreshFPS = 15;
+    else settings.refreshFPS = 25;
+    settings.releaseEffect = releaseSelection == 1
+        ? ReleaseEffect::Animated : ReleaseEffect::Off;
+
+    std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+    g_Global.razerDeviceSettings[g_advancedRazerDeviceKey] = settings;
+}
+
+static void LoadAdvancedRazerDeviceSettings(HWND hDlg, const std::wstring& deviceKey) {
+    RazerDeviceSettings settings;
+    const bool available = !deviceKey.empty();
+    if (available) {
+        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+        const auto [it, inserted] = g_Global.razerDeviceSettings.try_emplace(deviceKey);
+        settings = it->second;
+    }
+
+    int fpsSelection = 0;
+    if (settings.refreshFPS == 20) fpsSelection = 1;
+    else if (settings.refreshFPS == 15) fpsSelection = 2;
+    SendMessage(GetDlgItem(hDlg, IDC_COMBO_RAZER_FPS), CB_SETCURSEL,
+        available ? fpsSelection : static_cast<WPARAM>(-1), 0);
+    SendMessage(GetDlgItem(hDlg, IDC_COMBO_RAZER_RELEASE), CB_SETCURSEL,
+        available && settings.releaseEffect == ReleaseEffect::Animated ? 1 :
+        available ? 0 : static_cast<WPARAM>(-1), 0);
+
+    EnableWindow(GetDlgItem(hDlg, IDC_COMBO_RAZER_FPS), available);
+    EnableWindow(GetDlgItem(hDlg, IDC_COMBO_RAZER_RELEASE), available);
+    EnableWindow(GetDlgItem(hDlg, IDC_LBL_ADV_RAZER), available);
+    EnableWindow(GetDlgItem(hDlg, IDC_LBL_ADV_RAZER_RELEASE), available);
+}
+
+static void PopulateAdvancedRazerDevices(HWND hDlg) {
+    SaveAdvancedRazerDeviceSettings(hDlg);
+
+    std::vector<RazerOrnataController::DetectedDevice> devices;
+    {
+        std::lock_guard<std::mutex> lock(g_razerDetectionMutex);
+        devices = g_razerDetection.devices;
+    }
+    EnsureRazerDeviceSettings(devices);
+
+    HWND combo = GetDlgItem(hDlg, IDC_COMBO_RAZER_DEVICE);
+    if (!combo) return;
+    const std::wstring previousKey = g_advancedRazerDeviceKey;
+    ClearComboHeapData(combo);
+    g_advancedRazerDeviceKey.clear();
+
+    int selectedIndex = CB_ERR;
+    for (const auto& device : devices) {
+        if (!device.controllable || device.deviceKey.empty()) continue;
+
+        wchar_t pid[32] = {};
+        swprintf_s(pid, L" [PID 0x%04X] · ", device.productId);
+        std::wstring label = device.productName;
+        label += pid;
+        label += device.deviceKey;
+
+        wchar_t* storedKey = HeapDupString(device.deviceKey.c_str());
+        if (!storedKey) continue;
+        const int index = static_cast<int>(SendMessageW(combo, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(label.c_str())));
+        if (index == CB_ERR || index == CB_ERRSPACE) {
+            HeapFree(GetProcessHeap(), 0, storedKey);
+            continue;
+        }
+        if (SendMessage(combo, CB_SETITEMDATA, index,
+            reinterpret_cast<LPARAM>(storedKey)) == CB_ERR) {
+            HeapFree(GetProcessHeap(), 0, storedKey);
+            SendMessage(combo, CB_DELETESTRING, index, 0);
+            continue;
+        }
+        if (device.deviceKey == previousKey) selectedIndex = index;
+    }
+
+    const int count = static_cast<int>(SendMessage(combo, CB_GETCOUNT, 0, 0));
+    if (selectedIndex == CB_ERR && count > 0) selectedIndex = 0;
+    if (selectedIndex != CB_ERR) {
+        SendMessage(combo, CB_SETCURSEL, selectedIndex, 0);
+        const auto selectedKey = reinterpret_cast<const wchar_t*>(SendMessage(
+            combo, CB_GETITEMDATA, selectedIndex, 0));
+        if (selectedKey && selectedKey != reinterpret_cast<const wchar_t*>(CB_ERR)) {
+            g_advancedRazerDeviceKey = selectedKey;
+        }
+    }
+
+    EnableWindow(combo, count > 0);
+    LoadAdvancedRazerDeviceSettings(hDlg, g_advancedRazerDeviceKey);
+}
+
+static void UpdateAdvancedMsiDeviceLabel(HWND hDlg) {
+    std::wstring targetDevice;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+        targetDevice = g_cfg.targetDevice;
+    }
+
+    std::wstring label = T(STR_LBL_ADV_LED);
+    {
+        std::lock_guard<std::mutex> lock(g_hwMutex);
+        const auto device = std::find_if(g_hwSnapshot.begin(), g_hwSnapshot.end(),
+            [&](const HwDevice& candidate) { return candidate.type == targetDevice; });
+        if (device != g_hwSnapshot.end()) {
+            label = device->friendly.empty() ? device->type : device->friendly;
+            if (!device->type.empty() && label != device->type) {
+                label += L" [";
+                label += device->type;
+                label += L"]";
+            }
+        }
+    }
+    SetDlgItemTextW(hDlg, IDC_LBL_ADV_LED, label.c_str());
+}
+
 /**
  * Transfers Profile Data into the Settings Dialog controls
  */
@@ -1685,9 +1860,6 @@ static void LoadGlobalAdvancedToUI(HWND hDlg) {
 
     SetComboByVal(IDC_COMBO_SENSOR_UPDATE, g_Global.sensorUpdateMS, { 250, 500, 1000 });
     SetComboByVal(IDC_COMBO_LED_FPS, g_Global.ledRefreshFPS, { 25, 20, 15 });
-    SetComboByVal(IDC_COMBO_RAZER_FPS, g_Global.razerRefreshFPS, { 25, 20, 15 });
-    SendMessage(GetDlgItem(hDlg, IDC_COMBO_RAZER_RELEASE), CB_SETCURSEL,
-        static_cast<WPARAM>(g_Global.razerReleaseEffect), 0);
 
     HWND hSmooth = GetDlgItem(hDlg, IDC_COMBO_SMOOTHING);
     if (g_Global.smoothingFactor > 0.9f) SendMessage(hSmooth, CB_SETCURSEL, 0, 0);
@@ -1697,6 +1869,8 @@ static void LoadGlobalAdvancedToUI(HWND hDlg) {
 
     SetDlgItemTextW(hDlg, IDC_EDIT_LHM_SERVER, g_Global.lhmServerUrl);
     SendMessage(GetDlgItem(hDlg, IDC_COMBO_LANGUAGE), CB_SETCURSEL, g_Language.load(), 0);
+    PopulateAdvancedRazerDevices(hDlg);
+    UpdateAdvancedMsiDeviceLabel(hDlg);
 }
 
 /**
@@ -1705,6 +1879,8 @@ static void LoadGlobalAdvancedToUI(HWND hDlg) {
  */
 static void SaveGlobalAdvancedFromUI(HWND hDlg) {
     std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+
+    SaveAdvancedRazerDeviceSettings(hDlg);
 
     int idxSensor = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE), CB_GETCURSEL, 0, 0);
     if (idxSensor == 0) g_Global.sensorUpdateMS = 250;
@@ -1715,11 +1891,6 @@ static void SaveGlobalAdvancedFromUI(HWND hDlg) {
     if (idxFPS == 1) g_Global.ledRefreshFPS = 20;
     else if (idxFPS == 2) g_Global.ledRefreshFPS = 15;
     else g_Global.ledRefreshFPS = 25;
-
-    int idxRazerFPS = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_RAZER_FPS), CB_GETCURSEL, 0, 0);
-    if (idxRazerFPS == 0) g_Global.razerRefreshFPS = 25;
-    else if (idxRazerFPS == 1) g_Global.razerRefreshFPS = 20;
-    else g_Global.razerRefreshFPS = 15;
 
     HWND msiReleaseCombo = GetDlgItem(hDlg, IDC_COMBO_MSI_RELEASE);
     const int msiReleaseSelection = static_cast<int>(SendMessage(
@@ -1736,10 +1907,6 @@ static void SaveGlobalAdvancedFromUI(HWND hDlg) {
             g_Global.msiReleaseStyle.clear();
         }
     }
-    g_Global.razerReleaseEffect = SendMessage(
-        GetDlgItem(hDlg, IDC_COMBO_RAZER_RELEASE), CB_GETCURSEL, 0, 0) == 1
-        ? ReleaseEffect::Animated : ReleaseEffect::Off;
-
     int idxSmooth = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_GETCURSEL, 0, 0);
     if (idxSmooth == 0) g_Global.smoothingFactor = 1.0f;
     else if (idxSmooth == 1) g_Global.smoothingFactor = 0.05f;
@@ -2601,10 +2768,13 @@ static void UpdateRazerPanelLayout(HWND hDlg) {
         HWND control = GetDlgItem(hDlg, id);
         if (control) ShowWindow(control, anyDetected && profileLayer ? SW_SHOW : SW_HIDE);
     }
+    const bool advancedRazerAvailable = !g_advancedRazerDeviceKey.empty();
+    EnableWindow(GetDlgItem(hDlg, IDC_COMBO_RAZER_DEVICE),
+        SendDlgItemMessage(hDlg, IDC_COMBO_RAZER_DEVICE, CB_GETCOUNT, 0, 0) > 0);
     for (int id : { IDC_LBL_ADV_RAZER, IDC_COMBO_RAZER_FPS,
         IDC_LBL_ADV_RAZER_RELEASE, IDC_COMBO_RAZER_RELEASE }) {
         HWND control = GetDlgItem(hDlg, id);
-        if (control) EnableWindow(control, g_razerDetected.load());
+        if (control) EnableWindow(control, advancedRazerAvailable);
     }
 }
 
@@ -2630,8 +2800,9 @@ static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
 
     const int advancedCtrls[] = {
         IDC_GRP_ADVANCED, IDC_GRP_LIGHTING_CONTROLLERS, IDC_LBL_ADV_SENSOR, IDC_COMBO_SENSOR_UPDATE,
-        IDC_LBL_ADV_LED, IDC_COMBO_LED_FPS, IDC_LBL_ADV_SMOOTH, IDC_COMBO_SMOOTHING,
-        IDC_LBL_ADV_RAZER, IDC_COMBO_RAZER_FPS,
+        IDC_LBL_ADV_LED, IDC_LBL_ADV_MSI_FPS, IDC_COMBO_LED_FPS,
+        IDC_LBL_ADV_SMOOTH, IDC_COMBO_SMOOTHING,
+        IDC_COMBO_RAZER_DEVICE, IDC_LBL_ADV_RAZER, IDC_COMBO_RAZER_FPS,
         IDC_LBL_ADV_MSI_RELEASE, IDC_COMBO_MSI_RELEASE,
         IDC_LBL_ADV_RAZER_RELEASE, IDC_COMBO_RAZER_RELEASE,
         IDC_BTN_RESET_ADVANCED, IDC_GRP_DATA_SOURCES, IDC_LBL_LHM_SERVER, IDC_EDIT_LHM_SERVER,
@@ -2675,7 +2846,8 @@ static void ApplyDialogTranslations(HWND hDlg) {
     SetDlgItemTextW(hDlg, IDC_GRP_ADVANCED, T(STR_GRP_ADVANCED));
     SetDlgItemTextW(hDlg, IDC_GRP_LIGHTING_CONTROLLERS, T(STR_GRP_LIGHTING_CONTROLLERS));
     SetDlgItemTextW(hDlg, IDC_LBL_ADV_SENSOR, T(STR_LBL_ADV_SENSOR));
-    SetDlgItemTextW(hDlg, IDC_LBL_ADV_LED, T(STR_LBL_ADV_LED));
+    UpdateAdvancedMsiDeviceLabel(hDlg);
+    SetDlgItemTextW(hDlg, IDC_LBL_ADV_MSI_FPS, T(STR_LBL_ADV_RAZER));
     SetDlgItemTextW(hDlg, IDC_LBL_ADV_RAZER, T(STR_LBL_ADV_RAZER));
     SetDlgItemTextW(hDlg, IDC_LBL_ADV_SMOOTH, T(STR_LBL_ADV_SMOOTH));
     SetDlgItemTextW(hDlg, IDC_LBL_ADV_MSI_RELEASE, T(STR_LBL_ADV_RELEASE));
@@ -2969,6 +3141,8 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             }
             else if (LayerForTab(s_currentTab) == LAYER_ADVANCED) {
                 PopulateMsiReleaseCombo(hDlg);
+                PopulateAdvancedRazerDevices(hDlg);
+                UpdateAdvancedMsiDeviceLabel(hDlg);
             }
         }
         break;
@@ -2998,6 +3172,18 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             int idx = (int)SendMessage((HWND)lParam, CB_GETCURSEL, 0, 0);
             wchar_t* devType = (wchar_t*)SendMessage((HWND)lParam, CB_GETITEMDATA, idx, 0);
             if (devType) PopulateAreaList(hDlg, devType, 0);
+            return TRUE;
+        }
+
+        if (id == IDC_COMBO_RAZER_DEVICE && code == CBN_SELCHANGE) {
+            SaveAdvancedRazerDeviceSettings(hDlg);
+            const int selection = static_cast<int>(SendMessage(
+                GetDlgItem(hDlg, IDC_COMBO_RAZER_DEVICE), CB_GETCURSEL, 0, 0));
+            const auto deviceKey = reinterpret_cast<const wchar_t*>(SendMessage(
+                GetDlgItem(hDlg, IDC_COMBO_RAZER_DEVICE), CB_GETITEMDATA, selection, 0));
+            g_advancedRazerDeviceKey = deviceKey &&
+                deviceKey != reinterpret_cast<const wchar_t*>(CB_ERR) ? deviceKey : L"";
+            LoadAdvancedRazerDeviceSettings(hDlg, g_advancedRazerDeviceKey);
             return TRUE;
         }
 
@@ -3105,6 +3291,12 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             SendMessage(GetDlgItem(hDlg, IDC_COMBO_RAZER_RELEASE), CB_SETCURSEL, 0, 0);
             SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_SETCURSEL, 2, 0);
             SetDlgItemTextW(hDlg, IDC_EDIT_LHM_SERVER, DEF_SERVER_URL);
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+                for (auto& [deviceKey, settings] : g_Global.razerDeviceSettings) {
+                    settings = RazerDeviceSettings{};
+                }
+            }
             return TRUE;
         }
     } break;
@@ -3136,12 +3328,14 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         }
         else if (s_currentTab == 6) {
             PopulateMsiReleaseCombo(hDlg);
+            UpdateAdvancedMsiDeviceLabel(hDlg);
         }
         return (INT_PTR)TRUE;
     }
 
     case WM_APP_RAZERREADY:
         UpdateRazerPanelLayout(hDlg);
+        if (s_currentTab == 6) PopulateAdvancedRazerDevices(hDlg);
         ShowSettingsLayer(hDlg, LayerForTab(s_currentTab));
         return (INT_PTR)TRUE;
 
@@ -3160,6 +3354,8 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         ClearComboHeapData(GetDlgItem(hDlg, IDC_SENSOR_ID));
         ClearComboHeapData(GetDlgItem(hDlg, IDC_COMBO_DEVICE));
         ClearComboHeapData(GetDlgItem(hDlg, IDC_COMBO_MSI_RELEASE));
+        ClearComboHeapData(GetDlgItem(hDlg, IDC_COMBO_RAZER_DEVICE));
+        g_advancedRazerDeviceKey.clear();
         g_razerUiDevices.clear();
         RemovePropW(hDlg, L"MysticFight.RazerExpanded");
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_LOW), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
@@ -4638,6 +4834,7 @@ static bool SameRazerDetection(const RazerOrnataController::DetectionResult& lef
 
 static void PublishRazerDetection(HWND hWnd,
     const RazerOrnataController::DetectionResult& detection, const bool forcePublish = false) {
+    EnsureRazerDeviceSettings(detection.devices);
     bool changed = false;
     {
         std::lock_guard<std::mutex> lock(g_razerDetectionMutex);
@@ -4684,6 +4881,10 @@ struct RazerDeviceRuntime {
     RazerOrnataController controller;
     bool present = false;
     bool controlledSinceRelease = false;
+    bool hasAppliedFrame = false;
+    bool lastAppliedEnabled = false;
+    ULONGLONG lastAppliedGeneration = 0;
+    ULONGLONG nextFrame = 0;
     ULONGLONG nextReleaseAttempt = 0;
     ULONGLONG nextOpenAttempt = 0;
 };
@@ -4747,6 +4948,9 @@ static bool ApplyRazerReleaseEffect(RazerDeviceRuntime& runtime,
     }
 
     runtime.controlledSinceRelease = false;
+    runtime.hasAppliedFrame = false;
+    runtime.lastAppliedGeneration = 0;
+    runtime.nextFrame = 0;
     runtime.nextReleaseAttempt = 0;
     char message[256] = {};
     snprintf(message, sizeof(message), "[Razer HID] Released %ls with %s",
@@ -4774,37 +4978,63 @@ static bool EnsureRazerOpen(RazerDeviceRuntime& runtime, const ULONGLONG now,
     return false;
 }
 
+static RazerDeviceSettings SettingsForRazerDevice(
+    const std::map<std::wstring, RazerDeviceSettings>& settingsByDevice,
+    const std::wstring& deviceKey) {
+    const auto settings = settingsByDevice.find(deviceKey);
+    return settings != settingsByDevice.end() ? settings->second : RazerDeviceSettings{};
+}
+
+static void LogRazerDeviceSchedule(const RazerDeviceRuntime& runtime,
+    const RazerDeviceSettings& settings) {
+    char message[768] = {};
+    snprintf(message, sizeof(message),
+        "[Razer HID] Schedule %ls [PID 0x%04X; %ls]: %d FPS, release=%s",
+        runtime.device.productName.c_str(), runtime.device.productId,
+        runtime.device.deviceKey.c_str(), settings.refreshFPS,
+        settings.releaseEffect == ReleaseEffect::Animated
+        ? "Spectrum Cycling" : "lights off");
+    Log(message);
+}
+
 static void RazerThread(HWND hWnd) {
     constexpr ULONGLONG detectionIntervalMs = 5000;
     std::map<std::wstring, std::unique_ptr<RazerDeviceRuntime>> runtimes;
+    std::map<std::wstring, RazerDeviceSettings> deviceSettings;
     RazerOrnataController::DetectionResult detection;
     Config config = {};
     int lastConfigVersion = -1;
-    int refreshFPS = DEF_RAZER_REFRESH_FPS;
     float smoothingFactor = DEF_SMOOTHING_FACTOR;
-    ReleaseEffect releaseEffect = DEF_RAZER_RELEASE_EFFECT;
     bool previousLightsEnabled = g_LedsEnabled.load();
     bool firstFrame = true;
     float currentRed = 0.0f, currentGreen = 0.0f, currentBlue = 0.0f;
     DWORD targetRed = 0, targetGreen = 0, targetBlue = 0;
     float lastTemperature = -1.0f;
     ULONGLONG nextDetection = 0;
-    ULONGLONG nextFrame = 0;
+    ULONGLONG nextColorFrame = 0;
     ULONGLONG lastAcknowledgedLedGeneration = 0;
     bool detectionPublished = false;
 
     while (g_Running) {
         const int configVersion = g_ConfigVersion.load();
         if (configVersion != lastConfigVersion) {
-            std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-            config = g_cfg;
-            refreshFPS = g_Global.razerRefreshFPS;
-            smoothingFactor = g_Global.smoothingFactor;
-            releaseEffect = g_Global.razerReleaseEffect;
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+                config = g_cfg;
+                smoothingFactor = g_Global.smoothingFactor;
+                deviceSettings = g_Global.razerDeviceSettings;
+            }
             lastConfigVersion = configVersion;
             lastTemperature = -1.0f;
             firstFrame = true;
-            nextFrame = 0;
+            nextColorFrame = 0;
+            for (auto& [key, runtime] : runtimes) {
+                runtime->nextFrame = 0;
+                if (runtime->present) {
+                    LogRazerDeviceSchedule(*runtime,
+                        SettingsForRazerDevice(deviceSettings, key));
+                }
+            }
         }
 
         ULONGLONG now = GetTickCount64();
@@ -4813,7 +5043,12 @@ static void RazerThread(HWND hWnd) {
             PublishRazerDetection(hWnd, currentDetection, !detectionPublished);
             detectionPublished = true;
 
-            for (auto& [key, runtime] : runtimes) runtime->present = false;
+            std::set<std::wstring> previouslyPresent;
+            for (auto& [key, runtime] : runtimes) {
+                if (runtime->present) previouslyPresent.insert(key);
+                runtime->present = false;
+            }
+            std::set<std::wstring> schedulesToLog;
             for (const auto& device : currentDetection.devices) {
                 if (!device.controllable) continue;
                 auto [it, inserted] = runtimes.try_emplace(device.deviceKey,
@@ -4823,18 +5058,43 @@ static void RazerThread(HWND hWnd) {
                     runtime.device.productId != device.productId)) {
                     runtime.controller.Close();
                     runtime.nextOpenAttempt = now;
+                    runtime.hasAppliedFrame = false;
+                    runtime.nextFrame = 0;
+                    schedulesToLog.insert(device.deviceKey);
                 }
                 runtime.device = device;
                 runtime.present = true;
+                if (inserted || !previouslyPresent.contains(device.deviceKey)) {
+                    runtime.nextFrame = 0;
+                    runtime.hasAppliedFrame = false;
+                    schedulesToLog.insert(device.deviceKey);
+                }
             }
             for (auto& [key, runtime] : runtimes) {
-                if (!runtime->present) runtime->controller.Close();
+                if (!runtime->present) {
+                    runtime->controller.Close();
+                    runtime->hasAppliedFrame = false;
+                    runtime->nextFrame = 0;
+                }
             }
 
             detection = std::move(currentDetection);
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+                deviceSettings = g_Global.razerDeviceSettings;
+            }
+            for (const auto& [key, runtime] : runtimes) {
+                if (runtime->present && schedulesToLog.contains(key)) {
+                    LogRazerDeviceSchedule(*runtime,
+                        SettingsForRazerDevice(deviceSettings, key));
+                }
+            }
             nextDetection = now + detectionIntervalMs;
         }
 
+        const auto settingsForKey = [&](const std::wstring& key) {
+            return SettingsForRazerDevice(deviceSettings, key);
+        };
         const auto selectedKeys = SelectedRazerDeviceKeys(config, detection);
         for (auto& [key, runtime] : runtimes) {
             const bool selected = selectedKeys.contains(key);
@@ -4843,7 +5103,8 @@ static void RazerThread(HWND hWnd) {
             }
             else if (!selected) {
                 if (runtime->controlledSinceRelease) {
-                    ApplyRazerReleaseEffect(*runtime, releaseEffect, false);
+                    ApplyRazerReleaseEffect(*runtime,
+                        settingsForKey(key).releaseEffect, false);
                 }
                 else runtime->controller.Close();
             }
@@ -4874,25 +5135,33 @@ static void RazerThread(HWND hWnd) {
             if (lightsEnabled) {
                 firstFrame = true;
                 lastTemperature = -1.0f;
+                nextColorFrame = 0;
             }
         }
 
         auto sendToSelected = [&](const BYTE red, const BYTE green, const BYTE blue,
-            const char* operation) {
+            const char* operation, const LedRequestSnapshot& request,
+            const bool continuousFrames) {
             bool anyApplied = false;
-            bool allApplied = true;
             const ULONGLONG sendNow = GetTickCount64();
             for (const auto& key : selectedKeys) {
                 const auto it = runtimes.find(key);
-                if (it == runtimes.end() || !it->second->present ||
-                    !EnsureRazerOpen(*it->second, sendNow, detectionIntervalMs)) {
-                    allApplied = false;
-                    continue;
-                }
+                if (it == runtimes.end() || !it->second->present) continue;
 
                 RazerDeviceRuntime& runtime = *it->second;
+                const bool requestPending = !runtime.hasAppliedFrame ||
+                    runtime.lastAppliedGeneration < request.generation ||
+                    runtime.lastAppliedEnabled != request.enabled;
+                if (!requestPending && (!continuousFrames ||
+                    (runtime.nextFrame != 0 && sendNow < runtime.nextFrame))) {
+                    continue;
+                }
+                if (!EnsureRazerOpen(runtime, sendNow, detectionIntervalMs)) continue;
+
+                const RazerDeviceSettings settings = settingsForKey(key);
+                runtime.nextFrame = sendNow + (1000 / settings.refreshFPS);
                 if (!SendRazerUniformFrame(runtime.controller, red, green, blue,
-                    1000 / refreshFPS, operation)) {
+                    1000 / settings.refreshFPS, operation)) {
                     char message[512] = {};
                     snprintf(message, sizeof(message), "[Razer HID] %ls %s failed: %ls",
                         runtime.device.productName.c_str(), operation,
@@ -4900,20 +5169,35 @@ static void RazerThread(HWND hWnd) {
                     Log(message);
                     runtime.controller.Close();
                     runtime.nextOpenAttempt = GetTickCount64() + detectionIntervalMs;
-                    allApplied = false;
                     continue;
                 }
 
                 runtime.controlledSinceRelease = true;
                 runtime.nextReleaseAttempt = 0;
+                runtime.hasAppliedFrame = true;
+                runtime.lastAppliedEnabled = request.enabled;
+                runtime.lastAppliedGeneration = request.generation;
                 anyApplied = true;
+            }
+
+            bool allApplied = true;
+            for (const auto& key : selectedKeys) {
+                const auto it = runtimes.find(key);
+                if (it == runtimes.end() || !it->second->present ||
+                    !it->second->hasAppliedFrame ||
+                    it->second->lastAppliedGeneration < request.generation ||
+                    it->second->lastAppliedEnabled != request.enabled) {
+                    allApplied = false;
+                    break;
+                }
             }
             return std::make_pair(anyApplied, allApplied);
         };
 
         if (!lightsEnabled) {
             const LedRequestSnapshot request = CaptureLedRequest();
-            const auto [anyApplied, allApplied] = sendToSelected(0, 0, 0, "OFF frame");
+            const auto [anyApplied, allApplied] = sendToSelected(
+                0, 0, 0, "OFF frame", request, false);
             if (anyApplied && allApplied && IsLedRequestCurrent(request) &&
                 request.generation > lastAcknowledgedLedGeneration) {
                 lastAcknowledgedLedGeneration = request.generation;
@@ -4932,38 +5216,41 @@ static void RazerThread(HWND hWnd) {
             continue;
         }
 
+        int fastestRefreshFPS = 15;
+        for (const auto& key : selectedKeys) {
+            fastestRefreshFPS = (std::max)(fastestRefreshFPS,
+                settingsForKey(key).refreshFPS);
+        }
         now = GetTickCount64();
-        if (now < nextFrame) {
-            WaitForSingleObject(g_hRazerEvent,
-                static_cast<DWORD>(std::min<ULONGLONG>(1000 / refreshFPS, nextFrame - now)));
-            continue;
-        }
-        nextFrame = now + (1000 / refreshFPS);
+        if (nextColorFrame == 0 || now >= nextColorFrame) {
+            nextColorFrame = now + (1000 / fastestRefreshFPS);
+            const float temperature = floorf(rawTemperature * 2.0f + 0.5f) / 2.0f;
+            if (temperature != lastTemperature) {
+                lastTemperature = temperature;
+                CalculateThermalTargetColor(config, temperature,
+                    targetRed, targetGreen, targetBlue);
+            }
 
-        const float temperature = floorf(rawTemperature * 2.0f + 0.5f) / 2.0f;
-        if (temperature != lastTemperature) {
-            lastTemperature = temperature;
-            CalculateThermalTargetColor(config, temperature, targetRed, targetGreen, targetBlue);
-        }
-
-        if (firstFrame) {
-            currentRed = static_cast<float>(targetRed);
-            currentGreen = static_cast<float>(targetGreen);
-            currentBlue = static_cast<float>(targetBlue);
-            firstFrame = false;
-        }
-        else {
-            const float adjustedFactor = AdjustedSmoothingFactor(smoothingFactor, refreshFPS);
-            currentRed = SmoothColorChannel(currentRed, targetRed, adjustedFactor);
-            currentGreen = SmoothColorChannel(currentGreen, targetGreen, adjustedFactor);
-            currentBlue = SmoothColorChannel(currentBlue, targetBlue, adjustedFactor);
+            if (firstFrame) {
+                currentRed = static_cast<float>(targetRed);
+                currentGreen = static_cast<float>(targetGreen);
+                currentBlue = static_cast<float>(targetBlue);
+                firstFrame = false;
+            }
+            else {
+                const float adjustedFactor = AdjustedSmoothingFactor(
+                    smoothingFactor, fastestRefreshFPS);
+                currentRed = SmoothColorChannel(currentRed, targetRed, adjustedFactor);
+                currentGreen = SmoothColorChannel(currentGreen, targetGreen, adjustedFactor);
+                currentBlue = SmoothColorChannel(currentBlue, targetBlue, adjustedFactor);
+            }
         }
 
         const LedRequestSnapshot request = CaptureLedRequest();
         const auto [anyApplied, allApplied] = sendToSelected(
             static_cast<BYTE>(roundf(currentRed)),
             static_cast<BYTE>(roundf(currentGreen)),
-            static_cast<BYTE>(roundf(currentBlue)), "RGB frame");
+            static_cast<BYTE>(roundf(currentBlue)), "RGB frame", request, true);
         if (anyApplied && allApplied && IsLedRequestCurrent(request) &&
             request.generation > lastAcknowledgedLedGeneration) {
             lastAcknowledgedLedGeneration = request.generation;
@@ -4972,12 +5259,37 @@ static void RazerThread(HWND hWnd) {
                 "[Razer HID] APPLIED generation=%llu state=ON", request.generation);
             Log(message);
         }
+
+        // The worker wakes at the nearest physical-device deadline. Using only
+        // the fastest FPS as a global tick would quantize 15 FPS behind 25 FPS
+        // (roughly 12.5 writes/s); independent deadlines avoid that regression.
+        now = GetTickCount64();
+        ULONGLONG nextWake = nextColorFrame;
+        for (const auto& key : selectedKeys) {
+            const auto it = runtimes.find(key);
+            if (it == runtimes.end() || !it->second->present) continue;
+            const RazerDeviceRuntime& runtime = *it->second;
+            const bool requestPending = !runtime.hasAppliedFrame ||
+                runtime.lastAppliedGeneration < request.generation ||
+                runtime.lastAppliedEnabled != request.enabled;
+            ULONGLONG deviceWake = runtime.nextFrame;
+            if (requestPending) {
+                deviceWake = !runtime.controller.IsOpen() && runtime.nextOpenAttempt > now
+                    ? runtime.nextOpenAttempt : now;
+            }
+            if (deviceWake == 0) deviceWake = now;
+            nextWake = (std::min)(nextWake, deviceWake);
+        }
+        const DWORD waitMs = nextWake <= now ? 1 : static_cast<DWORD>(
+            (std::min<ULONGLONG>)(250, nextWake - now));
+        WaitForSingleObject(g_hRazerEvent, waitMs);
     }
 
     if (!g_windows_shutdown.load()) {
         for (auto& [key, runtime] : runtimes) {
             if (runtime->controlledSinceRelease) {
-                ApplyRazerReleaseEffect(*runtime, releaseEffect, true);
+                ApplyRazerReleaseEffect(*runtime,
+                    SettingsForRazerDevice(deviceSettings, key).releaseEffect, true);
             }
         }
     }

@@ -54,6 +54,7 @@
 #define IDC_COMBO_RAZER_FPS             2119
 #define IDC_COMBO_MSI_RELEASE           2120
 #define IDC_COMBO_RAZER_RELEASE         2121
+#define IDC_COMBO_RAZER_DEVICE          2122
 
 // Profile Groups (CRITICAL: Added IDC_GRP_THRESHOLDS)
 #define IDC_GRP_MSI                     2200
@@ -86,6 +87,7 @@
 #define IDC_LBL_ADV_RAZER               2320
 #define IDC_LBL_ADV_MSI_RELEASE         2321
 #define IDC_LBL_ADV_RAZER_RELEASE       2322
+#define IDC_LBL_ADV_MSI_FPS             2323
 
 // --- SHORTCUTS LAYER ---
 #define IDC_GRP_SHORTCUTS               3000
