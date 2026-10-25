@@ -2645,54 +2645,13 @@ static DlgLayer LayerForTab(int tab) {
     return LAYER_PROFILE;
 }
 
-static void MoveDialogControlY(HWND hDlg, int controlId, int deltaY) {
-    HWND control = GetDlgItem(hDlg, controlId);
-    if (!control) return;
-    RECT rect = {};
-    GetWindowRect(control, &rect);
-    MapWindowPoints(HWND_DESKTOP, hDlg, reinterpret_cast<POINT*>(&rect), 2);
-    SetWindowPos(control, nullptr, rect.left, rect.top + deltaY, 0, 0,
-        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-}
-
 // The dialog resource contains a fixed-height Razer subpanel. The ListView owns
-// its vertical scrollbar, so detecting many devices never grows Settings.
+// its vertical scrollbar, so detecting many devices never grows Settings. The
+// dialog itself also remains fixed-size while switching tabs or detection state.
 static void UpdateRazerPanelLayout(HWND hDlg) {
     const bool anyDetected = g_razerAnyDetected.load();
     HWND tab = GetDlgItem(hDlg, IDC_TAB_PROFILES);
     const bool profileLayer = !tab || LayerForTab(TabCtrl_GetCurSel(tab)) == LAYER_PROFILE;
-    const bool shouldExpand = anyDetected && profileLayer;
-    const bool expanded = GetPropW(hDlg, L"MysticFight.RazerExpanded") != nullptr;
-    if (shouldExpand != expanded) {
-        SendMessageW(hDlg, WM_SETREDRAW, FALSE, 0);
-        RECT dlu = { 0, 0, 0, 55 };
-        MapDialogRect(hDlg, &dlu);
-        const int delta = shouldExpand ? dlu.bottom : -dlu.bottom;
-
-        const int shiftedProfileControls[] = {
-            IDC_GRP_SOURCE, IDC_COMBO_DATA_SOURCE, IDC_SENSOR_ID,
-            IDC_GRP_THRESHOLDS, IDC_TEMP_LOW, IDC_TEMP_MED, IDC_TEMP_HIGH,
-            IDC_HEX_LOW, IDC_HEX_MED, IDC_HEX_HIGH, IDC_BTN_RESET,
-            IDC_LBL_LOW, IDC_LBL_MED, IDC_LBL_HIGH, IDC_LBL_C1, IDC_LBL_C2, IDC_LBL_C3,
-            IDC_LBL_HEX1, IDC_LBL_HEX2, IDC_LBL_HEX3
-        };
-        for (int id : shiftedProfileControls) MoveDialogControlY(hDlg, id, delta);
-
-        const int bottomControls[] = { IDC_CHK_STARTUP, IDC_CHK_NOTIFICATIONS, IDOK, IDCANCEL };
-        for (int id : bottomControls) MoveDialogControlY(hDlg, id, delta);
-
-        RECT windowRect = {};
-        GetWindowRect(hDlg, &windowRect);
-        SetWindowPos(hDlg, nullptr, 0, 0, windowRect.right - windowRect.left,
-            windowRect.bottom - windowRect.top + delta,
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-
-        if (shouldExpand) SetPropW(hDlg, L"MysticFight.RazerExpanded", reinterpret_cast<HANDLE>(1));
-        else RemovePropW(hDlg, L"MysticFight.RazerExpanded");
-        SendMessageW(hDlg, WM_SETREDRAW, TRUE, 0);
-        RedrawWindow(hDlg, nullptr, nullptr,
-            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
-    }
 
     const bool initializeSelectionsFromProfile = g_razerUiDevices.empty() &&
         profileLayer && tab && TabCtrl_GetCurSel(tab) >= 0 && TabCtrl_GetCurSel(tab) < 5;
@@ -2989,8 +2948,6 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
     case WM_INITDIALOG: {
         g_hSettingsDlg = hDlg; // let the engine notify us when hardware becomes ready
-        // The resource is authored in its expanded form; detection may collapse it.
-        SetPropW(hDlg, L"MysticFight.RazerExpanded", reinterpret_cast<HANDLE>(1));
 
         HWND hMainWnd = GetParent(hDlg);
         if (hMainWnd) {
@@ -3358,7 +3315,6 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         ClearComboHeapData(GetDlgItem(hDlg, IDC_COMBO_RAZER_DEVICE));
         g_advancedRazerDeviceKey.clear();
         g_razerUiDevices.clear();
-        RemovePropW(hDlg, L"MysticFight.RazerExpanded");
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_LOW), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_MED), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_HIGH), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
