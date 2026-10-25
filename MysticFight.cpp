@@ -2468,12 +2468,20 @@ static void SensorThread() {
     while (g_Running) {
         int sampledConfigVersion = -1;
         float sampledTemp = GetCPUTempFast(sampledConfigVersion);
+        bool temperatureChanged = false;
         {
             // Config writers use the same mutex while advancing the version.
             // An HTTP result from an older profile/config is therefore discarded.
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-            if (sampledConfigVersion == g_ConfigVersion.load()) g_asyncTemp = sampledTemp;
+            if (sampledConfigVersion == g_ConfigVersion.load()) {
+                const float previousTemp = g_asyncTemp.exchange(sampledTemp);
+                temperatureChanged = previousTemp != sampledTemp;
+            }
         }
+        // Razer rendering is event-driven while its output is stable. Wake it
+        // only when a fresh sample can change the target; auto-reset event
+        // coalescing is intentional because the worker consumes the latest value.
+        if (temperatureChanged && g_hRazerEvent) SetEvent(g_hRazerEvent);
 
         DWORD waitMs = (DWORD)SENSOR_LOOP_OFF_DELAY_MS;
 
@@ -4811,11 +4819,27 @@ struct RazerDeviceRuntime {
     bool controlledSinceRelease = false;
     bool hasAppliedFrame = false;
     bool lastAppliedEnabled = false;
+    BYTE lastAppliedRed = 0;
+    BYTE lastAppliedGreen = 0;
+    BYTE lastAppliedBlue = 0;
     ULONGLONG lastAppliedGeneration = 0;
     ULONGLONG nextFrame = 0;
     ULONGLONG nextReleaseAttempt = 0;
     ULONGLONG nextOpenAttempt = 0;
 };
+
+static bool IsRazerRequestPending(const RazerDeviceRuntime& runtime,
+    const LedRequestSnapshot& request) {
+    return !runtime.hasAppliedFrame ||
+        runtime.lastAppliedGeneration < request.generation ||
+        runtime.lastAppliedEnabled != request.enabled;
+}
+
+static bool IsRazerColorChanged(const RazerDeviceRuntime& runtime,
+    const BYTE red, const BYTE green, const BYTE blue) {
+    return !runtime.hasAppliedFrame || runtime.lastAppliedRed != red ||
+        runtime.lastAppliedGreen != green || runtime.lastAppliedBlue != blue;
+}
 
 static std::set<std::wstring> SelectedRazerDeviceKeys(const Config& config,
     const RazerOrnataController::DetectionResult& detection) {
@@ -4892,9 +4916,14 @@ static bool ApplyRazerReleaseEffect(RazerDeviceRuntime& runtime,
 static bool EnsureRazerOpen(RazerDeviceRuntime& runtime, const ULONGLONG now,
     const ULONGLONG retryDelayMs) {
     if (runtime.controller.IsOpen()) return true;
+    // Opening a new HID handle resets the controller-side frame cache. The
+    // worker must therefore reapply the desired frame even if its RGB is
+    // unchanged from the handle that disappeared.
+    runtime.hasAppliedFrame = false;
     if (now < runtime.nextOpenAttempt) return false;
     if (runtime.controller.Open(runtime.device)) {
         runtime.nextOpenAttempt = 0;
+        runtime.nextFrame = 0;
         return true;
     }
 
@@ -4935,6 +4964,7 @@ static void RazerThread(HWND hWnd) {
     float smoothingFactor = DEF_SMOOTHING_FACTOR;
     bool previousLightsEnabled = g_LedsEnabled.load();
     bool firstFrame = true;
+    bool colorTransitionActive = true;
     float currentRed = 0.0f, currentGreen = 0.0f, currentBlue = 0.0f;
     DWORD targetRed = 0, targetGreen = 0, targetBlue = 0;
     float lastTemperature = -1.0f;
@@ -4955,6 +4985,7 @@ static void RazerThread(HWND hWnd) {
             lastConfigVersion = configVersion;
             lastTemperature = -1.0f;
             firstFrame = true;
+            colorTransitionActive = true;
             nextColorFrame = 0;
             for (auto& [key, runtime] : runtimes) {
                 runtime->nextFrame = 0;
@@ -5024,6 +5055,24 @@ static void RazerThread(HWND hWnd) {
             return SettingsForRazerDevice(deviceSettings, key);
         };
         const auto selectedKeys = SelectedRazerDeviceKeys(config, detection);
+        const auto waitForIdleWork = [&]() {
+            const ULONGLONG waitNow = GetTickCount64();
+            ULONGLONG nextWake = nextDetection;
+            for (const auto& [key, runtime] : runtimes) {
+                if (runtime->controlledSinceRelease &&
+                    runtime->nextReleaseAttempt > waitNow) {
+                    nextWake = (std::min)(nextWake, runtime->nextReleaseAttempt);
+                }
+                if (runtime->present && selectedKeys.contains(key) &&
+                    !runtime->controller.IsOpen() &&
+                    runtime->nextOpenAttempt > waitNow) {
+                    nextWake = (std::min)(nextWake, runtime->nextOpenAttempt);
+                }
+            }
+            const DWORD waitMs = nextWake <= waitNow ? 1 : static_cast<DWORD>(
+                (std::min<ULONGLONG>)(detectionIntervalMs, nextWake - waitNow));
+            WaitForSingleObject(g_hRazerEvent, waitMs);
+        };
         for (auto& [key, runtime] : runtimes) {
             const bool selected = selectedKeys.contains(key);
             if (!runtime->present) {
@@ -5039,7 +5088,7 @@ static void RazerThread(HWND hWnd) {
         }
 
         if (selectedKeys.empty()) {
-            WaitForSingleObject(g_hRazerEvent, 1000);
+            waitForIdleWork();
             continue;
         }
 
@@ -5054,19 +5103,8 @@ static void RazerThread(HWND hWnd) {
         }
         if (!anyOpen) {
             // A missing KVM-routed device must not turn the worker into a poll
-            // loop. Sleep until either read-only detection or the earliest
-            // throttled reopen is due; config/shutdown events still wake us.
-            ULONGLONG nextWake = nextDetection;
-            for (const auto& key : selectedKeys) {
-                const auto it = runtimes.find(key);
-                if (it != runtimes.end() && it->second->present &&
-                    it->second->nextOpenAttempt > now) {
-                    nextWake = (std::min)(nextWake, it->second->nextOpenAttempt);
-                }
-            }
-            const DWORD waitMs = nextWake <= now ? 1 : static_cast<DWORD>(
-                (std::min<ULONGLONG>)(detectionIntervalMs, nextWake - now));
-            WaitForSingleObject(g_hRazerEvent, waitMs);
+            // loop. Config, sensor and shutdown events still wake it immediately.
+            waitForIdleWork();
             continue;
         }
 
@@ -5076,13 +5114,13 @@ static void RazerThread(HWND hWnd) {
             if (lightsEnabled) {
                 firstFrame = true;
                 lastTemperature = -1.0f;
+                colorTransitionActive = true;
                 nextColorFrame = 0;
             }
         }
 
         auto sendToSelected = [&](const BYTE red, const BYTE green, const BYTE blue,
-            const char* operation, const LedRequestSnapshot& request,
-            const bool continuousFrames) {
+            const char* operation, const LedRequestSnapshot& request) {
             bool anyApplied = false;
             const ULONGLONG sendNow = GetTickCount64();
             for (const auto& key : selectedKeys) {
@@ -5090,13 +5128,11 @@ static void RazerThread(HWND hWnd) {
                 if (it == runtimes.end() || !it->second->present) continue;
 
                 RazerDeviceRuntime& runtime = *it->second;
-                const bool requestPending = !runtime.hasAppliedFrame ||
-                    runtime.lastAppliedGeneration < request.generation ||
-                    runtime.lastAppliedEnabled != request.enabled;
-                if (!requestPending && (!continuousFrames ||
-                    (runtime.nextFrame != 0 && sendNow < runtime.nextFrame))) {
-                    continue;
-                }
+                const bool requestPending = IsRazerRequestPending(runtime, request);
+                const bool colorChanged = IsRazerColorChanged(runtime, red, green, blue);
+                if (!requestPending && !colorChanged) continue;
+                if (!requestPending && runtime.nextFrame != 0 &&
+                    sendNow < runtime.nextFrame) continue;
                 if (!EnsureRazerOpen(runtime, sendNow, detectionIntervalMs)) continue;
 
                 const RazerDeviceSettings settings = settingsForKey(key);
@@ -5109,6 +5145,7 @@ static void RazerThread(HWND hWnd) {
                         runtime.controller.LastError().c_str());
                     Log(message);
                     runtime.controller.Close();
+                    runtime.hasAppliedFrame = false;
                     runtime.nextOpenAttempt = GetTickCount64() + detectionIntervalMs;
                     continue;
                 }
@@ -5117,6 +5154,9 @@ static void RazerThread(HWND hWnd) {
                 runtime.nextReleaseAttempt = 0;
                 runtime.hasAppliedFrame = true;
                 runtime.lastAppliedEnabled = request.enabled;
+                runtime.lastAppliedRed = red;
+                runtime.lastAppliedGreen = green;
+                runtime.lastAppliedBlue = blue;
                 runtime.lastAppliedGeneration = request.generation;
                 anyApplied = true;
             }
@@ -5138,7 +5178,7 @@ static void RazerThread(HWND hWnd) {
         if (!lightsEnabled) {
             const LedRequestSnapshot request = CaptureLedRequest();
             const auto [anyApplied, allApplied] = sendToSelected(
-                0, 0, 0, "OFF frame", request, false);
+                0, 0, 0, "OFF frame", request);
             if (anyApplied && allApplied && IsLedRequestCurrent(request) &&
                 request.generation > lastAcknowledgedLedGeneration) {
                 lastAcknowledgedLedGeneration = request.generation;
@@ -5147,13 +5187,13 @@ static void RazerThread(HWND hWnd) {
                     "[Razer HID] APPLIED generation=%llu state=OFF", request.generation);
                 Log(message);
             }
-            WaitForSingleObject(g_hRazerEvent, 1000);
+            waitForIdleWork();
             continue;
         }
 
         const float rawTemperature = g_asyncTemp.load();
         if (g_activeSource.load() == DataSource::Searching || rawTemperature < 0.0f) {
-            WaitForSingleObject(g_hRazerEvent, 100);
+            waitForIdleWork();
             continue;
         }
 
@@ -5164,12 +5204,12 @@ static void RazerThread(HWND hWnd) {
         }
         now = GetTickCount64();
         if (nextColorFrame == 0 || now >= nextColorFrame) {
-            nextColorFrame = now + (1000 / fastestRefreshFPS);
             const float temperature = floorf(rawTemperature * 2.0f + 0.5f) / 2.0f;
             if (temperature != lastTemperature) {
                 lastTemperature = temperature;
                 CalculateThermalTargetColor(config, temperature,
                     targetRed, targetGreen, targetBlue);
+                colorTransitionActive = true;
             }
 
             if (firstFrame) {
@@ -5178,20 +5218,39 @@ static void RazerThread(HWND hWnd) {
                 currentBlue = static_cast<float>(targetBlue);
                 firstFrame = false;
             }
-            else {
+            else if (colorTransitionActive) {
                 const float adjustedFactor = AdjustedSmoothingFactor(
                     smoothingFactor, fastestRefreshFPS);
                 currentRed = SmoothColorChannel(currentRed, targetRed, adjustedFactor);
                 currentGreen = SmoothColorChannel(currentGreen, targetGreen, adjustedFactor);
                 currentBlue = SmoothColorChannel(currentBlue, targetBlue, adjustedFactor);
             }
+
+            const bool settled = static_cast<DWORD>(roundf(currentRed)) == targetRed &&
+                static_cast<DWORD>(roundf(currentGreen)) == targetGreen &&
+                static_cast<DWORD>(roundf(currentBlue)) == targetBlue;
+            if (settled) {
+                // Once the visible 8-bit colour is exact, snap the hidden floats
+                // too. There is no useful animation work until a sensor/config
+                // event supplies a different target.
+                currentRed = static_cast<float>(targetRed);
+                currentGreen = static_cast<float>(targetGreen);
+                currentBlue = static_cast<float>(targetBlue);
+                colorTransitionActive = false;
+                nextColorFrame = 0;
+            }
+            else {
+                colorTransitionActive = true;
+                nextColorFrame = now + (1000 / fastestRefreshFPS);
+            }
         }
 
+        const BYTE outputRed = static_cast<BYTE>(roundf(currentRed));
+        const BYTE outputGreen = static_cast<BYTE>(roundf(currentGreen));
+        const BYTE outputBlue = static_cast<BYTE>(roundf(currentBlue));
         const LedRequestSnapshot request = CaptureLedRequest();
         const auto [anyApplied, allApplied] = sendToSelected(
-            static_cast<BYTE>(roundf(currentRed)),
-            static_cast<BYTE>(roundf(currentGreen)),
-            static_cast<BYTE>(roundf(currentBlue)), "RGB frame", request, true);
+            outputRed, outputGreen, outputBlue, "RGB frame", request);
         if (anyApplied && allApplied && IsLedRequestCurrent(request) &&
             request.generation > lastAcknowledgedLedGeneration) {
             lastAcknowledgedLedGeneration = request.generation;
@@ -5205,24 +5264,29 @@ static void RazerThread(HWND hWnd) {
         // the fastest FPS as a global tick would quantize 15 FPS behind 25 FPS
         // (roughly 12.5 writes/s); independent deadlines avoid that regression.
         now = GetTickCount64();
-        ULONGLONG nextWake = nextColorFrame;
+        ULONGLONG nextWake = nextDetection;
+        if (colorTransitionActive && nextColorFrame != 0) {
+            nextWake = (std::min)(nextWake, nextColorFrame);
+        }
         for (const auto& key : selectedKeys) {
             const auto it = runtimes.find(key);
             if (it == runtimes.end() || !it->second->present) continue;
             const RazerDeviceRuntime& runtime = *it->second;
-            const bool requestPending = !runtime.hasAppliedFrame ||
-                runtime.lastAppliedGeneration < request.generation ||
-                runtime.lastAppliedEnabled != request.enabled;
-            ULONGLONG deviceWake = runtime.nextFrame;
+            const bool requestPending = IsRazerRequestPending(runtime, request);
+            const bool colorChanged = IsRazerColorChanged(
+                runtime, outputRed, outputGreen, outputBlue);
+            ULONGLONG deviceWake = 0;
             if (!runtime.controller.IsOpen() && runtime.nextOpenAttempt > now) {
                 deviceWake = runtime.nextOpenAttempt;
             }
             else if (requestPending) deviceWake = now;
-            if (deviceWake == 0) deviceWake = now;
-            nextWake = (std::min)(nextWake, deviceWake);
+            else if (colorChanged) {
+                deviceWake = runtime.nextFrame > now ? runtime.nextFrame : now;
+            }
+            if (deviceWake != 0) nextWake = (std::min)(nextWake, deviceWake);
         }
         const DWORD waitMs = nextWake <= now ? 1 : static_cast<DWORD>(
-            (std::min<ULONGLONG>)(250, nextWake - now));
+            (std::min<ULONGLONG>)(detectionIntervalMs, nextWake - now));
         WaitForSingleObject(g_hRazerEvent, waitMs);
     }
 

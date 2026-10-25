@@ -86,8 +86,10 @@ allowlist immediately before sending. There is no generic Razer command API.
    effect `0x03` is Spectrum Cycling.
 
 The row is uploaded first and the custom effect is selected once after opening
-the device. Later uniform-colour frames need only one row command. MysticFight
-does not use the persistent static-colour recipe.
+the device. Later colour changes need only one row command. Static colours are
+not stored persistently: while MysticFight owns the device it uses the volatile
+custom effect, and persistent commands are reserved for the configured Off or
+Spectrum Cycling hand-off.
 
 A release command is sent only to a compatible device that MysticFight
 successfully controlled, when a new active profile no longer selects it or the
@@ -99,7 +101,10 @@ release command.
 
 - The 600 us upstream delay is rounded to a 1 ms Windows minimum.
 - Razer output defaults to 25 FPS and is independently selectable as 15, 20 or
-  25 FPS per physical device. Identical frames are suppressed.
+  25 FPS per physical device. FPS is a maximum transition cadence, not a
+  continuous write rate: identical frames are suppressed at both the worker and
+  controller boundaries, and a settled colour wakes again only for sensor,
+  configuration, device-detection or shutdown work.
 - The Razer worker is separate from the UI, sensor and MSI SDK workers. It owns
   one controller per selected device, samples only the newest temperature and
   queues no stale frames.
