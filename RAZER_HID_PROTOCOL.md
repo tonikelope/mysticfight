@@ -91,8 +91,9 @@ does not use the persistent static-colour recipe.
 
 A release command is sent only to a compatible device that MysticFight
 successfully controlled, when a new active profile no longer selects it or the
-application exits normally. Mere detection and Windows shutdown/restart never
-send a release command.
+application exits. A committed Windows shutdown/restart uses the same bounded
+release path before the HID handles are closed. Mere detection never sends a
+release command.
 
 ## Timing and safety decisions
 

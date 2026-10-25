@@ -3524,6 +3524,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         if (wParam) { // the session is actually ending
             if (!g_windows_shutdown) {
                 Log("[MysticFight] Windows Shutdown detected...");
+                // The workers still perform their bounded configured release
+                // before closing the HID handles and isolated MSI SDK host.
                 g_windows_shutdown = true; g_Running = false;
             }
             PostQuitMessage(0);
@@ -4706,8 +4708,7 @@ static void EngineThread(HWND hWnd) {
         EngineWait(waitTime);
     }
 
-    if (sdkReady && g_hSdkHostProcess && msiControlledSinceRelease &&
-        !g_windows_shutdown.load()) {
+    if (sdkReady && g_hSdkHostProcess && msiControlledSinceRelease) {
         ReleaseEffect releaseEffect;
         std::wstring configuredReleaseStyle;
         {
@@ -4842,7 +4843,7 @@ static std::set<std::wstring> SelectedRazerDeviceKeys(const Config& config,
 
 static bool ApplyRazerReleaseEffect(RazerDeviceRuntime& runtime,
     const ReleaseEffect effect, const bool forceRetry) {
-    if (!runtime.controlledSinceRelease || g_windows_shutdown.load() || !runtime.present) {
+    if (!runtime.controlledSinceRelease || !runtime.present) {
         runtime.controller.Close();
         return !runtime.controlledSinceRelease;
     }
@@ -5212,12 +5213,10 @@ static void RazerThread(HWND hWnd) {
         WaitForSingleObject(g_hRazerEvent, waitMs);
     }
 
-    if (!g_windows_shutdown.load()) {
-        for (auto& [key, runtime] : runtimes) {
-            if (runtime->controlledSinceRelease) {
-                ApplyRazerReleaseEffect(*runtime,
-                    SettingsForRazerDevice(deviceSettings, key).releaseEffect, true);
-            }
+    for (auto& [key, runtime] : runtimes) {
+        if (runtime->controlledSinceRelease) {
+            ApplyRazerReleaseEffect(*runtime,
+                SettingsForRazerDevice(deviceSettings, key).releaseEffect, true);
         }
     }
     for (auto& [key, runtime] : runtimes) runtime->controller.Close();
