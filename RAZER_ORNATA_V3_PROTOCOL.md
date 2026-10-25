@@ -77,13 +77,14 @@ these devices. MysticFight does not use that persistent static recipe. A
 uniform visually static color is produced with the model-specific volatile
 custom frame (ten zones on V3, one zone on V3 X).
 
-The one intentional persistent command is the documented extended-matrix
-Spectrum Cycling recipe used to hand the device back to standalone operation:
-class `0x0F`, command `0x02`, data size `0x06`, arguments
-`01 00 03 00 00 00` (`VARSTORE`, `ZERO_LED`, Spectrum). It is sent only to a
-compatible device that MysticFight successfully controlled, when that device
-is deselected or the application exits normally. Windows shutdown/restart does
-not delay the OS by attempting this hand-off.
+The only intentional persistent commands are the two documented
+extended-matrix release recipes. Both use class `0x0F`, command `0x02`, data
+size `0x06` and `VARSTORE=1`: `01 00 00 00 00 00` selects NONE (lights off),
+while `01 00 03 00 00 00` selects Spectrum Cycling. Advanced settings choose
+which one MysticFight uses, with lights off as the default. A release command
+is sent only to a compatible device that MysticFight successfully controlled,
+when a new active profile no longer selects that device or the application
+exits normally. Mere detection and Windows shutdown/restart never send it.
 
 ## Timing and safety decisions
 
@@ -102,7 +103,9 @@ not delay the OS by attempting this hand-off.
   the active profile, its model and 91-byte control collection are whitelisted,
   and a valid sensor color (or an explicit global OFF request) exists.
 - Disconnects close only that device's handle and return it to read-only
-  detection. Normal deselection/exit restores Spectrum as described above.
+  detection. Normal profile deselection/exit applies the configured release
+  effect as described above; transient failures are retried at a quiet 5-second
+  interval while the application remains active.
 - Windows `HidD_SetFeature`/`HidD_GetFeature` calls are synchronous. They are
   isolated from MSI and the UI, bounded by the protocol retry count, and the
   application retains its existing bounded worker-shutdown policy. No claim is

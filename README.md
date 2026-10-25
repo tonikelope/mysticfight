@@ -19,7 +19,7 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * **Customizable Device and LED area:** Choose the one you prefer. <i>Please note that MSI Mystic Light SDK may not recognise all areas available on your device (you will have to wait for MSI to update the public SDK)</i>.
 * **Independent controllers per profile:** Control the MSI motherboard and any individually selected compatible Razer device. New profiles select no Razer device by default.
 * **Native Razer Ornata V3 / V3 X support:** Direct Windows HID control with no Synapse, Chroma Runtime, OpenRGB, extra service, or kernel driver. Settings inventories every physical Razer HID device in a fixed-height scrollable list; only models with a validated protocol are selectable.
-* **Clean Razer hand-off:** Normal exit (and deselection) explicitly restores Spectrum Cycling on every device MysticFight actually controlled.
+* **Configurable device hand-off:** When a profile stops using an MSI or Razer device (or MysticFight exits normally), Advanced settings can leave it powered off or return it to an autonomous animated effect (MSI Rainbow when supported, Razer Spectrum Cycling). The default is lights off, and MysticFight never hands off a device it did not successfully control first.
 * **Independent refresh rates:** MSI and Razer can each use 15, 20, or 25 FPS while sharing the same thermal color and smoothing engine.
 * **Customizable Temperature Sensor:** Choose the one you prefer.
 * **Customizable Temperature and Colors Thresholds:** RMS interpolation with adaptive color transition smoothing.

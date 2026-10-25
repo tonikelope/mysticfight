@@ -19,6 +19,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cwctype>
 #include <ctime>
 #include <fstream>
 #include <math.h>
@@ -135,6 +136,10 @@ const int   DEF_LED_REFRESH_FPS = 25;
 const int   DEF_RAZER_REFRESH_FPS = 25;
 const float DEF_SMOOTHING_FACTOR = 0.150f;
 
+enum class ReleaseEffect : int { Off = 0, Animated = 1 };
+const ReleaseEffect DEF_MSI_RELEASE_EFFECT = ReleaseEffect::Off;
+const ReleaseEffect DEF_RAZER_RELEASE_EFFECT = ReleaseEffect::Off;
+
 const int   DEF_TEMP_LOW = 50;
 const int   DEF_TEMP_MED = 70;
 const int   DEF_TEMP_HIGH = 90;
@@ -171,6 +176,7 @@ enum StrId {
     // Advanced layer
     STR_GRP_ADVANCED, STR_GRP_LIGHTING_CONTROLLERS,
     STR_LBL_ADV_SENSOR, STR_LBL_ADV_LED, STR_LBL_ADV_RAZER, STR_LBL_ADV_SMOOTH,
+    STR_LBL_ADV_RELEASE, STR_RELEASE_OFF, STR_RELEASE_MSI_RAINBOW, STR_RELEASE_RAZER_SPECTRUM,
     STR_GRP_DATA_SOURCES, STR_LBL_LHM_SERVER,
     STR_GRP_LANGUAGE, STR_LBL_LANGUAGE,
     // Shortcuts layer
@@ -207,7 +213,8 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Data Source",
         L"Temperature Thresholds and Colors", L"LOW:", L"MEDIUM:", L"HIGH:", L"Color (hex):",
         L"Reset Defaults",
-        L"Shared Thermal Engine", L"Controller Refresh", L"Sensor Update:", L"MSI motherboard:", L"Razer devices:", L"Smoothing:",
+        L"Shared Thermal Engine", L"Controllers", L"Sensor Update:", L"MSI motherboard:", L"Razer devices:", L"Smoothing:",
+        L"On release:", L"Lights off", L"Rainbow", L"Spectrum Cycling",
         L"Data Sources", L"LibreHardwareMonitor",
         L"Language", L"Language:",
         L"Global Hotkeys Configuration", L"Toggle ON/OFF:", L"Activate Profile %d:", L"Reset Hotkeys",
@@ -231,7 +238,8 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Origen de datos",
         L"Umbrales de temperatura y colores", L"BAJA:", L"MEDIA:", L"ALTA:", L"Color (hex):",
         L"Restaurar valores",
-        L"Motor térmico compartido", L"Refresco de controladoras", L"Actualización sensor:", L"Placa base MSI:", L"Dispositivos Razer:", L"Suavizado:",
+        L"Motor térmico compartido", L"Controladoras", L"Actualización sensor:", L"Placa base MSI:", L"Dispositivos Razer:", L"Suavizado:",
+        L"Al liberar:", L"Apagar luces", L"Arcoíris", L"Spectrum Cycling",
         L"Orígenes de datos", L"LibreHardwareMonitor",
         L"Idioma", L"Idioma:",
         L"Configuración de atajos globales", L"Activar/Desactivar:", L"Activar perfil %d:", L"Restaurar atajos",
@@ -328,6 +336,8 @@ struct GlobalConfig {
     int ledRefreshFPS = 0;
     int razerRefreshFPS = 0;
     float smoothingFactor = 0.0f;
+    ReleaseEffect msiReleaseEffect = DEF_MSI_RELEASE_EFFECT;
+    ReleaseEffect razerReleaseEffect = DEF_RAZER_RELEASE_EFFECT;
 };
 
 
@@ -347,7 +357,7 @@ typedef int (*LPMLAPI_Release)();
 // with --sdk-host; only that child loads and calls the vendor DLL. Fixed-size
 // packets keep the protocol simple and deterministic across anonymous pipes.
 const DWORD SDK_IPC_MAGIC = 0x4D465344; // "MFSD"
-const DWORD SDK_IPC_VERSION = 1;
+const DWORD SDK_IPC_VERSION = 2;
 const int SDK_IPC_TIMEOUT = -10001;
 const int SDK_IPC_BROKEN = -10002;
 const int SDK_HOST_LOAD_FAILED = -10003;
@@ -372,12 +382,13 @@ struct SdkIpcRequest {
     wchar_t device[256];
     DWORD ledIndex;
     DWORD r, g, b;
-    wchar_t style[32];
+    wchar_t style[128];
 };
 
 struct SdkIpcArea {
     DWORD index;
     wchar_t name[128];
+    wchar_t animatedReleaseStyle[128];
 };
 
 struct SdkIpcDevice {
@@ -463,7 +474,13 @@ HMODULE g_hLibrary = NULL;
 // Hardware snapshot: the SDK-owning thread enumerates all devices and their LED
 // areas here so the settings dialog can populate its combos WITHOUT calling the
 // MSI SDK from the UI thread (which would race with the engine thread).
-struct HwArea { DWORD index = 0; std::wstring name; };
+struct HwArea {
+    DWORD index = 0;
+    std::wstring name;
+    // Exact SDK-advertised style used when releasing this area to an
+    // autonomous animated effect. Empty means release must fall back to Off.
+    std::wstring animatedReleaseStyle;
+};
 struct HwDevice { std::wstring type; std::wstring friendly; std::vector<HwArea> areas; };
 std::vector<HwDevice> g_hwSnapshot;
 std::mutex g_hwMutex;
@@ -1008,6 +1025,10 @@ static void SaveSettings() {
     WritePrivateProfileStringW(L"Global", L"SensorUpdateMS", std::to_wstring(g_Global.sensorUpdateMS).c_str(), INI_FILE);
     WritePrivateProfileStringW(L"Global", L"LedRefreshFPS", std::to_wstring(g_Global.ledRefreshFPS).c_str(), INI_FILE);
     WritePrivateProfileStringW(L"Global", L"RazerRefreshFPS", std::to_wstring(g_Global.razerRefreshFPS).c_str(), INI_FILE);
+    WritePrivateProfileStringW(L"Global", L"MsiReleaseEffect",
+        std::to_wstring(static_cast<int>(g_Global.msiReleaseEffect)).c_str(), INI_FILE);
+    WritePrivateProfileStringW(L"Global", L"RazerReleaseEffect",
+        std::to_wstring(static_cast<int>(g_Global.razerReleaseEffect)).c_str(), INI_FILE);
     WritePrivateProfileStringW(L"Global", L"RazerSettingsVersion", L"1", INI_FILE);
     // Remove obsolete safety-gate state left by pre-inventory builds.
     WritePrivateProfileStringW(L"Global", L"RazerStaticTestPassed", nullptr, INI_FILE);
@@ -1179,6 +1200,14 @@ static void LoadSettings() {
     g_Global.razerRefreshFPS = razerSettingsVersion < 1
         ? DEF_RAZER_REFRESH_FPS
         : GetPrivateProfileIntW(L"Global", L"RazerRefreshFPS", DEF_RAZER_REFRESH_FPS, INI_FILE);
+    const int msiReleaseEffect = GetPrivateProfileIntW(L"Global", L"MsiReleaseEffect",
+        static_cast<int>(DEF_MSI_RELEASE_EFFECT), INI_FILE);
+    const int razerReleaseEffect = GetPrivateProfileIntW(L"Global", L"RazerReleaseEffect",
+        static_cast<int>(DEF_RAZER_RELEASE_EFFECT), INI_FILE);
+    g_Global.msiReleaseEffect = msiReleaseEffect == static_cast<int>(ReleaseEffect::Animated)
+        ? ReleaseEffect::Animated : ReleaseEffect::Off;
+    g_Global.razerReleaseEffect = razerReleaseEffect == static_cast<int>(ReleaseEffect::Animated)
+        ? ReleaseEffect::Animated : ReleaseEffect::Off;
     {
         wchar_t sfOld[32]; GetPrivateProfileStringW(L"Settings", L"SmoothingFactor", L"", sfOld, 32, INI_FILE);
         float defSmooth = (wcslen(sfOld) > 0) ? (float)_wtof(sfOld) : DEF_SMOOTHING_FACTOR;
@@ -1640,6 +1669,10 @@ static void LoadGlobalAdvancedToUI(HWND hDlg) {
     SetComboByVal(IDC_COMBO_SENSOR_UPDATE, g_Global.sensorUpdateMS, { 250, 500, 1000 });
     SetComboByVal(IDC_COMBO_LED_FPS, g_Global.ledRefreshFPS, { 25, 20, 15 });
     SetComboByVal(IDC_COMBO_RAZER_FPS, g_Global.razerRefreshFPS, { 25, 20, 15 });
+    SendMessage(GetDlgItem(hDlg, IDC_COMBO_MSI_RELEASE), CB_SETCURSEL,
+        static_cast<WPARAM>(g_Global.msiReleaseEffect), 0);
+    SendMessage(GetDlgItem(hDlg, IDC_COMBO_RAZER_RELEASE), CB_SETCURSEL,
+        static_cast<WPARAM>(g_Global.razerReleaseEffect), 0);
 
     HWND hSmooth = GetDlgItem(hDlg, IDC_COMBO_SMOOTHING);
     if (g_Global.smoothingFactor > 0.9f) SendMessage(hSmooth, CB_SETCURSEL, 0, 0);
@@ -1672,6 +1705,13 @@ static void SaveGlobalAdvancedFromUI(HWND hDlg) {
     if (idxRazerFPS == 0) g_Global.razerRefreshFPS = 25;
     else if (idxRazerFPS == 1) g_Global.razerRefreshFPS = 20;
     else g_Global.razerRefreshFPS = 15;
+
+    g_Global.msiReleaseEffect = SendMessage(
+        GetDlgItem(hDlg, IDC_COMBO_MSI_RELEASE), CB_GETCURSEL, 0, 0) == 1
+        ? ReleaseEffect::Animated : ReleaseEffect::Off;
+    g_Global.razerReleaseEffect = SendMessage(
+        GetDlgItem(hDlg, IDC_COMBO_RAZER_RELEASE), CB_GETCURSEL, 0, 0) == 1
+        ? ReleaseEffect::Animated : ReleaseEffect::Off;
 
     int idxSmooth = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_GETCURSEL, 0, 0);
     if (idxSmooth == 0) g_Global.smoothingFactor = 1.0f;
@@ -1738,6 +1778,65 @@ static void SaveUIToProfile(HWND hDlg, int profileIndex) {
 // MSI SDK HARDWARE DETECTION & MANAGEMENT
 // ============================================================================
 
+static std::wstring LowercaseCopy(std::wstring value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+        [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+    return value;
+}
+
+static int AnimatedMsiStyleScore(const std::wstring& style) {
+    const std::wstring lower = LowercaseCopy(style);
+    if (lower == L"rainbow") return 400;
+    if (lower.find(L"rainbow") != std::wstring::npos) return 300;
+    if (lower == L"color shift" || lower == L"colorshift") return 200;
+    if (lower.find(L"color shift") != std::wstring::npos ||
+        lower.find(L"colorshift") != std::wstring::npos) return 100;
+    return 0;
+}
+
+static std::wstring SelectAnimatedMsiStyle(SAFEARRAY* styles) {
+    if (!styles || SafeArrayGetDim(styles) != 1) return {};
+
+    LONG lowerBound = 0;
+    LONG upperBound = -1;
+    if (FAILED(SafeArrayGetLBound(styles, 1, &lowerBound)) ||
+        FAILED(SafeArrayGetUBound(styles, 1, &upperBound)) || upperBound < lowerBound) {
+        return {};
+    }
+
+    VARTYPE type = VT_EMPTY;
+    if (FAILED(SafeArrayGetVartype(styles, &type))) return {};
+
+    std::wstring selected;
+    int selectedScore = 0;
+    const LONG count = upperBound - lowerBound + 1;
+    auto consider = [&](const BSTR value) {
+        if (!value) return;
+        const std::wstring candidate(value, SysStringLen(value));
+        const int score = AnimatedMsiStyleScore(candidate);
+        if (score > selectedScore) {
+            selected = candidate;
+            selectedScore = score;
+        }
+    };
+
+    if (type == VT_BSTR) {
+        SafeArrayScopedLock<BSTR> lock(styles);
+        if (!lock.isLocked()) return {};
+        for (LONG i = 0; i < count; ++i) consider(lock.data[i]);
+    }
+    else if (type == VT_VARIANT) {
+        SafeArrayScopedLock<VARIANT> lock(styles);
+        if (!lock.isLocked()) return {};
+        for (LONG i = 0; i < count; ++i) {
+            const VARIANT& value = lock.data[i];
+            if (V_VT(&value) == VT_BSTR) consider(V_BSTR(&value));
+        }
+    }
+
+    return selected;
+}
+
 /**
  * Enumerates every MSI device and its LED areas into g_hwSnapshot.
  * MUST be called only from the SDK-owning thread. The settings dialog reads the
@@ -1793,6 +1892,7 @@ static int BuildHardwareSnapshot() {
                                 area.name = ledName
                                     ? std::wstring(ledName, SysStringLen(ledName))
                                     : std::wstring();
+                                area.animatedReleaseStyle = SelectAnimatedMsiStyle(pStyles);
                                 dev.areas.push_back(std::move(area));
                                 if (pStyles) SafeArrayDestroy(pStyles);
                                 if (ledName) SysFreeString(ledName);
@@ -2359,7 +2459,8 @@ static void UpdateRazerPanelLayout(HWND hDlg) {
         HWND control = GetDlgItem(hDlg, id);
         if (control) ShowWindow(control, anyDetected && profileLayer ? SW_SHOW : SW_HIDE);
     }
-    for (int id : { IDC_LBL_ADV_RAZER, IDC_COMBO_RAZER_FPS }) {
+    for (int id : { IDC_LBL_ADV_RAZER, IDC_COMBO_RAZER_FPS,
+        IDC_LBL_ADV_RAZER_RELEASE, IDC_COMBO_RAZER_RELEASE }) {
         HWND control = GetDlgItem(hDlg, id);
         if (control) EnableWindow(control, g_razerDetected.load());
     }
@@ -2389,6 +2490,8 @@ static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
         IDC_GRP_ADVANCED, IDC_GRP_LIGHTING_CONTROLLERS, IDC_LBL_ADV_SENSOR, IDC_COMBO_SENSOR_UPDATE,
         IDC_LBL_ADV_LED, IDC_COMBO_LED_FPS, IDC_LBL_ADV_SMOOTH, IDC_COMBO_SMOOTHING,
         IDC_LBL_ADV_RAZER, IDC_COMBO_RAZER_FPS,
+        IDC_LBL_ADV_MSI_RELEASE, IDC_COMBO_MSI_RELEASE,
+        IDC_LBL_ADV_RAZER_RELEASE, IDC_COMBO_RAZER_RELEASE,
         IDC_BTN_RESET_ADVANCED, IDC_GRP_DATA_SOURCES, IDC_LBL_LHM_SERVER, IDC_EDIT_LHM_SERVER,
         IDC_GRP_LANGUAGE, IDC_LBL_LANGUAGE, IDC_COMBO_LANGUAGE
     };
@@ -2433,6 +2536,8 @@ static void ApplyDialogTranslations(HWND hDlg) {
     SetDlgItemTextW(hDlg, IDC_LBL_ADV_LED, T(STR_LBL_ADV_LED));
     SetDlgItemTextW(hDlg, IDC_LBL_ADV_RAZER, T(STR_LBL_ADV_RAZER));
     SetDlgItemTextW(hDlg, IDC_LBL_ADV_SMOOTH, T(STR_LBL_ADV_SMOOTH));
+    SetDlgItemTextW(hDlg, IDC_LBL_ADV_MSI_RELEASE, T(STR_LBL_ADV_RELEASE));
+    SetDlgItemTextW(hDlg, IDC_LBL_ADV_RAZER_RELEASE, T(STR_LBL_ADV_RELEASE));
     SetDlgItemTextW(hDlg, IDC_BTN_RESET_ADVANCED, T(STR_BTN_RESET_DEFAULTS));
     SetDlgItemTextW(hDlg, IDC_GRP_DATA_SOURCES, T(STR_GRP_DATA_SOURCES));
     SetDlgItemTextW(hDlg, IDC_LBL_LHM_SERVER, T(STR_LBL_LHM_SERVER));
@@ -2488,6 +2593,17 @@ static void ApplyDialogTranslations(HWND hDlg) {
     SendMessage(hSmooth, CB_ADDSTRING, 0, (LPARAM)T(STR_SMOOTH_NORMAL));
     SendMessage(hSmooth, CB_ADDSTRING, 0, (LPARAM)T(STR_SMOOTH_FAST));
     if (sel >= 0) SendMessage(hSmooth, CB_SETCURSEL, sel, 0);
+
+    auto translateReleaseCombo = [&](const int id, const StrId animatedLabel) {
+        HWND combo = GetDlgItem(hDlg, id);
+        const int selection = static_cast<int>(SendMessage(combo, CB_GETCURSEL, 0, 0));
+        SendMessage(combo, CB_RESETCONTENT, 0, 0);
+        SendMessage(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(T(STR_RELEASE_OFF)));
+        SendMessage(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(T(animatedLabel)));
+        if (selection >= 0) SendMessage(combo, CB_SETCURSEL, selection, 0);
+    };
+    translateReleaseCombo(IDC_COMBO_MSI_RELEASE, STR_RELEASE_MSI_RAINBOW);
+    translateReleaseCombo(IDC_COMBO_RAZER_RELEASE, STR_RELEASE_RAZER_SPECTRUM);
 }
 
 static bool ValidateHotkeys(HWND hDlg) {
@@ -2839,6 +2955,8 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             SendMessage(GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE), CB_SETCURSEL, 1, 0);
             SendMessage(GetDlgItem(hDlg, IDC_COMBO_LED_FPS), CB_SETCURSEL, 0, 0);
             SendMessage(GetDlgItem(hDlg, IDC_COMBO_RAZER_FPS), CB_SETCURSEL, 0, 0);
+            SendMessage(GetDlgItem(hDlg, IDC_COMBO_MSI_RELEASE), CB_SETCURSEL, 0, 0);
+            SendMessage(GetDlgItem(hDlg, IDC_COMBO_RAZER_RELEASE), CB_SETCURSEL, 0, 0);
             SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_SETCURSEL, 2, 0);
             SetDlgItemTextW(hDlg, IDC_EDIT_LHM_SERVER, DEF_SERVER_URL);
             return TRUE;
@@ -3445,6 +3563,8 @@ static void CopySnapshotToResponse(SdkIpcResponse& response) {
         for (DWORD j = 0; j < target.areaCount; ++j) {
             target.areas[j].index = source.areas[j].index;
             wcsncpy_s(target.areas[j].name, source.areas[j].name.c_str(), _TRUNCATE);
+            wcsncpy_s(target.areas[j].animatedReleaseStyle,
+                source.areas[j].animatedReleaseStyle.c_str(), _TRUNCATE);
         }
     }
 }
@@ -3598,6 +3718,7 @@ static void PublishHardwareSnapshot(const SdkIpcResponse& response) {
             HwArea area;
             area.index = response.devices[i].areas[j].index;
             area.name = response.devices[i].areas[j].name;
+            area.animatedReleaseStyle = response.devices[i].areas[j].animatedReleaseStyle;
             device.areas.push_back(std::move(area));
         }
         snapshot.push_back(std::move(device));
@@ -3622,20 +3743,39 @@ static void PublishHardwareSnapshot(const SdkIpcResponse& response) {
     }
 }
 
-static int ProbeSdkOutput(const Config& cfg) {
+static std::wstring FindMsiAnimatedReleaseStyle(const std::wstring& deviceType,
+    const DWORD ledIndex) {
+    std::lock_guard<std::mutex> lock(g_hwMutex);
+    for (const auto& device : g_hwSnapshot) {
+        if (device.type != deviceType) continue;
+        for (const auto& area : device.areas) {
+            if (area.index == ledIndex) return area.animatedReleaseStyle;
+        }
+        break;
+    }
+    return {};
+}
+
+static int ProbeSdkOutput(const Config& cfg, bool* outputApplied) {
+    if (outputApplied) *outputApplied = false;
     if (!g_LedsEnabled.load()) {
-        return SdkSetStyle(cfg.targetDevice, cfg.targetLedIndex, L"Off");
+        const int result = SdkSetStyle(cfg.targetDevice, cfg.targetLedIndex, L"Off");
+        if (outputApplied && result == MLAPI_OK) *outputApplied = true;
+        return result;
     }
 
     if (g_activeSource.load() == DataSource::Searching) {
         int result = SdkSetStyle(cfg.targetDevice, cfg.targetLedIndex, L"Breath");
+        if (outputApplied && result == MLAPI_OK) *outputApplied = true;
         if (result == MLAPI_OK) {
             result = SdkSetColor(cfg.targetDevice, cfg.targetLedIndex, 255, 255, 255);
+            if (outputApplied && result == MLAPI_OK) *outputApplied = true;
         }
         return result;
     }
 
     int result = SdkSetStyle(cfg.targetDevice, cfg.targetLedIndex, L"Steady");
+    if (outputApplied && result == MLAPI_OK) *outputApplied = true;
     if (result == MLAPI_OK) {
         DWORD probeR = lastR.load();
         DWORD probeG = lastG.load();
@@ -3646,11 +3786,14 @@ static int ProbeSdkOutput(const Config& cfg) {
             probeB = GetBValue(cfg.colorLow);
         }
         result = SdkSetColor(cfg.targetDevice, cfg.targetLedIndex, probeR, probeG, probeB);
+        if (outputApplied && result == MLAPI_OK) *outputApplied = true;
     }
     return result;
 }
 
-static bool StartAndValidateSdk(const Config& cfg, bool validateOutput) {
+static bool StartAndValidateSdk(const Config& cfg, bool validateOutput,
+    bool* outputApplied = nullptr) {
+    if (outputApplied) *outputApplied = false;
     if (!StartSdkHost()) return false;
 
     SdkIpcRequest request = {};
@@ -3677,7 +3820,7 @@ static bool StartAndValidateSdk(const Config& cfg, bool validateOutput) {
 
     PublishHardwareSnapshot(*response);
     if (validateOutput) {
-        result = ProbeSdkOutput(cfg);
+        result = ProbeSdkOutput(cfg, outputApplied);
         if (result != MLAPI_OK) {
             LogSDKError("SDK output validation", result);
             TerminateSdkHost("output validation failed");
@@ -3877,7 +4020,23 @@ static void EngineThread(HWND hWnd) {
         startupConfig = g_cfg;
     }
 
-    bool sdkReady = StartAndValidateSdk(startupConfig, startupConfig.controlMsi);
+    bool msiControlledSinceRelease = false;
+    std::wstring msiControlledDevice;
+    DWORD msiControlledLedIndex = 0;
+    ULONGLONG msiNextReleaseAttempt = 0;
+    bool msiReleaseFallbackLogged = false;
+    auto markMsiControlled = [&](const Config& config) {
+        msiControlledSinceRelease = true;
+        msiControlledDevice = config.targetDevice;
+        msiControlledLedIndex = static_cast<DWORD>(config.targetLedIndex);
+        msiNextReleaseAttempt = 0;
+        msiReleaseFallbackLogged = false;
+    };
+
+    bool startupOutputApplied = false;
+    bool sdkReady = StartAndValidateSdk(startupConfig, startupConfig.controlMsi,
+        &startupOutputApplied);
+    if (startupOutputApplied) markMsiControlled(startupConfig);
     if (sdkReady) {
         g_sdkFailCount = 0;
         g_sdkSuccessStreak = 0;
@@ -3903,12 +4062,14 @@ static void EngineThread(HWND hWnd) {
         int configVersion;
         int ledRefreshFPS;
         float smoothingFactor;
+        ReleaseEffect msiReleaseEffect;
         {
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
             cfgLocal = g_cfg;
             configVersion = g_ConfigVersion.load();
             ledRefreshFPS = g_Global.ledRefreshFPS;
             smoothingFactor = g_Global.smoothingFactor;
+            msiReleaseEffect = g_Global.msiReleaseEffect;
         }
 
         if (configVersion != lastProcessedVersion) {
@@ -3950,7 +4111,19 @@ static void EngineThread(HWND hWnd) {
                     Log("[SDK Supervisor] Connecting isolated SDK host...");
                     PostMessage(hWnd, WM_APP_STATUS, 2, 0);
 
-                    if (StartAndValidateSdk(cfgLocal, cfgLocal.controlMsi)) {
+                    const bool sameControlledTarget = msiControlledSinceRelease &&
+                        cfgLocal.controlMsi && msiControlledDevice == cfgLocal.targetDevice &&
+                        msiControlledLedIndex == static_cast<DWORD>(cfgLocal.targetLedIndex);
+                    // If a different old target still needs releasing, reconnect
+                    // without writing the new one first. The normal loop releases
+                    // the old target before it starts controlling the new target.
+                    const bool validateOutput = cfgLocal.controlMsi &&
+                        (!msiControlledSinceRelease || sameControlledTarget);
+                    bool recoveryOutputApplied = false;
+                    const bool recoveryReady = StartAndValidateSdk(
+                        cfgLocal, validateOutput, &recoveryOutputApplied);
+                    if (recoveryOutputApplied) markMsiControlled(cfgLocal);
+                    if (recoveryReady) {
                         sdkReady = true;
                         g_Resetting_sdk = false;
                         g_resetCounter = 0;
@@ -3986,6 +4159,50 @@ static void EngineThread(HWND hWnd) {
             continue;
         }
 
+        const bool controlledTargetStillSelected = cfgLocal.controlMsi &&
+            msiControlledDevice == cfgLocal.targetDevice &&
+            msiControlledLedIndex == static_cast<DWORD>(cfgLocal.targetLedIndex);
+        if (msiControlledSinceRelease && !controlledTargetStillSelected) {
+            if (currentTime >= msiNextReleaseAttempt) {
+                std::wstring releaseStyle = L"Off";
+                if (msiReleaseEffect == ReleaseEffect::Animated) {
+                    releaseStyle = FindMsiAnimatedReleaseStyle(
+                        msiControlledDevice, msiControlledLedIndex);
+                    if (releaseStyle.empty()) {
+                        releaseStyle = L"Off";
+                        if (!msiReleaseFallbackLogged) {
+                            Log("[MysticFight] MSI target exposes no Rainbow/Color Shift style; releasing to Off.");
+                            msiReleaseFallbackLogged = true;
+                        }
+                    }
+                }
+
+                const bool released = SafeSDKCall(SdkSetStyle(msiControlledDevice.c_str(),
+                    msiControlledLedIndex, releaseStyle.c_str()), "SetLedStyle (MSI release)");
+                if (released) {
+                    char message[256] = {};
+                    snprintf(message, sizeof(message),
+                        "[MysticFight] MSI target released with style %ls", releaseStyle.c_str());
+                    Log(message);
+                    msiControlledSinceRelease = false;
+                    msiControlledDevice.clear();
+                    msiNextReleaseAttempt = 0;
+                    forceLEDRefresh();
+                    g_pendingStyleChange = true;
+                }
+                else {
+                    msiNextReleaseAttempt = GetTickCount64() + 5000;
+                }
+            }
+
+            // Never overwrite ownership with a new target until the previous
+            // one has either been released or recovery has re-established IPC.
+            if (msiControlledSinceRelease) {
+                EngineWait(250);
+                continue;
+            }
+        }
+
         // Per-profile output ownership: keep MSI enumeration/health available
         // for Settings, but issue no lighting command while MSI control is off.
         if (!cfgLocal.controlMsi) {
@@ -4017,6 +4234,7 @@ static void EngineThread(HWND hWnd) {
                 else if (SafeSDKCall(
                     SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Off"),
                     "SetLedStyle (Off)")) {
+                    markMsiControlled(cfgLocal);
                     lastR = RGB_LEDS_OFF;
                     if (!AcknowledgeLedRequest(lastAcknowledgedGeneration, request)) {
                         g_pendingStyleChange = true;
@@ -4037,10 +4255,12 @@ static void EngineThread(HWND hWnd) {
                     bool applied = SafeSDKCall(
                         SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Breath"),
                         "SetLedStyle (Search)");
+                    if (applied) markMsiControlled(cfgLocal);
                     if (applied) {
                         applied = SafeSDKCall(
                             SdkSetColor(cfgLocal.targetDevice, cfgLocal.targetLedIndex, 255, 255, 255),
                             "SetLedColor (Search)");
+                        if (applied) markMsiControlled(cfgLocal);
                     }
                     if (applied) {
                         lastR = RGB_LED_REFRESH;
@@ -4091,11 +4311,13 @@ static void EngineThread(HWND hWnd) {
                             applied = SafeSDKCall(
                                 SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Steady"),
                                 "SetLedStyle (Steady)");
+                            if (applied) markMsiControlled(cfgLocal);
                         }
                         if (applied) {
                             applied = SafeSDKCall(
                                 SdkSetColor(cfgLocal.targetDevice, cfgLocal.targetLedIndex, sendR, sendG, sendB),
                                 "SetLedColor");
+                            if (applied) markMsiControlled(cfgLocal);
                         }
                         if (applied) {
                             lastR = sendR; lastG = sendG; lastB = sendB;
@@ -4138,18 +4360,24 @@ static void EngineThread(HWND hWnd) {
         EngineWait(waitTime);
     }
 
-    if (sdkReady && g_hSdkHostProcess) {
-        Config cfgLocal;
+    if (sdkReady && g_hSdkHostProcess && msiControlledSinceRelease &&
+        !g_windows_shutdown.load()) {
+        ReleaseEffect releaseEffect;
         {
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-            cfgLocal = g_cfg;
+            releaseEffect = g_Global.msiReleaseEffect;
         }
-        if (cfgLocal.controlMsi) {
-            int result = SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex,
-                L"Off", SDK_SHUTDOWN_TIMEOUT_MS);
-            if (result == MLAPI_OK) Log("[MysticFight] LEDs power off");
-            else LogSDKError("SetLedStyle (Cleanup)", result);
+
+        std::wstring releaseStyle = L"Off";
+        if (releaseEffect == ReleaseEffect::Animated) {
+            releaseStyle = FindMsiAnimatedReleaseStyle(msiControlledDevice,
+                msiControlledLedIndex);
+            if (releaseStyle.empty()) releaseStyle = L"Off";
         }
+        const int result = SdkSetStyle(msiControlledDevice.c_str(),
+            msiControlledLedIndex, releaseStyle.c_str(), SDK_SHUTDOWN_TIMEOUT_MS);
+        if (result == MLAPI_OK) Log("[MysticFight] MSI target released on exit");
+        else LogSDKError("SetLedStyle (MSI release on exit)", result);
     }
     ShutdownSdkHost();
 
@@ -4214,8 +4442,8 @@ struct RazerDeviceRuntime {
     RazerOrnataController::DetectedDevice device;
     RazerOrnataController controller;
     bool present = false;
-    bool controlledSinceRestore = false;
-    bool restoreAttempted = false;
+    bool controlledSinceRelease = false;
+    ULONGLONG nextReleaseAttempt = 0;
     ULONGLONG nextOpenAttempt = 0;
 };
 
@@ -4243,36 +4471,47 @@ static std::set<std::wstring> SelectedRazerDeviceKeys(const Config& config,
     return selected;
 }
 
-static bool RestoreRazerSpectrum(RazerDeviceRuntime& runtime, const bool forceRetry) {
-    if (!runtime.controlledSinceRestore || g_windows_shutdown.load() || !runtime.present) {
+static bool ApplyRazerReleaseEffect(RazerDeviceRuntime& runtime,
+    const ReleaseEffect effect, const bool forceRetry) {
+    if (!runtime.controlledSinceRelease || g_windows_shutdown.load() || !runtime.present) {
         runtime.controller.Close();
-        return !runtime.controlledSinceRestore;
+        return !runtime.controlledSinceRelease;
     }
-    if (runtime.restoreAttempted && !forceRetry) {
+    const ULONGLONG now = GetTickCount64();
+    if (!forceRetry && now < runtime.nextReleaseAttempt) {
         runtime.controller.Close();
         return false;
     }
-    runtime.restoreAttempted = true;
+    runtime.nextReleaseAttempt = now + 5000;
 
     if (!runtime.controller.IsOpen() && !runtime.controller.Open(runtime.device)) {
         char message[512] = {};
         snprintf(message, sizeof(message),
-            "[Razer HID] Could not reopen %ls to restore Spectrum: %ls",
+            "[Razer HID] Could not reopen %ls to apply release effect: %ls",
             runtime.device.productName.c_str(), runtime.controller.LastError().c_str());
         Log(message);
         return false;
     }
-    if (!runtime.controller.SetSpectrumCycling()) {
+    const bool released = effect == ReleaseEffect::Animated
+        ? runtime.controller.SetSpectrumCycling()
+        : runtime.controller.SetLightsOff();
+    if (!released) {
         char message[512] = {};
         snprintf(message, sizeof(message),
-            "[Razer HID] Could not restore Spectrum on %ls: %ls",
+            "[Razer HID] Could not apply release effect on %ls: %ls",
             runtime.device.productName.c_str(), runtime.controller.LastError().c_str());
         Log(message);
         runtime.controller.Close();
         return false;
     }
 
-    runtime.controlledSinceRestore = false;
+    runtime.controlledSinceRelease = false;
+    runtime.nextReleaseAttempt = 0;
+    char message[256] = {};
+    snprintf(message, sizeof(message), "[Razer HID] Released %ls with %s",
+        runtime.device.productName.c_str(),
+        effect == ReleaseEffect::Animated ? "Spectrum Cycling" : "lights off");
+    Log(message);
     runtime.controller.Close();
     return true;
 }
@@ -4302,6 +4541,7 @@ static void RazerThread(HWND hWnd) {
     int lastConfigVersion = -1;
     int refreshFPS = DEF_RAZER_REFRESH_FPS;
     float smoothingFactor = DEF_SMOOTHING_FACTOR;
+    ReleaseEffect releaseEffect = DEF_RAZER_RELEASE_EFFECT;
     bool previousLightsEnabled = g_LedsEnabled.load();
     bool firstFrame = true;
     float currentRed = 0.0f, currentGreen = 0.0f, currentBlue = 0.0f;
@@ -4319,6 +4559,7 @@ static void RazerThread(HWND hWnd) {
             config = g_cfg;
             refreshFPS = g_Global.razerRefreshFPS;
             smoothingFactor = g_Global.smoothingFactor;
+            releaseEffect = g_Global.razerReleaseEffect;
             lastConfigVersion = configVersion;
             lastTemperature = -1.0f;
             firstFrame = true;
@@ -4360,7 +4601,9 @@ static void RazerThread(HWND hWnd) {
                 runtime->controller.Close();
             }
             else if (!selected) {
-                if (runtime->controlledSinceRestore) RestoreRazerSpectrum(*runtime, false);
+                if (runtime->controlledSinceRelease) {
+                    ApplyRazerReleaseEffect(*runtime, releaseEffect, false);
+                }
                 else runtime->controller.Close();
             }
         }
@@ -4420,8 +4663,8 @@ static void RazerThread(HWND hWnd) {
                     continue;
                 }
 
-                runtime.controlledSinceRestore = true;
-                runtime.restoreAttempted = false;
+                runtime.controlledSinceRelease = true;
+                runtime.nextReleaseAttempt = 0;
                 anyApplied = true;
             }
             return std::make_pair(anyApplied, allApplied);
@@ -4492,7 +4735,9 @@ static void RazerThread(HWND hWnd) {
 
     if (!g_windows_shutdown.load()) {
         for (auto& [key, runtime] : runtimes) {
-            if (runtime->controlledSinceRestore) RestoreRazerSpectrum(*runtime, true);
+            if (runtime->controlledSinceRelease) {
+                ApplyRazerReleaseEffect(*runtime, releaseEffect, true);
+            }
         }
     }
     for (auto& [key, runtime] : runtimes) runtime->controller.Close();

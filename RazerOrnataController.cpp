@@ -81,6 +81,19 @@ constexpr ControlReport BuildSpectrumEffectReport() {
     return spectrum;
 }
 
+constexpr ControlReport BuildLightsOffEffectReport() {
+    ControlReport off = {};
+    off[1] = kTransactionId;
+    off[5] = 0x06;
+    off[6] = 0x0F;
+    off[7] = 0x02;
+    off[8] = 0x01; // VARSTORE: persist the released standalone state
+    off[9] = 0x00; // ZERO_LED
+    off[10] = 0x00; // OpenRazer extended-matrix NONE effect
+    FinalizeControlReport(off);
+    return off;
+}
+
 constexpr std::array<RazerOrnataController::Rgb, RazerOrnataController::kZoneCount>
     kBlackProtocolTest = {};
 constexpr ControlReport kBlackV3FrameProtocolTest =
@@ -88,6 +101,7 @@ constexpr ControlReport kBlackV3FrameProtocolTest =
 constexpr ControlReport kBlackV3XFrameProtocolTest = BuildCustomFrameReport(kBlackProtocolTest, 1);
 constexpr ControlReport kCustomEffectProtocolTest = BuildCustomEffectReport();
 constexpr ControlReport kSpectrumEffectProtocolTest = BuildSpectrumEffectReport();
+constexpr ControlReport kLightsOffEffectProtocolTest = BuildLightsOffEffectReport();
 static_assert(kReportSize == 90 && kFeatureReportSize == 91);
 static_assert(kBlackV3FrameProtocolTest[5] == 0x47 &&
     kBlackV3FrameProtocolTest[10] == 0 && kBlackV3FrameProtocolTest[12] == 9 &&
@@ -100,6 +114,9 @@ static_assert(kCustomEffectProtocolTest[5] == 0x0C &&
 static_assert(kSpectrumEffectProtocolTest[5] == 0x06 &&
     kSpectrumEffectProtocolTest[8] == 0x01 && kSpectrumEffectProtocolTest[10] == 0x03 &&
     kSpectrumEffectProtocolTest[88] == 0x09);
+static_assert(kLightsOffEffectProtocolTest[5] == 0x06 &&
+    kLightsOffEffectProtocolTest[8] == 0x01 && kLightsOffEffectProtocolTest[10] == 0x00 &&
+    kLightsOffEffectProtocolTest[88] == 0x0A);
 
 bool IsSupportedProduct(const USHORT productId) {
     return productId == RazerOrnataController::kProductIdOrnataV3 ||
@@ -426,6 +443,18 @@ bool RazerOrnataController::SetSpectrumCycling() {
     return true;
 }
 
+bool RazerOrnataController::SetLightsOff() {
+    if (!IsOpen()) {
+        lastError_ = L"Razer HID handle is not open";
+        return false;
+    }
+    auto off = BuildLightsOffEffectReport();
+    if (!SendReport(off)) return false;
+    customEffectActive_ = false;
+    haveLastFrame_ = false;
+    return true;
+}
+
 bool RazerOrnataController::IsWhitelistedReport(
     const std::array<std::uint8_t, kReportSize>& report) const {
     if (report[0] != 0 || report[1] != kTransactionId || report[2] != 0 ||
@@ -456,7 +485,8 @@ bool RazerOrnataController::IsWhitelistedReport(
     }
 
     if (report[5] == 0x06 && report[6] == 0x0F && report[7] == 0x02) {
-        if (report[8] != 0x01 || report[9] != 0 || report[10] != 0x03) return false;
+        if (report[8] != 0x01 || report[9] != 0 ||
+            (report[10] != 0x00 && report[10] != 0x03)) return false;
         for (std::size_t i = 11; i <= 87; ++i) {
             if (report[i] != 0) return false;
         }

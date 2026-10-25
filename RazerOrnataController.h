@@ -56,10 +56,12 @@ public:
     bool IsOpen() const;
 
     // Temperature output uses only OpenRazer's volatile custom-frame commands.
-    // Spectrum Cycling is the sole persistent write and exists only to restore
-    // the device's standalone effect when MysticFight relinquishes control.
+    // Persistent writes are limited to the two documented release states used
+    // when MysticFight relinquishes a device it actually controlled.
     bool SetUniformColor(std::uint8_t red, std::uint8_t green, std::uint8_t blue);
     bool SetZoneColors(const std::array<Rgb, kZoneCount>& colors);
+    // Explicitly applies the documented persistent NONE (lights off) effect.
+    bool SetLightsOff();
     // Explicitly restores the documented persistent Spectrum Cycling effect.
     bool SetSpectrumCycling();
 
