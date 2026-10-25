@@ -1786,8 +1786,14 @@ static std::wstring LowercaseCopy(std::wstring value) {
 
 static int AnimatedMsiStyleScore(const std::wstring& style) {
     const std::wstring lower = LowercaseCopy(style);
-    if (lower == L"rainbow") return 400;
-    if (lower.find(L"rainbow") != std::wstring::npos) return 300;
+    if (lower == L"rainbow") return 600;
+    if (lower.find(L"rainbow") != std::wstring::npos) return 500;
+    // MSI motherboard profiles commonly expose the spectrum-like autonomous
+    // effect as ColorCycle rather than Rainbow. Preserve the exact spelling
+    // returned by MLAPI_GetLedInfo when sending it back to the SDK.
+    if (lower == L"color cycle" || lower == L"colorcycle") return 400;
+    if (lower.find(L"color cycle") != std::wstring::npos ||
+        lower.find(L"colorcycle") != std::wstring::npos) return 300;
     if (lower == L"color shift" || lower == L"colorshift") return 200;
     if (lower.find(L"color shift") != std::wstring::npos ||
         lower.find(L"colorshift") != std::wstring::npos) return 100;
@@ -1805,7 +1811,11 @@ static std::wstring SelectAnimatedMsiStyle(SAFEARRAY* styles) {
     }
 
     VARTYPE type = VT_EMPTY;
-    if (FAILED(SafeArrayGetVartype(styles, &type))) return {};
+    if (FAILED(SafeArrayGetVartype(styles, &type))) type = VT_EMPTY;
+    type = static_cast<VARTYPE>(type & VT_TYPEMASK);
+    // Some COM producers omit the explicit vartype while still tagging the
+    // SAFEARRAY as BSTR. Accept that standard descriptor form as well.
+    if (type == VT_EMPTY && (styles->fFeatures & FADF_BSTR) != 0) type = VT_BSTR;
 
     std::wstring selected;
     int selectedScore = 0;
@@ -3740,6 +3750,17 @@ static void PublishHardwareSnapshot(const SdkIpcResponse& response) {
             response.devices[i].friendly, response.devices[i].type,
             response.devices[i].areaCount);
         Log(deviceMessage);
+        const DWORD loggedAreaCount = min(response.devices[i].areaCount, SDK_IPC_MAX_AREAS);
+        for (DWORD j = 0; j < loggedAreaCount; ++j) {
+            char areaMessage[LOG_BUFFER_SIZE];
+            const wchar_t* style = response.devices[i].areas[j].animatedReleaseStyle[0] == L'\0'
+                ? L"<none; will fall back to Off>"
+                : response.devices[i].areas[j].animatedReleaseStyle;
+            snprintf(areaMessage, sizeof(areaMessage),
+                "[SDK Supervisor] Area %lu release animation candidate: %ls",
+                response.devices[i].areas[j].index, style);
+            Log(areaMessage);
+        }
     }
 }
 
@@ -4171,7 +4192,7 @@ static void EngineThread(HWND hWnd) {
                     if (releaseStyle.empty()) {
                         releaseStyle = L"Off";
                         if (!msiReleaseFallbackLogged) {
-                            Log("[MysticFight] MSI target exposes no Rainbow/Color Shift style; releasing to Off.");
+                            Log("[MysticFight] MSI target exposes no Rainbow/ColorCycle/Color Shift style; releasing to Off.");
                             msiReleaseFallbackLogged = true;
                         }
                     }
@@ -4372,11 +4393,20 @@ static void EngineThread(HWND hWnd) {
         if (releaseEffect == ReleaseEffect::Animated) {
             releaseStyle = FindMsiAnimatedReleaseStyle(msiControlledDevice,
                 msiControlledLedIndex);
-            if (releaseStyle.empty()) releaseStyle = L"Off";
+            if (releaseStyle.empty()) {
+                releaseStyle = L"Off";
+                Log("[MysticFight] MSI target exposes no Rainbow/ColorCycle/Color Shift style; releasing to Off.");
+            }
         }
         const int result = SdkSetStyle(msiControlledDevice.c_str(),
             msiControlledLedIndex, releaseStyle.c_str(), SDK_SHUTDOWN_TIMEOUT_MS);
-        if (result == MLAPI_OK) Log("[MysticFight] MSI target released on exit");
+        if (result == MLAPI_OK) {
+            char message[256] = {};
+            snprintf(message, sizeof(message),
+                "[MysticFight] MSI target released on exit with style %ls",
+                releaseStyle.c_str());
+            Log(message);
+        }
         else LogSDKError("SetLedStyle (MSI release on exit)", result);
     }
     ShutdownSdkHost();
