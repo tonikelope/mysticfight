@@ -198,7 +198,6 @@ std::vector<Candidate> EnumerateCandidates(std::wstring& error) {
 
         if (!attributesOk || attributes.VendorID != RazerOrnataController::kVendorId ||
             !IsSupportedProduct(attributes.ProductID) || !capsOk ||
-            !IsPreferredInterface(path, attributes.ProductID) ||
             caps.FeatureReportByteLength != kFeatureReportSize) {
             continue;
         }
@@ -212,6 +211,16 @@ std::vector<Candidate> EnumerateCandidates(std::wstring& error) {
     }
 
     SetupDiDestroyDeviceInfoList(deviceInfo);
+    // Match openrazer-win's Windows selection rule: a 91-byte feature report
+    // identifies a usable Razer control collection. The upstream USB interface
+    // index is only a preference because Windows can expose that feature report
+    // on a different MI_XX collection (observed on Ornata V3 X PID 0x02A2).
+    std::stable_sort(candidates.begin(), candidates.end(),
+        [](const Candidate& left, const Candidate& right) {
+            const bool leftPreferred = IsPreferredInterface(left.path, left.productId);
+            const bool rightPreferred = IsPreferredInterface(right.path, right.productId);
+            return leftPreferred && !rightPreferred;
+        });
     return candidates;
 }
 
@@ -251,8 +260,7 @@ RazerOrnataController::DetectionResult RazerOrnataController::Detect() {
 bool RazerOrnataController::Open(const DetectionResult& detection) {
     Close();
     if (!detection.detected || !IsSupportedProduct(detection.productId) ||
-        detection.devicePath.empty() ||
-        !IsPreferredInterface(detection.devicePath, detection.productId)) {
+        detection.devicePath.empty()) {
         lastError_ = L"Rejected unverified Razer HID identity";
         return false;
     }

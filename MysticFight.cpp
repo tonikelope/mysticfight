@@ -4153,7 +4153,7 @@ static void PublishRazerDetection(HWND hWnd,
     if (detection.detected) {
         char message[192] = {};
         snprintf(message, sizeof(message),
-            "[Razer HID] Detected Ornata family VID=1532 PID=%04X on verified model-specific feature interface (read-only scan)",
+            "[Razer HID] Detected Ornata family VID=1532 PID=%04X on verified 91-byte feature interface (read-only scan)",
             detection.productId);
         Log(message);
     }

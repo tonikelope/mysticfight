@@ -16,16 +16,16 @@ Primary references:
 - Product ID `0x02A2`: `RazerOrnataV3X_Alternate` in current OpenRazer.
 - Both V3 variants declare a `1 x 10` lighting matrix; both V3 X variants
   declare a single-zone `1 x 1` matrix.
-- The V3 recipes address keyboard interface index 2; the V3 X recipes use
-  interface index 1. Both use a nominal 600 us wait.
-- On Windows, the corresponding interface is selected by `&mi_02` or `&mi_01`
-  in the HID device path and
-  must expose a 91-byte feature buffer: one report-ID byte followed by the
-  90-byte Razer control report.
+- OpenRazer's Linux transport recipes address interface index 2 for V3 and
+  interface index 1 for V3 X. Both use a nominal 600 us wait.
+- Windows can expose the 91-byte feature-report collection on a different
+  `MI_XX` path. In particular, the tested PID `0x02A2` exposes no feature
+  reports on `MI_01` and exposes its 91-byte control report on `MI_02`.
+- Matching openrazer-win, MysticFight therefore treats VID, whitelisted PID and
+  feature length 91 as authoritative. The upstream interface index is only a
+  preference if more than one qualifying collection exists.
 
-MysticFight requires all four checks (VID, whitelisted PID, the model-specific
-interface, and feature length 91). Detection opens only a zero-access inspection
-handle and sends no feature report.
+Detection opens only zero-access inspection handles and sends no feature report.
 
 ## 90-byte control report
 
