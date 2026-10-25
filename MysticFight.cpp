@@ -169,7 +169,7 @@ enum StrId {
     STR_TAB_SHORTCUTS, STR_TAB_ADVANCED,
     // Profile layer
     STR_LBL_PROFILE_NAME, STR_CHK_ACTIVE, STR_GRP_MSI, STR_CHK_CONTROL_MSI,
-    STR_LBL_DEVICE, STR_LBL_AREA, STR_GRP_RAZER, STR_RAZER_UNSUPPORTED,
+    STR_LBL_DEVICE, STR_LBL_AREA, STR_GRP_RAZER,
     STR_GRP_SOURCE,
     STR_GRP_THRESHOLDS, STR_LBL_LOW, STR_LBL_MED, STR_LBL_HIGH, STR_LBL_COLOR_HEX,
     STR_BTN_RESET_DEFAULTS,
@@ -209,7 +209,7 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
     {
         L"Shortcuts", L"Advanced",
         L"Profile Label:", L"Set as Active Profile", L"MSI Hardware Control", L"Control MSI motherboard",
-        L"Device:", L"Area:", L"Razer devices", L" (detected; control unavailable)",
+        L"Device:", L"Area:", L"Razer devices",
         L"Data Source",
         L"Temperature Thresholds and Colors", L"LOW:", L"MEDIUM:", L"HIGH:", L"Color (hex):",
         L"Reset Defaults",
@@ -234,7 +234,7 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
     {
         L"Atajos", L"Avanzado",
         L"Etiqueta del perfil:", L"Establecer como perfil activo", L"Control de hardware MSI", L"Controlar placa base MSI",
-        L"Dispositivo:", L"Área:", L"Dispositivos Razer", L" (detectado; control no disponible)",
+        L"Dispositivo:", L"Área:", L"Dispositivos Razer",
         L"Origen de datos",
         L"Umbrales de temperatura y colores", L"BAJA:", L"MEDIA:", L"ALTA:", L"Color (hex):",
         L"Restaurar valores",
@@ -2695,12 +2695,12 @@ static void UpdateRazerPanelLayout(HWND hDlg) {
             const int ordinal = ++ordinals[identity];
             wchar_t label[512] = {};
             if (totals[identity] > 1) {
-                swprintf_s(label, L"%ls #%d (PID 0x%04X)%ls", device.productName.c_str(),
-                    ordinal, device.productId, device.controllable ? L"" : T(STR_RAZER_UNSUPPORTED));
+                swprintf_s(label, L"%ls #%d (PID 0x%04X)", device.productName.c_str(),
+                    ordinal, device.productId);
             }
             else {
-                swprintf_s(label, L"%ls (PID 0x%04X)%ls", device.productName.c_str(),
-                    device.productId, device.controllable ? L"" : T(STR_RAZER_UNSUPPORTED));
+                swprintf_s(label, L"%ls (PID 0x%04X)", device.productName.c_str(),
+                    device.productId);
             }
 
             const int itemIndex = static_cast<int>(g_razerUiDevices.size());
@@ -2711,7 +2711,7 @@ static void UpdateRazerPanelLayout(HWND hDlg) {
             item.pszText = label;
             item.lParam = itemIndex;
             ListView_InsertItem(list, &item);
-            const bool checked = device.controllable && pendingSelections.contains(device.deviceKey);
+            const bool checked = pendingSelections.contains(device.deviceKey);
             ListView_SetCheckState(list, itemIndex, checked ? TRUE : FALSE);
         }
         g_razerListUpdating = false;
@@ -3047,34 +3047,6 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
     case WM_NOTIFY: {
         LPNMHDR pnm = (LPNMHDR)lParam;
-        if (pnm->idFrom == IDC_LIST_RAZER_DEVICES) {
-            if (pnm->code == LVN_ITEMCHANGING && !g_razerListUpdating) {
-                const auto* change = reinterpret_cast<NMLISTVIEW*>(lParam);
-                if ((change->uChanged & LVIF_STATE) != 0 && change->iItem >= 0 &&
-                    change->iItem < static_cast<int>(g_razerUiDevices.size())) {
-                    const UINT oldCheck = (change->uOldState & LVIS_STATEIMAGEMASK) >> 12;
-                    const UINT newCheck = (change->uNewState & LVIS_STATEIMAGEMASK) >> 12;
-                    if (oldCheck != newCheck && newCheck == 2 &&
-                        !g_razerUiDevices[change->iItem].device.controllable) {
-                        return TRUE;
-                    }
-                }
-            }
-            else if (pnm->code == NM_CUSTOMDRAW) {
-                auto* draw = reinterpret_cast<NMLVCUSTOMDRAW*>(lParam);
-                if (draw->nmcd.dwDrawStage == CDDS_PREPAINT) {
-                    return CDRF_NOTIFYITEMDRAW;
-                }
-                if (draw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
-                    const int item = static_cast<int>(draw->nmcd.dwItemSpec);
-                    if (item >= 0 && item < static_cast<int>(g_razerUiDevices.size()) &&
-                        !g_razerUiDevices[item].device.controllable) {
-                        draw->clrText = GetSysColor(COLOR_GRAYTEXT);
-                    }
-                    return CDRF_DODEFAULT;
-                }
-            }
-        }
         if (pnm->idFrom == IDC_TAB_PROFILES && pnm->code == TCN_SELCHANGE) {
             int newTab = TabCtrl_GetCurSel(pnm->hwndFrom);
 
@@ -4804,11 +4776,9 @@ static void PublishRazerDetection(HWND hWnd,
 
     if (!detection.devices.empty()) {
         char message[192] = {};
-        const std::size_t compatible = std::count_if(detection.devices.begin(), detection.devices.end(),
-            [](const RazerOrnataController::DetectedDevice& device) { return device.controllable; });
         snprintf(message, sizeof(message),
-            "[Razer HID] Read-only inventory: %zu physical device(s), %zu compatible.",
-            detection.devices.size(), compatible);
+            "[Razer HID] Read-only detection: %zu compatible physical device(s).",
+            detection.devices.size());
         Log(message);
     }
     else if (!forcePublish) {

@@ -19,7 +19,7 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * **Customizable Device and LED area:** Choose the one you prefer. <i>Please note that MSI Mystic Light SDK may not recognise all areas available on your device (you will have to wait for MSI to update the public SDK)</i>.
 * **Independent controllers per profile:** Control the MSI motherboard and any individually selected compatible Razer device. New profiles select no Razer device by default.
 * **Native Razer HID support:** Direct Windows HID control with no Synapse, Chroma Runtime, OpenRGB, extra service, or kernel driver. The validated models are Ornata V3, Ornata V3 X, Ornata V3 Tenkeyless and Tartarus Pro (exact PIDs below).
-* **True multi-device Razer control:** Every detected physical Razer HID device is shown by its reported product name and PID, and tracked internally by a stable device key. Profiles can independently select none, one, or several supported devices. Detected models outside the explicit compatibility table remain visible but disabled: MysticFight never guesses that two Razer products share a protocol.
+* **True multi-device Razer control:** Every compatible physical Razer HID device is shown by its reported product name and PID, and tracked internally by a stable device key. Profiles can independently select none, one, or several supported devices. Models outside the explicit compatibility table are omitted from Settings and never receive commands.
 * **Configurable device hand-off:** When a profile stops using an MSI or Razer device (or MysticFight exits normally), Advanced settings can leave it powered off or return it to an autonomous animated effect (an exact MSI SDK-advertised style, or Razer Spectrum Cycling). The default is lights off, and MysticFight never hands off a device it did not successfully control first.
 * **Independent refresh rates:** MSI and every selected, supported Razer device can independently use 15, 20, or 25 FPS while sharing the same thermal color and smoothing engine. The Razer scheduler keeps a separate deadline per device, so a 15 FPS device is not quantized by a 25 FPS device.
 * **Customizable Temperature Sensor:** Choose the one you prefer.
@@ -47,7 +47,9 @@ For this tool to work, you MUST have the following installed/running:
 | Razer Ornata V3 Tenkeyless | `0x02A3` | 8 zones |
 | Razer Tartarus Pro | `0x0244` | 21 zones |
 
-Compatibility means temperature-driven uniform colour plus the configurable Off/Spectrum release behaviour; it does not imply support for every feature exposed by the device. Other Razer models are detected for inventory purposes but are deliberately not written to until their complete command recipe, transport interface and lighting geometry have been validated.
+Compatibility means temperature-driven uniform colour plus the configurable Off/Spectrum release behaviour; it does not imply support for every feature exposed by the device. Other Razer models are deliberately omitted from Settings and are never written to until their complete command recipe, transport interface and lighting geometry have been validated.
+
+This table is the currently implemented and validated scope, not a permanent limitation of MysticFight or Razer hardware. More Razer models can be added through explicit per-PID profiles after their required commands, HID interface, feature-report length and lighting geometry have been verified. Until such a profile exists, the model stays outside the UI and cannot receive commands.
 
 The exact Razer protocol scope and safety decisions are documented in [RAZER_HID_PROTOCOL.md](RAZER_HID_PROTOCOL.md).
 

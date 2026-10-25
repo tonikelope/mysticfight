@@ -15,6 +15,12 @@ Its write path accepts only the devices below, whose four required OpenRazer
 recipes, transaction ID, feature-report size and single-row geometry were
 cross-checked together.
 
+This is the current implementation scope, not a claim that other Razer devices
+cannot be supported. A new model can be added by defining and validating an
+explicit per-PID profile for its commands, transaction ID, HID interface,
+feature-report length and lighting geometry. It remains excluded from Settings
+and from every write path until that validation is complete.
+
 | USB PID | OpenRazer name | Matrix | Preferred HID interface |
 | --- | --- | ---: | ---: |
 | `0x0244` | Razer Tartarus Pro | `1 x 21` | 2 |
@@ -30,9 +36,10 @@ OpenRazer command recipes used by MysticFight. The geometry changes only the
 last column and RGB payload length of the custom row.
 
 Detection opens only zero-access inspection handles and sends no feature report.
-Every physical Razer HID device is deduplicated by its Windows container ID plus
-PID and shown by product name and PID. A Razer model outside the table remains
-visible but cannot be selected. MysticFight does not infer compatibility from a
+Compatible physical devices are deduplicated by their Windows container ID plus
+PID and shown by product name and PID. Models outside the table and supported
+PIDs without the validated 91-byte control collection are omitted from Settings
+and never receive commands. MysticFight does not infer compatibility from a
 product name, vendor ID, report length, or partial recipe match.
 
 The upstream interface index is a preference rather than the sole identity

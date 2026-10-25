@@ -281,8 +281,13 @@ EnumerationResult EnumerateCandidates(std::wstring& error) {
         const bool capsOk = HidD_GetPreparsedData(handle, &preparsed) == TRUE &&
             HidP_GetCaps(preparsed, &caps) == HIDP_STATUS_SUCCESS;
 
+        const bool compatibleInterface = attributesOk &&
+            attributes.VendorID == RazerOrnataController::kVendorId &&
+            IsSupportedProduct(attributes.ProductID) && capsOk &&
+            caps.FeatureReportByteLength == kFeatureReportSize;
+
         wchar_t productBuffer[256] = {};
-        if (attributesOk && attributes.VendorID == RazerOrnataController::kVendorId) {
+        if (compatibleInterface) {
             if (!HidD_GetProductString(handle, productBuffer, sizeof(productBuffer))) {
                 productBuffer[0] = L'\0';
             }
@@ -291,9 +296,9 @@ EnumerationResult EnumerateCandidates(std::wstring& error) {
         if (preparsed) HidD_FreePreparsedData(preparsed);
         CloseHandle(handle);
 
-        if (!attributesOk || attributes.VendorID != RazerOrnataController::kVendorId) {
-            continue;
-        }
+        // Unsupported models and supported PIDs without the validated control
+        // collection are intentionally omitted from the public inventory.
+        if (!compatibleInterface) continue;
 
         std::wstring productName = productBuffer;
         if (productName.empty()) {
@@ -318,11 +323,6 @@ EnumerationResult EnumerateCandidates(std::wstring& error) {
         else if (productBuffer[0] != L'\0' &&
             deviceIt->productName.starts_with(L"Razer device (PID")) {
             deviceIt->productName = productBuffer;
-        }
-
-        if (!IsSupportedProduct(attributes.ProductID) || !capsOk ||
-            caps.FeatureReportByteLength != kFeatureReportSize) {
-            continue;
         }
 
         // A 91-byte feature report is authoritative. The upstream interface is
