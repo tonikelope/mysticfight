@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 class RazerOrnataController {
 public:
@@ -14,12 +15,23 @@ public:
     static constexpr std::uint16_t kProductIdOrnataV3XAlternate = 0x02A2;
     static constexpr std::size_t kZoneCount = 10;
 
+    struct DetectedDevice {
+        std::wstring deviceKey;
+        std::uint16_t productId = 0;
+        std::wstring productName;
+        std::wstring controlPath;
+        bool controllable = false;
+
+        bool operator==(const DetectedDevice&) const = default;
+    };
+
     struct DetectionResult {
         bool detected = false;
         std::uint16_t productId = 0;
         std::wstring productName;
         std::wstring devicePath;
         std::wstring error;
+        std::vector<DetectedDevice> devices;
     };
 
     struct Rgb {
@@ -39,15 +51,17 @@ public:
     // Read-only HID enumeration. This method never sends a feature report.
     static DetectionResult Detect();
 
-    bool Open(const DetectionResult& detection);
+    bool Open(const DetectedDevice& device);
     void Close();
     bool IsOpen() const;
 
-    // The only write operations exposed by this class. Both use OpenRazer's
-    // volatile custom-frame commands; no firmware, bootloader or persistent
-    // storage commands are implemented.
+    // Temperature output uses only OpenRazer's volatile custom-frame commands.
+    // Spectrum Cycling is the sole persistent write and exists only to restore
+    // the device's standalone effect when MysticFight relinquishes control.
     bool SetUniformColor(std::uint8_t red, std::uint8_t green, std::uint8_t blue);
     bool SetZoneColors(const std::array<Rgb, kZoneCount>& colors);
+    // Explicitly restores the documented persistent Spectrum Cycling effect.
+    bool SetSpectrumCycling();
 
     const std::wstring& LastError() const { return lastError_; }
 

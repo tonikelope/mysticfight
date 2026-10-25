@@ -24,6 +24,7 @@
 #include <math.h>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -88,7 +89,6 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define WM_APP_FATAL            (WM_APP + 3)   // wParam: 1=SDK critical, 2=SDK fatal
 #define WM_APP_HWREADY          (WM_APP + 4)   // hardware snapshot (re)built; refresh an open dialog
 #define WM_APP_RAZERREADY       (WM_APP + 5)   // read-only Razer HID detection changed
-#define WM_APP_RAZERTEST        (WM_APP + 6)   // manual one-shot Razer test completed
 #define ID_TRAY_EXIT            1001
 #define ID_TRAY_CONFIG          2001
 #define ID_TRAY_LOG             3001
@@ -132,7 +132,7 @@ const int       SENSOR_ID_LEN = 256;
 // Default Factory Settings
 const int   DEF_SENSOR_UPDATE_MS = 500;
 const int   DEF_LED_REFRESH_FPS = 25;
-const int   DEF_RAZER_REFRESH_FPS = 15;
+const int   DEF_RAZER_REFRESH_FPS = 25;
 const float DEF_SMOOTHING_FACTOR = 0.150f;
 
 const int   DEF_TEMP_LOW = 50;
@@ -164,8 +164,7 @@ enum StrId {
     STR_TAB_SHORTCUTS, STR_TAB_ADVANCED,
     // Profile layer
     STR_LBL_PROFILE_NAME, STR_CHK_ACTIVE, STR_GRP_MSI, STR_CHK_CONTROL_MSI,
-    STR_LBL_DEVICE, STR_LBL_AREA, STR_GRP_RAZER, STR_CHK_CONTROL_RAZER, STR_RAZER_DETECTED,
-    STR_BTN_RAZER_TEST, STR_RAZER_TEST_REQUIRED, STR_RAZER_TEST_RUNNING, STR_RAZER_TEST_PASSED,
+    STR_LBL_DEVICE, STR_LBL_AREA, STR_GRP_RAZER, STR_RAZER_UNSUPPORTED,
     STR_GRP_SOURCE,
     STR_GRP_THRESHOLDS, STR_LBL_LOW, STR_LBL_MED, STR_LBL_HIGH, STR_LBL_COLOR_HEX,
     STR_BTN_RESET_DEFAULTS,
@@ -187,10 +186,7 @@ enum StrId {
     // Notifications
     STR_NOTIF_LIGHTS_ON, STR_NOTIF_LIGHTS_OFF, STR_NOTIF_SWITCHED, STR_NOTIF_LETSDANCE,
     // Message boxes
-    STR_MSG_DUP_HOTKEY, STR_MSG_RAZER_TEST_CONFIRM, STR_MSG_RAZER_TEST_TITLE,
-    STR_MSG_RAZER_TEST_OK, STR_MSG_RAZER_TEST_FAILED,
-    STR_MSG_RAZER_CONSENT, STR_MSG_RAZER_CONSENT_TITLE,
-    STR_MSG_ERROR_TITLE, STR_MSG_ALREADY_RUNNING, STR_MSG_INFO_TITLE,
+    STR_MSG_DUP_HOTKEY, STR_MSG_ERROR_TITLE, STR_MSG_ALREADY_RUNNING, STR_MSG_INFO_TITLE,
     STR_MSG_SDK_CRITICAL, STR_MSG_SDK_FATAL, STR_MSG_UNKNOWN_ERROR, STR_MSG_CRASH_TITLE,
     // Tray tooltip status
     STR_STATUS_RESTARTING, STR_STATUS_CONNECTING, STR_STATUS_INITIALIZING,
@@ -207,12 +203,11 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
     {
         L"Shortcuts", L"Advanced",
         L"Profile Label:", L"Set as Active Profile", L"MSI Hardware Control", L"Control MSI motherboard",
-        L"Device:", L"Area:", L"Razer Keyboard", L"Control Razer Ornata V3", L"Detected: %ls (PID 0x%04X)",
-        L"Test uniform color", L"Safe test required", L"Testing one static color...", L"Safe test passed",
+        L"Device:", L"Area:", L"Razer devices", L" (detected; control unavailable)",
         L"Data Source",
         L"Temperature Thresholds and Colors", L"LOW:", L"MEDIUM:", L"HIGH:", L"Color (hex):",
         L"Reset Defaults",
-        L"Shared Thermal Engine", L"Controller Refresh", L"Sensor Update:", L"MSI motherboard:", L"Razer Ornata V3:", L"Smoothing:",
+        L"Shared Thermal Engine", L"Controller Refresh", L"Sensor Update:", L"MSI motherboard:", L"Razer devices:", L"Smoothing:",
         L"Data Sources", L"LibreHardwareMonitor",
         L"Language", L"Language:",
         L"Global Hotkeys Configuration", L"Toggle ON/OFF:", L"Activate Profile %d:", L"Reset Hotkeys",
@@ -221,28 +216,22 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"LHM Not Found (Port 8085)", L"Unknown Area",
         L"Lights Enabled", L"Active Profile", L"Settings", L"About MysticFight", L"View Debug Log", L"Exit MysticFight",
         L"Lights ON", L"Lights OUT", L"Switched to %ls", L"Let's dance baby",
-        L"Duplicate hotkey detected.",
-        L"This will send exactly one uniform static color (%ls) to the verified Razer Ornata V3, then close the HID handle. It will not start dynamic updates. Continue?",
-        L"Safe Razer test", L"The one-color test succeeded. Dynamic Razer control is now available; enable it and press Save when ready.",
-        L"The one-color test failed. No dynamic control was enabled. Check the debug log.",
-        L"Enabling this option allows MysticFight to send volatile RGB custom-frame commands to the detected Razer Ornata V3. No command will be sent until you press Save. Continue?",
-        L"Enable Razer control", L"Error", L"MysticFight is already running.", L"Information",
+        L"Duplicate hotkey detected.", L"Error", L"MysticFight is already running.", L"Information",
         L"MSI SDK Critical Error. Please check MSI Center installation.", L"MSI SDK Fatal Error. Please reinstall MSI Center.",
         L"An unknown critical error occurred.", L"MysticFight Crash",
         L"Restarting MSI Service...", L"Connecting to SDK...", L"Initializing...",
-        L"By tonikelope", L"Temperature-driven RGB for MSI and Razer Ornata V3", L"Visit GitHub Project", L"Close",
+        L"By tonikelope", L"Temperature-driven RGB for MSI and supported Razer devices", L"Visit GitHub Project", L"Close",
         L"Profile %d",
     },
     // ---- Spanish (LANG_ES) ----
     {
         L"Atajos", L"Avanzado",
         L"Etiqueta del perfil:", L"Establecer como perfil activo", L"Control de hardware MSI", L"Controlar placa base MSI",
-        L"Dispositivo:", L"Área:", L"Teclado Razer", L"Controlar Razer Ornata V3", L"Detectado: %ls (PID 0x%04X)",
-        L"Probar color uniforme", L"Prueba segura requerida", L"Probando un único color estático...", L"Prueba segura superada",
+        L"Dispositivo:", L"Área:", L"Dispositivos Razer", L" (detectado; control no disponible)",
         L"Origen de datos",
         L"Umbrales de temperatura y colores", L"BAJA:", L"MEDIA:", L"ALTA:", L"Color (hex):",
         L"Restaurar valores",
-        L"Motor térmico compartido", L"Refresco de controladoras", L"Actualización sensor:", L"Placa base MSI:", L"Razer Ornata V3:", L"Suavizado:",
+        L"Motor térmico compartido", L"Refresco de controladoras", L"Actualización sensor:", L"Placa base MSI:", L"Dispositivos Razer:", L"Suavizado:",
         L"Orígenes de datos", L"LibreHardwareMonitor",
         L"Idioma", L"Idioma:",
         L"Configuración de atajos globales", L"Activar/Desactivar:", L"Activar perfil %d:", L"Restaurar atajos",
@@ -251,16 +240,11 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"LHM no encontrado (Puerto 8085)", L"Área desconocida",
         L"Luces activadas", L"Perfil activo", L"Ajustes", L"Acerca de MysticFight", L"Ver registro de depuración", L"Salir de MysticFight",
         L"Luces encendidas", L"Luces apagadas", L"Cambiado a %ls", L"A bailar, nena",
-        L"Atajo duplicado detectado.",
-        L"Esto enviará exactamente un color estático uniforme (%ls) al Razer Ornata V3 verificado y después cerrará el handle HID. No iniciará el refresco dinámico. ¿Continuar?",
-        L"Prueba segura de Razer", L"La prueba de un color se completó correctamente. Ya puedes activar el control dinámico de Razer y pulsar Guardar.",
-        L"La prueba de un color ha fallado. No se ha activado el control dinámico. Revisa el registro de depuración.",
-        L"Activar esta opción permite a MysticFight enviar comandos RGB volátiles de fotograma personalizado al Razer Ornata V3 detectado. No se enviará ningún comando hasta que pulses Guardar. ¿Continuar?",
-        L"Activar control Razer", L"Error", L"MysticFight ya se está ejecutando.", L"Información",
+        L"Atajo duplicado detectado.", L"Error", L"MysticFight ya se está ejecutando.", L"Información",
         L"Error crítico del SDK de MSI. Comprueba la instalación de MSI Center.", L"Error fatal del SDK de MSI. Reinstala MSI Center.",
         L"Se ha producido un error crítico desconocido.", L"Fallo de MysticFight",
         L"Reiniciando servicio MSI...", L"Conectando al SDK...", L"Inicializando...",
-        L"Por tonikelope", L"RGB por temperatura para MSI y Razer Ornata V3", L"Visitar proyecto en GitHub", L"Cerrar",
+        L"Por tonikelope", L"RGB por temperatura para MSI y dispositivos Razer compatibles", L"Visitar proyecto en GitHub", L"Cerrar",
         L"Perfil %d",
     },
 };
@@ -312,37 +296,38 @@ enum class DataSource {
 };
 
 struct Config {
-    wchar_t sensorID[SENSOR_ID_LEN];
-    wchar_t targetDevice[256];
-    int targetLedIndex;
-    int tempLow, tempMed, tempHigh;
-    COLORREF colorLow, colorMed, colorHigh;
-    wchar_t webServerUrl[256];
-    wchar_t label[64];
-    bool controlMsi;
-    bool controlRazer;
+    wchar_t sensorID[SENSOR_ID_LEN] = {};
+    wchar_t targetDevice[256] = {};
+    int targetLedIndex = 0;
+    int tempLow = 0, tempMed = 0, tempHigh = 0;
+    COLORREF colorLow = 0, colorMed = 0, colorHigh = 0;
+    wchar_t webServerUrl[256] = {};
+    wchar_t label[64] = {};
+    // Semicolon-separated physical device IDs selected in this profile.
+    std::wstring razerDeviceIds;
+    bool controlMsi = false;
+    bool controlRazer = false;
 };
 
 struct AppHotkeys {
-    WORD toggleLEDs;
-    WORD profile1;
-    WORD profile2;
-    WORD profile3;
-    WORD profile4;
-    WORD profile5;
+    WORD toggleLEDs = 0;
+    WORD profile1 = 0;
+    WORD profile2 = 0;
+    WORD profile3 = 0;
+    WORD profile4 = 0;
+    WORD profile5 = 0;
 };
 
 struct GlobalConfig {
-    Config profiles[5];
-    int activeProfileIndex;
-    AppHotkeys hotkeys;
-    wchar_t lhmServerUrl[256];
+    Config profiles[5] = {};
+    int activeProfileIndex = 0;
+    AppHotkeys hotkeys = {};
+    wchar_t lhmServerUrl[256] = {};
     // Global performance/advanced settings (shared by all profiles)
-    int sensorUpdateMS;
-    int ledRefreshFPS;
-    int razerRefreshFPS;
-    float smoothingFactor;
-    bool razerWriteConsent;
+    int sensorUpdateMS = 0;
+    int ledRefreshFPS = 0;
+    int razerRefreshFPS = 0;
+    float smoothingFactor = 0.0f;
 };
 
 
@@ -488,17 +473,7 @@ std::mutex g_hwMutex;
 RazerOrnataController::DetectionResult g_razerDetection;
 std::mutex g_razerDetectionMutex;
 std::atomic<bool> g_razerDetected{ false };
-
-struct RazerStaticTestRequest {
-    ULONGLONG generation = 0;
-    BYTE red = 0;
-    BYTE green = 0;
-    BYTE blue = 0;
-};
-RazerStaticTestRequest g_razerTestRequest;
-std::mutex g_razerTestMutex;
-std::atomic<bool> g_razerTestInProgress{ false };
-std::atomic<bool> g_razerStaticTestPassed{ false };
+std::atomic<bool> g_razerAnyDetected{ false };
 
 std::atomic<ULONGLONG> g_lastDataSourceSearchRetry{ 0 };
 
@@ -1009,6 +984,18 @@ static float ParseLHMJsonForTemp(const std::string& jsonStr, const wchar_t* sens
 // CONFIGURATION PERSISTENCE (INI)
 // ============================================================================
 
+static std::wstring ReadIniString(const wchar_t* section, const wchar_t* key) {
+    std::vector<wchar_t> buffer(256);
+    for (;;) {
+        const DWORD copied = GetPrivateProfileStringW(section, key, L"", buffer.data(),
+            static_cast<DWORD>(buffer.size()), INI_FILE);
+        if (copied + 1 < buffer.size() || buffer.size() >= 32768) {
+            return std::wstring(buffer.data(), copied);
+        }
+        buffer.resize(buffer.size() * 2);
+    }
+}
+
 static void SaveSettings() {
     std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
 
@@ -1021,8 +1008,10 @@ static void SaveSettings() {
     WritePrivateProfileStringW(L"Global", L"SensorUpdateMS", std::to_wstring(g_Global.sensorUpdateMS).c_str(), INI_FILE);
     WritePrivateProfileStringW(L"Global", L"LedRefreshFPS", std::to_wstring(g_Global.ledRefreshFPS).c_str(), INI_FILE);
     WritePrivateProfileStringW(L"Global", L"RazerRefreshFPS", std::to_wstring(g_Global.razerRefreshFPS).c_str(), INI_FILE);
-    WritePrivateProfileStringW(L"Global", L"RazerStaticTestPassed", g_razerStaticTestPassed.load() ? L"1" : L"0", INI_FILE);
-    WritePrivateProfileStringW(L"Global", L"RazerWriteConsent", g_Global.razerWriteConsent ? L"1" : L"0", INI_FILE);
+    WritePrivateProfileStringW(L"Global", L"RazerSettingsVersion", L"1", INI_FILE);
+    // Remove obsolete safety-gate state left by pre-inventory builds.
+    WritePrivateProfileStringW(L"Global", L"RazerStaticTestPassed", nullptr, INI_FILE);
+    WritePrivateProfileStringW(L"Global", L"RazerWriteConsent", nullptr, INI_FILE);
     {
         wchar_t sfBuf[32]; swprintf_s(sfBuf, L"%.3f", g_Global.smoothingFactor);
         WritePrivateProfileStringW(L"Global", L"SmoothingFactor", sfBuf, INI_FILE);
@@ -1041,6 +1030,7 @@ static void SaveSettings() {
         WritePrivateProfileStringW(section.c_str(), L"TargetLedIndex", std::to_wstring(p.targetLedIndex).c_str(), INI_FILE);
         WritePrivateProfileStringW(section.c_str(), L"ControlMSI", p.controlMsi ? L"1" : L"0", INI_FILE);
         WritePrivateProfileStringW(section.c_str(), L"ControlRazer", p.controlRazer ? L"1" : L"0", INI_FILE);
+        WritePrivateProfileStringW(section.c_str(), L"RazerDeviceIds", p.razerDeviceIds.c_str(), INI_FILE);
 
         WritePrivateProfileStringW(section.c_str(), L"TempLow", std::to_wstring(p.tempLow).c_str(), INI_FILE);
         WritePrivateProfileStringW(section.c_str(), L"TempMed", std::to_wstring(p.tempMed).c_str(), INI_FILE);
@@ -1184,11 +1174,11 @@ static void LoadSettings() {
         GetPrivateProfileIntW(L"Settings", L"SensorUpdateMS", DEF_SENSOR_UPDATE_MS, INI_FILE), INI_FILE);
     g_Global.ledRefreshFPS = GetPrivateProfileIntW(L"Global", L"LedRefreshFPS",
         GetPrivateProfileIntW(L"Settings", L"LedRefreshFPS", DEF_LED_REFRESH_FPS, INI_FILE), INI_FILE);
-    g_Global.razerRefreshFPS = GetPrivateProfileIntW(L"Global", L"RazerRefreshFPS",
-        DEF_RAZER_REFRESH_FPS, INI_FILE);
-    g_razerStaticTestPassed = GetPrivateProfileIntW(
-        L"Global", L"RazerStaticTestPassed", 0, INI_FILE) != 0;
-    g_Global.razerWriteConsent = GetPrivateProfileIntW(L"Global", L"RazerWriteConsent", 0, INI_FILE) != 0;
+    const int razerSettingsVersion = GetPrivateProfileIntW(
+        L"Global", L"RazerSettingsVersion", 0, INI_FILE);
+    g_Global.razerRefreshFPS = razerSettingsVersion < 1
+        ? DEF_RAZER_REFRESH_FPS
+        : GetPrivateProfileIntW(L"Global", L"RazerRefreshFPS", DEF_RAZER_REFRESH_FPS, INI_FILE);
     {
         wchar_t sfOld[32]; GetPrivateProfileStringW(L"Settings", L"SmoothingFactor", L"", sfOld, 32, INI_FILE);
         float defSmooth = (wcslen(sfOld) > 0) ? (float)_wtof(sfOld) : DEF_SMOOTHING_FACTOR;
@@ -1239,10 +1229,11 @@ static void LoadSettings() {
         if (p.targetDevice[0] == L'\0') wcscpy_s(p.targetDevice, DEF_DEVICE_TYPE);
         p.targetLedIndex = GetPrivateProfileIntW(section.c_str(), L"TargetLedIndex", 0, INI_FILE);
         if (p.targetLedIndex < 0) p.targetLedIndex = 0;
-        // Backward compatibility: existing profiles keep their MSI behavior,
-        // while Razer output is opt-in and additionally gated by consent.
+        // Existing explicit Razer selections are migrated when the profile UI
+        // is next saved. New profiles always start with no selected device.
         p.controlMsi = GetPrivateProfileIntW(section.c_str(), L"ControlMSI", 1, INI_FILE) != 0;
         p.controlRazer = GetPrivateProfileIntW(section.c_str(), L"ControlRazer", 0, INI_FILE) != 0;
+        p.razerDeviceIds = ReadIniString(section.c_str(), L"RazerDeviceIds");
 
         wchar_t hL[10], hM[10], hH[10];
         GetPrivateProfileStringW(section.c_str(), L"ColorLow", DEF_COLOR_LOW, hL, 10, INI_FILE);
@@ -1532,6 +1523,71 @@ static void PopulateSensorList(HWND hDlg, const wchar_t* webServerUrl, const wch
 // Forward declarations for UI synchronization
 static void PopulateAreaList(HWND hDlg, const wchar_t* deviceType, int targetLedIndex);
 
+struct RazerUiDevice {
+    RazerOrnataController::DetectedDevice device;
+};
+std::vector<RazerUiDevice> g_razerUiDevices;
+bool g_razerListUpdating = false;
+
+static std::set<std::wstring> ParseRazerDeviceIds(const wchar_t* value) {
+    std::set<std::wstring> result;
+    if (!value || !*value) return result;
+    std::wstring input(value);
+    std::size_t start = 0;
+    while (start <= input.size()) {
+        const std::size_t end = input.find(L';', start);
+        const std::wstring key = input.substr(start,
+            end == std::wstring::npos ? std::wstring::npos : end - start);
+        if (!key.empty()) result.insert(key);
+        if (end == std::wstring::npos) break;
+        start = end + 1;
+    }
+    return result;
+}
+
+static void LoadRazerSelectionsToUI(HWND hDlg, const Config& profile) {
+    HWND list = GetDlgItem(hDlg, IDC_LIST_RAZER_DEVICES);
+    if (!list) return;
+    const auto selected = ParseRazerDeviceIds(profile.razerDeviceIds.c_str());
+    bool migratedLegacySelection = false;
+    g_razerListUpdating = true;
+    for (int i = 0; i < static_cast<int>(g_razerUiDevices.size()); ++i) {
+        const auto& device = g_razerUiDevices[i].device;
+        bool checked = device.controllable && selected.contains(device.deviceKey);
+        // Earlier versions stored one explicit Razer toggle. Preserve that
+        // user's choice for only the first compatible device; a new profile has
+        // controlRazer=false and therefore starts with every row unchecked.
+        if (selected.empty() && profile.controlRazer && device.controllable &&
+            !migratedLegacySelection) {
+            checked = true;
+            migratedLegacySelection = true;
+        }
+        ListView_SetCheckState(list, i, checked ? TRUE : FALSE);
+    }
+    g_razerListUpdating = false;
+}
+
+static void SaveRazerSelectionsFromUI(HWND hDlg, Config& profile) {
+    HWND list = GetDlgItem(hDlg, IDC_LIST_RAZER_DEVICES);
+    if (!list || g_razerUiDevices.empty()) return;
+
+    auto selected = ParseRazerDeviceIds(profile.razerDeviceIds.c_str());
+    for (int i = 0; i < static_cast<int>(g_razerUiDevices.size()); ++i) {
+        const auto& device = g_razerUiDevices[i].device;
+        if (!device.controllable) continue;
+        selected.erase(device.deviceKey);
+        if (ListView_GetCheckState(list, i)) selected.insert(device.deviceKey);
+    }
+
+    std::wstring serialized;
+    for (const auto& key : selected) {
+        if (!serialized.empty()) serialized.push_back(L';');
+        serialized += key;
+    }
+    profile.controlRazer = !serialized.empty();
+    profile.razerDeviceIds = std::move(serialized);
+}
+
 /**
  * Transfers Profile Data into the Settings Dialog controls
  */
@@ -1564,8 +1620,7 @@ static void LoadProfileToUI(HWND hDlg, int profileIndex, int tempActiveIndex) {
     PopulateSensorList(hDlg, p.webServerUrl, p.sensorID);
 
     CheckDlgButton(hDlg, IDC_CHK_CONTROL_MSI, p.controlMsi ? BST_CHECKED : BST_UNCHECKED);
-    CheckDlgButton(hDlg, IDC_CHK_CONTROL_RAZER,
-        p.controlRazer && g_razerStaticTestPassed.load() ? BST_CHECKED : BST_UNCHECKED);
+    LoadRazerSelectionsToUI(hDlg, p);
     CheckDlgButton(hDlg, IDC_CHK_ACTIVE_PROFILE, (profileIndex == tempActiveIndex) ? BST_CHECKED : BST_UNCHECKED);
     InvalidateRect(hDlg, NULL, TRUE);
 }
@@ -1644,8 +1699,7 @@ static void SaveUIToProfile(HWND hDlg, int profileIndex) {
     Config& p = g_Global.profiles[profileIndex];
 
     p.controlMsi = IsDlgButtonChecked(hDlg, IDC_CHK_CONTROL_MSI) == BST_CHECKED;
-    p.controlRazer = g_razerStaticTestPassed.load() &&
-        IsDlgButtonChecked(hDlg, IDC_CHK_CONTROL_RAZER) == BST_CHECKED;
+    SaveRazerSelectionsFromUI(hDlg, p);
 
     p.tempLow = GetDlgItemInt(hDlg, IDC_TEMP_LOW, NULL, TRUE);
     p.tempMed = GetDlgItemInt(hDlg, IDC_TEMP_MED, NULL, TRUE);
@@ -2193,13 +2247,13 @@ static void MoveDialogControlY(HWND hDlg, int controlId, int deltaY) {
         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-// The dialog resource contains the expanded profile layout. When no verified
-// Ornata V3 is present, remove the keyboard row and its space entirely.
+// The dialog resource contains a fixed-height Razer subpanel. The ListView owns
+// its vertical scrollbar, so detecting many devices never grows Settings.
 static void UpdateRazerPanelLayout(HWND hDlg) {
-    const bool detected = g_razerDetected.load();
+    const bool anyDetected = g_razerAnyDetected.load();
     HWND tab = GetDlgItem(hDlg, IDC_TAB_PROFILES);
     const bool profileLayer = !tab || LayerForTab(TabCtrl_GetCurSel(tab)) == LAYER_PROFILE;
-    const bool shouldExpand = detected && profileLayer;
+    const bool shouldExpand = anyDetected && profileLayer;
     const bool expanded = GetPropW(hDlg, L"MysticFight.RazerExpanded") != nullptr;
     if (shouldExpand != expanded) {
         SendMessageW(hDlg, WM_SETREDRAW, FALSE, 0);
@@ -2232,38 +2286,82 @@ static void UpdateRazerPanelLayout(HWND hDlg) {
             RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
     }
 
-    wchar_t detectedText[160] = {};
-    unsigned int productId = 0;
-    std::wstring productName;
+    const bool initializeSelectionsFromProfile = g_razerUiDevices.empty() &&
+        profileLayer && tab && TabCtrl_GetCurSel(tab) >= 0 && TabCtrl_GetCurSel(tab) < 5;
+    std::set<std::wstring> pendingSelections;
+    HWND list = GetDlgItem(hDlg, IDC_LIST_RAZER_DEVICES);
+    if (list) {
+        for (int i = 0; i < static_cast<int>(g_razerUiDevices.size()); ++i) {
+            if (ListView_GetCheckState(list, i)) {
+                pendingSelections.insert(g_razerUiDevices[i].device.deviceKey);
+            }
+        }
+    }
+
+    std::vector<RazerOrnataController::DetectedDevice> devices;
     {
         std::lock_guard<std::mutex> lock(g_razerDetectionMutex);
-        productId = g_razerDetection.productId;
-        productName = g_razerDetection.productName;
+        devices = g_razerDetection.devices;
     }
-    swprintf_s(detectedText, T(STR_RAZER_DETECTED), productName.c_str(), productId);
-    SetDlgItemTextW(hDlg, IDC_LBL_RAZER_DEVICE, detectedText);
 
-    const bool testPassed = g_razerStaticTestPassed.load();
-    const bool testRunning = g_razerTestInProgress.load();
-    SetDlgItemTextW(hDlg, IDC_LBL_RAZER_TEST,
-        testRunning ? T(STR_RAZER_TEST_RUNNING) :
-        (testPassed ? T(STR_RAZER_TEST_PASSED) : T(STR_RAZER_TEST_REQUIRED)));
+    if (list) {
+        g_razerListUpdating = true;
+        ListView_DeleteAllItems(list);
+        while (ListView_DeleteColumn(list, 0)) {}
+        LVCOLUMNW column = {};
+        column.mask = LVCF_WIDTH;
+        RECT client = {};
+        GetClientRect(list, &client);
+        column.cx = (std::max)(80L,
+            client.right - client.left - GetSystemMetrics(SM_CXVSCROLL) - 4);
+        ListView_InsertColumn(list, 0, &column);
+        constexpr DWORD listStyles = LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT |
+            LVS_EX_DOUBLEBUFFER | LVS_EX_INFOTIP | LVS_EX_LABELTIP;
+        ListView_SetExtendedListViewStyleEx(list, listStyles, listStyles);
 
-    const int razerControls[] = {
-        IDC_GRP_RAZER, IDC_CHK_CONTROL_RAZER, IDC_LBL_RAZER_DEVICE,
-        IDC_BTN_RAZER_TEST, IDC_LBL_RAZER_TEST
-    };
+        g_razerUiDevices.clear();
+        std::map<std::pair<std::wstring, std::uint16_t>, int> totals;
+        for (const auto& device : devices) ++totals[{device.productName, device.productId}];
+        std::map<std::pair<std::wstring, std::uint16_t>, int> ordinals;
+        for (const auto& device : devices) {
+            const auto identity = std::make_pair(device.productName, device.productId);
+            const int ordinal = ++ordinals[identity];
+            wchar_t label[512] = {};
+            if (totals[identity] > 1) {
+                swprintf_s(label, L"%ls #%d (PID 0x%04X)%ls", device.productName.c_str(),
+                    ordinal, device.productId, device.controllable ? L"" : T(STR_RAZER_UNSUPPORTED));
+            }
+            else {
+                swprintf_s(label, L"%ls (PID 0x%04X)%ls", device.productName.c_str(),
+                    device.productId, device.controllable ? L"" : T(STR_RAZER_UNSUPPORTED));
+            }
+
+            const int itemIndex = static_cast<int>(g_razerUiDevices.size());
+            g_razerUiDevices.push_back({ device });
+            LVITEMW item = {};
+            item.mask = LVIF_TEXT | LVIF_PARAM;
+            item.iItem = itemIndex;
+            item.pszText = label;
+            item.lParam = itemIndex;
+            ListView_InsertItem(list, &item);
+            const bool checked = device.controllable && pendingSelections.contains(device.deviceKey);
+            ListView_SetCheckState(list, itemIndex, checked ? TRUE : FALSE);
+        }
+        g_razerListUpdating = false;
+        if (initializeSelectionsFromProfile) {
+            std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+            LoadRazerSelectionsToUI(hDlg, g_Global.profiles[TabCtrl_GetCurSel(tab)]);
+        }
+    }
+
+    const int razerControls[] = { IDC_GRP_RAZER, IDC_LIST_RAZER_DEVICES };
     for (int id : razerControls) {
         HWND control = GetDlgItem(hDlg, id);
-        if (control) ShowWindow(control, detected && profileLayer ? SW_SHOW : SW_HIDE);
+        if (control) ShowWindow(control, anyDetected && profileLayer ? SW_SHOW : SW_HIDE);
     }
-    EnableWindow(GetDlgItem(hDlg, IDC_BTN_RAZER_TEST), detected && !testPassed && !testRunning);
-    EnableWindow(GetDlgItem(hDlg, IDC_CHK_CONTROL_RAZER), detected && testPassed && !testRunning);
-    EnableWindow(GetDlgItem(hDlg, IDOK), !testRunning);
-    EnableWindow(GetDlgItem(hDlg, IDCANCEL), !testRunning);
     for (int id : { IDC_LBL_ADV_RAZER, IDC_COMBO_RAZER_FPS }) {
         HWND control = GetDlgItem(hDlg, id);
-        if (control) EnableWindow(control, detected);
+        if (control) EnableWindow(control, g_razerDetected.load());
     }
 }
 
@@ -2274,8 +2372,7 @@ static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
     const int profileCtrls[] = {
         IDC_GRP_MSI, IDC_GRP_RAZER, IDC_GRP_SOURCE, IDC_GRP_THRESHOLDS,
         IDC_EDIT_LABEL, IDC_CHK_ACTIVE_PROFILE, IDC_COMBO_DEVICE, IDC_COMBO_AREA,
-        IDC_CHK_CONTROL_MSI, IDC_CHK_CONTROL_RAZER, IDC_LBL_RAZER_DEVICE,
-        IDC_BTN_RAZER_TEST, IDC_LBL_RAZER_TEST,
+        IDC_CHK_CONTROL_MSI, IDC_LIST_RAZER_DEVICES,
         IDC_COMBO_DATA_SOURCE, IDC_SENSOR_ID, IDC_TEMP_LOW, IDC_TEMP_MED, IDC_TEMP_HIGH,
         IDC_HEX_LOW, IDC_HEX_MED, IDC_HEX_HIGH, IDC_BTN_RESET,
         IDC_LBL_PROFILE_NAME, IDC_LBL_DEVICE, IDC_LBL_AREA,
@@ -2299,9 +2396,8 @@ static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
     for (int id : profileCtrls) {
         HWND h = GetDlgItem(hDlg, id);
         if (!h) continue;
-        const bool isRazerControl = id == IDC_GRP_RAZER || id == IDC_CHK_CONTROL_RAZER ||
-            id == IDC_LBL_RAZER_DEVICE || id == IDC_BTN_RAZER_TEST || id == IDC_LBL_RAZER_TEST;
-        ShowWindow(h, layer == LAYER_PROFILE && (!isRazerControl || g_razerDetected.load()) ? SW_SHOW : SW_HIDE);
+        const bool isRazerControl = id == IDC_GRP_RAZER || id == IDC_LIST_RAZER_DEVICES;
+        ShowWindow(h, layer == LAYER_PROFILE && (!isRazerControl || g_razerAnyDetected.load()) ? SW_SHOW : SW_HIDE);
     }
     for (int id : shortcutCtrls) { HWND h = GetDlgItem(hDlg, id); if (h) ShowWindow(h, layer == LAYER_SHORTCUTS ? SW_SHOW : SW_HIDE); }
     for (int id : advancedCtrls) { HWND h = GetDlgItem(hDlg, id); if (h) ShowWindow(h, layer == LAYER_ADVANCED ? SW_SHOW : SW_HIDE); }
@@ -2320,8 +2416,6 @@ static void ApplyDialogTranslations(HWND hDlg) {
     SetDlgItemTextW(hDlg, IDC_LBL_DEVICE, T(STR_LBL_DEVICE));
     SetDlgItemTextW(hDlg, IDC_LBL_AREA, T(STR_LBL_AREA));
     SetDlgItemTextW(hDlg, IDC_GRP_RAZER, T(STR_GRP_RAZER));
-    SetDlgItemTextW(hDlg, IDC_CHK_CONTROL_RAZER, T(STR_CHK_CONTROL_RAZER));
-    SetDlgItemTextW(hDlg, IDC_BTN_RAZER_TEST, T(STR_BTN_RAZER_TEST));
     SetDlgItemTextW(hDlg, IDC_GRP_SOURCE, T(STR_GRP_SOURCE));
     SetDlgItemTextW(hDlg, IDC_GRP_THRESHOLDS, T(STR_GRP_THRESHOLDS));
     SetDlgItemTextW(hDlg, IDC_LBL_LOW, T(STR_LBL_LOW));
@@ -2434,7 +2528,6 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
     static int s_currentTab = 0;
     static int s_tempActiveIndex = 0;
     static int s_langSnapshot = LANG_EN;
-    static bool s_razerConsentPending = false;
     static GlobalConfig s_snapshot;
 
     switch (message) {
@@ -2466,7 +2559,6 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         g_hSettingsDlg = hDlg; // let the engine notify us when hardware becomes ready
         // The resource is authored in its expanded form; detection may collapse it.
         SetPropW(hDlg, L"MysticFight.RazerExpanded", reinterpret_cast<HANDLE>(1));
-        s_razerConsentPending = false;
 
         HWND hMainWnd = GetParent(hDlg);
         if (hMainWnd) {
@@ -2566,6 +2658,34 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
     case WM_NOTIFY: {
         LPNMHDR pnm = (LPNMHDR)lParam;
+        if (pnm->idFrom == IDC_LIST_RAZER_DEVICES) {
+            if (pnm->code == LVN_ITEMCHANGING && !g_razerListUpdating) {
+                const auto* change = reinterpret_cast<NMLISTVIEW*>(lParam);
+                if ((change->uChanged & LVIF_STATE) != 0 && change->iItem >= 0 &&
+                    change->iItem < static_cast<int>(g_razerUiDevices.size())) {
+                    const UINT oldCheck = (change->uOldState & LVIS_STATEIMAGEMASK) >> 12;
+                    const UINT newCheck = (change->uNewState & LVIS_STATEIMAGEMASK) >> 12;
+                    if (oldCheck != newCheck && newCheck == 2 &&
+                        !g_razerUiDevices[change->iItem].device.controllable) {
+                        return TRUE;
+                    }
+                }
+            }
+            else if (pnm->code == NM_CUSTOMDRAW) {
+                auto* draw = reinterpret_cast<NMLVCUSTOMDRAW*>(lParam);
+                if (draw->nmcd.dwDrawStage == CDDS_PREPAINT) {
+                    return CDRF_NOTIFYITEMDRAW;
+                }
+                if (draw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                    const int item = static_cast<int>(draw->nmcd.dwItemSpec);
+                    if (item >= 0 && item < static_cast<int>(g_razerUiDevices.size()) &&
+                        !g_razerUiDevices[item].device.controllable) {
+                        draw->clrText = GetSysColor(COLOR_GRAYTEXT);
+                    }
+                    return CDRF_DODEFAULT;
+                }
+            }
+        }
         if (pnm->idFrom == IDC_TAB_PROFILES && pnm->code == TCN_SELCHANGE) {
             int newTab = TabCtrl_GetCurSel(pnm->hwndFrom);
 
@@ -2609,55 +2729,6 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
         if (id == IDC_CHK_CONTROL_MSI && code == BN_CLICKED) {
             SetMsiHardwareControlsEnabled(hDlg, !g_Resetting_sdk.load());
-            return TRUE;
-        }
-
-        if (id == IDC_BTN_RAZER_TEST && code == BN_CLICKED) {
-            wchar_t hex[10] = {};
-            GetDlgItemTextW(hDlg, IDC_HEX_LOW, hex, _countof(hex));
-            if (!IsValidHex(hex)) wcscpy_s(hex, DEF_COLOR_LOW);
-
-            wchar_t confirmation[640] = {};
-            swprintf_s(confirmation, T(STR_MSG_RAZER_TEST_CONFIRM), hex);
-            if (MessageBoxW(hDlg, confirmation, T(STR_MSG_RAZER_TEST_TITLE),
-                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
-                return TRUE;
-            }
-
-            const COLORREF color = HexToColor(hex);
-            g_razerTestInProgress = true;
-            {
-                std::lock_guard<std::mutex> testLock(g_razerTestMutex);
-                g_razerTestRequest.red = GetRValue(color);
-                g_razerTestRequest.green = GetGValue(color);
-                g_razerTestRequest.blue = GetBValue(color);
-                ++g_razerTestRequest.generation;
-            }
-            UpdateRazerPanelLayout(hDlg);
-            if (g_hRazerEvent) SetEvent(g_hRazerEvent);
-            return TRUE;
-        }
-
-        if (id == IDC_CHK_CONTROL_RAZER && code == BN_CLICKED &&
-            IsDlgButtonChecked(hDlg, IDC_CHK_CONTROL_RAZER) == BST_CHECKED) {
-            if (!g_razerStaticTestPassed.load()) {
-                CheckDlgButton(hDlg, IDC_CHK_CONTROL_RAZER, BST_UNCHECKED);
-                return TRUE;
-            }
-            bool hasConsent = false;
-            {
-                std::lock_guard<std::recursive_mutex> consentLock(g_cfgMutex);
-                hasConsent = g_Global.razerWriteConsent;
-            }
-            if (hasConsent || s_razerConsentPending) return TRUE;
-            int answer = MessageBoxW(hDlg, T(STR_MSG_RAZER_CONSENT),
-                T(STR_MSG_RAZER_CONSENT_TITLE), MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
-            if (answer != IDYES) {
-                CheckDlgButton(hDlg, IDC_CHK_CONTROL_RAZER, BST_UNCHECKED);
-            }
-            else {
-                s_razerConsentPending = true;
-            }
             return TRUE;
         }
 
@@ -2705,27 +2776,6 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                 return TRUE;
             }
 
-            bool anyRazerEnabled = false;
-            bool hasRazerConsent = false;
-            {
-                std::lock_guard<std::recursive_mutex> checkLock(g_cfgMutex);
-                hasRazerConsent = g_Global.razerWriteConsent;
-                for (int i = 0; i < 5; ++i) {
-                    bool enabled = g_Global.profiles[i].controlRazer;
-                    if (i == s_currentTab && s_currentTab <= 4) {
-                        enabled = IsDlgButtonChecked(hDlg, IDC_CHK_CONTROL_RAZER) == BST_CHECKED;
-                    }
-                    anyRazerEnabled = anyRazerEnabled || enabled;
-                }
-            }
-            if (!g_razerStaticTestPassed.load()) anyRazerEnabled = false;
-            if (anyRazerEnabled && !hasRazerConsent && !s_razerConsentPending) {
-                int answer = MessageBoxW(hDlg, T(STR_MSG_RAZER_CONSENT),
-                    T(STR_MSG_RAZER_CONSENT_TITLE), MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
-                if (answer != IDYES) return TRUE;
-                s_razerConsentPending = true;
-            }
-
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
 
             g_Global.activeProfileIndex = s_tempActiveIndex;
@@ -2733,7 +2783,6 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             if (s_currentTab <= 4) SaveUIToProfile(hDlg, s_currentTab);
             SaveHotkeysFromUI(hDlg);
             SaveGlobalAdvancedFromUI(hDlg);
-            if (s_razerConsentPending && anyRazerEnabled) g_Global.razerWriteConsent = true;
 
             SetStartupTask(IsDlgButtonChecked(hDlg, IDC_CHK_STARTUP) == BST_CHECKED);
             g_NotificationsEnabled = (IsDlgButtonChecked(hDlg, IDC_CHK_NOTIFICATIONS) == BST_CHECKED);
@@ -2789,7 +2838,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         if (id == IDC_BTN_RESET_ADVANCED) {
             SendMessage(GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE), CB_SETCURSEL, 1, 0);
             SendMessage(GetDlgItem(hDlg, IDC_COMBO_LED_FPS), CB_SETCURSEL, 0, 0);
-            SendMessage(GetDlgItem(hDlg, IDC_COMBO_RAZER_FPS), CB_SETCURSEL, 2, 0);
+            SendMessage(GetDlgItem(hDlg, IDC_COMBO_RAZER_FPS), CB_SETCURSEL, 0, 0);
             SendMessage(GetDlgItem(hDlg, IDC_COMBO_SMOOTHING), CB_SETCURSEL, 2, 0);
             SetDlgItemTextW(hDlg, IDC_EDIT_LHM_SERVER, DEF_SERVER_URL);
             return TRUE;
@@ -2829,29 +2878,11 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         ShowSettingsLayer(hDlg, LayerForTab(s_currentTab));
         return (INT_PTR)TRUE;
 
-    case WM_APP_RAZERTEST:
-        g_razerTestInProgress = false;
-        if (wParam) {
-            s_snapshot.razerWriteConsent = false;
-            for (Config& profile : s_snapshot.profiles) profile.controlRazer = false;
-            s_razerConsentPending = false;
-        }
-        CheckDlgButton(hDlg, IDC_CHK_CONTROL_RAZER, BST_UNCHECKED);
-        UpdateRazerPanelLayout(hDlg);
-        MessageBoxW(hDlg,
-            wParam ? T(STR_MSG_RAZER_TEST_OK) : T(STR_MSG_RAZER_TEST_FAILED),
-            T(STR_MSG_RAZER_TEST_TITLE), MB_OK | (wParam ? MB_ICONINFORMATION : MB_ICONERROR));
-        return (INT_PTR)TRUE;
-
     case WM_APP_STATUS:
         // Recovery status is marshalled by the main UI window. Only the MSI
         // hardware selectors are gated; the rest of Settings stays interactive.
         SetMsiHardwareControlsEnabled(hDlg, wParam == 0);
         return (INT_PTR)TRUE;
-
-    case WM_CLOSE:
-        if (g_razerTestInProgress.load()) return (INT_PTR)TRUE;
-        break;
 
     case WM_DESTROY:
         g_hSettingsDlg = NULL;
@@ -2861,6 +2892,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         if (hBrushHigh) { DeleteObject(hBrushHigh); hBrushHigh = NULL; }
         ClearComboHeapData(GetDlgItem(hDlg, IDC_SENSOR_ID));
         ClearComboHeapData(GetDlgItem(hDlg, IDC_COMBO_DEVICE));
+        g_razerUiDevices.clear();
         RemovePropW(hDlg, L"MysticFight.RazerExpanded");
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_LOW), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_MED), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
@@ -3081,10 +3113,6 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         // Detection never writes to the keyboard. It only changes whether the
         // optional Razer profile panel is visible.
         if (g_hSettingsDlg) SendMessageW(g_hSettingsDlg, WM_APP_RAZERREADY, 0, 0);
-        return 0;
-
-    case WM_APP_RAZERTEST:
-        if (g_hSettingsDlg) SendMessageW(g_hSettingsDlg, WM_APP_RAZERTEST, wParam, 0);
         return 0;
 
     case WM_APP_FATAL:
@@ -4136,7 +4164,7 @@ static void EngineThread(HWND hWnd) {
 static bool SameRazerDetection(const RazerOrnataController::DetectionResult& left,
     const RazerOrnataController::DetectionResult& right) {
     return left.detected == right.detected && left.productId == right.productId &&
-        left.devicePath == right.devicePath;
+        left.devicePath == right.devicePath && left.devices == right.devices;
 }
 
 static void PublishRazerDetection(HWND hWnd,
@@ -4148,37 +4176,31 @@ static void PublishRazerDetection(HWND hWnd,
         g_razerDetection = detection;
     }
     g_razerDetected = detection.detected;
+    g_razerAnyDetected = !detection.devices.empty();
     if (!changed) return;
 
-    if (detection.detected) {
+    if (!detection.devices.empty()) {
         char message[192] = {};
+        const std::size_t compatible = std::count_if(detection.devices.begin(), detection.devices.end(),
+            [](const RazerOrnataController::DetectedDevice& device) { return device.controllable; });
         snprintf(message, sizeof(message),
-            "[Razer HID] Detected Ornata family VID=1532 PID=%04X on verified 91-byte feature interface (read-only scan)",
-            detection.productId);
+            "[Razer HID] Read-only inventory: %zu physical device(s), %zu compatible.",
+            detection.devices.size(), compatible);
         Log(message);
     }
-    else {
-        Log("[Razer HID] Ornata V3 not detected; no keyboard command is possible.");
+    else if (!forcePublish) {
+        Log("[Razer HID] All Razer devices disconnected.");
     }
     PostMessageW(hWnd, WM_APP_RAZERREADY, 0, 0);
 }
 
 static bool SendRazerUniformFrame(RazerOrnataController& controller,
-    BYTE red, BYTE green, BYTE blue, DWORD frameBudgetMs, bool& loggedFirstWrite,
-    const char* operation) {
+    BYTE red, BYTE green, BYTE blue, DWORD frameBudgetMs, const char* operation) {
     const ULONGLONG started = GetTickCount64();
     const bool success = controller.SetUniformColor(red, green, blue);
     const ULONGLONG elapsed = GetTickCount64() - started;
 
-    if (!loggedFirstWrite) {
-        char message[224] = {};
-        snprintf(message, sizeof(message),
-            "[Razer HID] First keyboard write after explicit consent: %s, elapsed=%llums, result=%s",
-            operation, elapsed, success ? "OK" : "ERROR");
-        Log(message);
-        loggedFirstWrite = true;
-    }
-    else if (elapsed > frameBudgetMs) {
+    if (elapsed > frameBudgetMs) {
         char message[192] = {};
         snprintf(message, sizeof(message),
             "[Razer HID] Slow %s transfer: elapsed=%llums budget=%lums",
@@ -4188,27 +4210,106 @@ static bool SendRazerUniformFrame(RazerOrnataController& controller,
     return success;
 }
 
+struct RazerDeviceRuntime {
+    RazerOrnataController::DetectedDevice device;
+    RazerOrnataController controller;
+    bool present = false;
+    bool controlledSinceRestore = false;
+    bool restoreAttempted = false;
+    ULONGLONG nextOpenAttempt = 0;
+};
+
+static std::set<std::wstring> SelectedRazerDeviceKeys(const Config& config,
+    const RazerOrnataController::DetectionResult& detection) {
+    std::set<std::wstring> selected;
+    if (!config.controlRazer) return selected;
+
+    const auto stored = ParseRazerDeviceIds(config.razerDeviceIds.c_str());
+    for (const auto& device : detection.devices) {
+        if (device.controllable && stored.contains(device.deviceKey)) {
+            selected.insert(device.deviceKey);
+        }
+    }
+
+    // Migrate the old single explicit ControlRazer toggle without ever enabling
+    // a new profile by detection alone.
+    if (stored.empty()) {
+        const auto first = std::find_if(detection.devices.begin(), detection.devices.end(),
+            [](const RazerOrnataController::DetectedDevice& device) {
+                return device.controllable;
+            });
+        if (first != detection.devices.end()) selected.insert(first->deviceKey);
+    }
+    return selected;
+}
+
+static bool RestoreRazerSpectrum(RazerDeviceRuntime& runtime, const bool forceRetry) {
+    if (!runtime.controlledSinceRestore || g_windows_shutdown.load() || !runtime.present) {
+        runtime.controller.Close();
+        return !runtime.controlledSinceRestore;
+    }
+    if (runtime.restoreAttempted && !forceRetry) {
+        runtime.controller.Close();
+        return false;
+    }
+    runtime.restoreAttempted = true;
+
+    if (!runtime.controller.IsOpen() && !runtime.controller.Open(runtime.device)) {
+        char message[512] = {};
+        snprintf(message, sizeof(message),
+            "[Razer HID] Could not reopen %ls to restore Spectrum: %ls",
+            runtime.device.productName.c_str(), runtime.controller.LastError().c_str());
+        Log(message);
+        return false;
+    }
+    if (!runtime.controller.SetSpectrumCycling()) {
+        char message[512] = {};
+        snprintf(message, sizeof(message),
+            "[Razer HID] Could not restore Spectrum on %ls: %ls",
+            runtime.device.productName.c_str(), runtime.controller.LastError().c_str());
+        Log(message);
+        runtime.controller.Close();
+        return false;
+    }
+
+    runtime.controlledSinceRestore = false;
+    runtime.controller.Close();
+    return true;
+}
+
+static bool EnsureRazerOpen(RazerDeviceRuntime& runtime, const ULONGLONG now,
+    const ULONGLONG retryDelayMs) {
+    if (runtime.controller.IsOpen()) return true;
+    if (now < runtime.nextOpenAttempt) return false;
+    if (runtime.controller.Open(runtime.device)) {
+        runtime.nextOpenAttempt = 0;
+        return true;
+    }
+
+    char message[512] = {};
+    snprintf(message, sizeof(message), "[Razer HID] Cannot open %ls: %ls",
+        runtime.device.productName.c_str(), runtime.controller.LastError().c_str());
+    Log(message);
+    runtime.nextOpenAttempt = now + retryDelayMs;
+    return false;
+}
+
 static void RazerThread(HWND hWnd) {
     constexpr ULONGLONG detectionIntervalMs = 5000;
-    RazerOrnataController controller;
+    std::map<std::wstring, std::unique_ptr<RazerDeviceRuntime>> runtimes;
     RazerOrnataController::DetectionResult detection;
     Config config = {};
     int lastConfigVersion = -1;
     int refreshFPS = DEF_RAZER_REFRESH_FPS;
     float smoothingFactor = DEF_SMOOTHING_FACTOR;
-    bool writeConsent = false;
-    bool loggedMissingConsent = false;
-    bool loggedFirstWrite = false;
     bool previousLightsEnabled = g_LedsEnabled.load();
     bool firstFrame = true;
     float currentRed = 0.0f, currentGreen = 0.0f, currentBlue = 0.0f;
     DWORD targetRed = 0, targetGreen = 0, targetBlue = 0;
     float lastTemperature = -1.0f;
     ULONGLONG nextDetection = 0;
-    ULONGLONG nextOpenAttempt = 0;
     ULONGLONG nextFrame = 0;
     ULONGLONG lastAcknowledgedLedGeneration = 0;
-    ULONGLONG lastProcessedTestGeneration = 0;
     bool detectionPublished = false;
 
     while (g_Running) {
@@ -4218,11 +4319,10 @@ static void RazerThread(HWND hWnd) {
             config = g_cfg;
             refreshFPS = g_Global.razerRefreshFPS;
             smoothingFactor = g_Global.smoothingFactor;
-            writeConsent = g_Global.razerWriteConsent;
             lastConfigVersion = configVersion;
             lastTemperature = -1.0f;
             firstFrame = true;
-            loggedMissingConsent = false;
+            nextFrame = 0;
         }
 
         ULONGLONG now = GetTickCount64();
@@ -4230,108 +4330,58 @@ static void RazerThread(HWND hWnd) {
             auto currentDetection = RazerOrnataController::Detect();
             PublishRazerDetection(hWnd, currentDetection, !detectionPublished);
             detectionPublished = true;
-            if (!SameRazerDetection(detection, currentDetection)) {
-                controller.Close();
-                nextOpenAttempt = now;
-                firstFrame = true;
+
+            for (auto& [key, runtime] : runtimes) runtime->present = false;
+            for (const auto& device : currentDetection.devices) {
+                if (!device.controllable) continue;
+                auto [it, inserted] = runtimes.try_emplace(device.deviceKey,
+                    std::make_unique<RazerDeviceRuntime>());
+                RazerDeviceRuntime& runtime = *it->second;
+                if (!inserted && (runtime.device.controlPath != device.controlPath ||
+                    runtime.device.productId != device.productId)) {
+                    runtime.controller.Close();
+                    runtime.nextOpenAttempt = now;
+                }
+                runtime.device = device;
+                runtime.present = true;
             }
+            for (auto& [key, runtime] : runtimes) {
+                if (!runtime->present) runtime->controller.Close();
+            }
+
             detection = std::move(currentDetection);
             nextDetection = now + detectionIntervalMs;
         }
 
-        RazerStaticTestRequest testRequest;
-        bool testRequested = false;
-        {
-            std::lock_guard<std::mutex> testLock(g_razerTestMutex);
-            if (g_razerTestRequest.generation > lastProcessedTestGeneration) {
-                testRequest = g_razerTestRequest;
-                testRequested = true;
+        const auto selectedKeys = SelectedRazerDeviceKeys(config, detection);
+        for (auto& [key, runtime] : runtimes) {
+            const bool selected = selectedKeys.contains(key);
+            if (!runtime->present) {
+                runtime->controller.Close();
+            }
+            else if (!selected) {
+                if (runtime->controlledSinceRestore) RestoreRazerSpectrum(*runtime, false);
+                else runtime->controller.Close();
             }
         }
-        if (testRequested) {
-            lastProcessedTestGeneration = testRequest.generation;
-            bool success = false;
-            controller.Close();
-            if (detection.detected && controller.Open(detection)) {
-                success = SendRazerUniformFrame(controller,
-                    testRequest.red, testRequest.green, testRequest.blue,
-                    1000, loggedFirstWrite, "manual one-color safety test");
-            }
-            if (!success) {
-                char message[384] = {};
-                snprintf(message, sizeof(message),
-                    "[Razer HID] Manual one-color safety test failed: %ls",
-                    detection.detected ? controller.LastError().c_str() : L"device disconnected");
-                Log(message);
-            }
-            controller.Close();
 
-            if (success) {
-                // Passing the one-shot test does not authorize dynamic output.
-                // Clear every dynamic selection and consent so enabling it still
-                // requires the separate checkbox warning followed by Save.
-                g_razerStaticTestPassed = true;
-                {
-                    std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-                    g_Global.razerWriteConsent = false;
-                    for (Config& profile : g_Global.profiles) profile.controlRazer = false;
-                }
-                WritePrivateProfileStringW(L"Global", L"RazerStaticTestPassed", L"1", INI_FILE);
-                WritePrivateProfileStringW(L"Global", L"RazerWriteConsent", L"0", INI_FILE);
-                for (int i = 0; i < 5; ++i) {
-                    std::wstring section = L"Settings";
-                    if (i > 0) section += L"_" + std::to_wstring(i);
-                    WritePrivateProfileStringW(section.c_str(), L"ControlRazer", L"0", INI_FILE);
-                }
-                config.controlRazer = false;
-                writeConsent = false;
-                Log("[Razer HID] Manual one-color safety test passed; dynamic output remains disabled.");
-            }
-
-            g_razerTestInProgress = false;
-            PostMessageW(hWnd, WM_APP_RAZERTEST, success ? 1 : 0, 0);
-            WaitForSingleObject(g_hRazerEvent, 100);
-            continue;
-        }
-
-        if (!config.controlRazer || !writeConsent || !g_razerStaticTestPassed.load()) {
-            controller.Close();
-            if (config.controlRazer && (!writeConsent || !g_razerStaticTestPassed.load()) &&
-                !loggedMissingConsent) {
-                Log("[Razer HID] Profile requests Razer control but a safety gate is absent; output blocked.");
-                loggedMissingConsent = true;
-            }
+        if (selectedKeys.empty()) {
             WaitForSingleObject(g_hRazerEvent, 1000);
             continue;
         }
 
-        if (!detection.detected) {
-            controller.Close();
-            const DWORD wait = nextDetection > now
-                ? static_cast<DWORD>(std::min<ULONGLONG>(1000, nextDetection - now))
-                : 0;
-            WaitForSingleObject(g_hRazerEvent, wait);
-            continue;
+        bool anyOpen = false;
+        now = GetTickCount64();
+        for (const auto& key : selectedKeys) {
+            const auto it = runtimes.find(key);
+            if (it != runtimes.end() && it->second->present &&
+                EnsureRazerOpen(*it->second, now, detectionIntervalMs)) {
+                anyOpen = true;
+            }
         }
-
-        if (!controller.IsOpen()) {
-            if (now < nextOpenAttempt) {
-                WaitForSingleObject(g_hRazerEvent,
-                    static_cast<DWORD>(std::min<ULONGLONG>(1000, nextOpenAttempt - now)));
-                continue;
-            }
-            if (!controller.Open(detection)) {
-                char message[384] = {};
-                snprintf(message, sizeof(message), "[Razer HID] Cannot open verified control interface: %ls",
-                    controller.LastError().c_str());
-                Log(message);
-                nextOpenAttempt = now + detectionIntervalMs;
-                WaitForSingleObject(g_hRazerEvent, 1000);
-                continue;
-            }
-            Log("[Razer HID] Verified Ornata V3 control interface opened; awaiting a valid requested color.");
-            firstFrame = true;
-            lastTemperature = -1.0f;
+        if (!anyOpen) {
+            WaitForSingleObject(g_hRazerEvent, 250);
+            continue;
         }
 
         const bool lightsEnabled = g_LedsEnabled.load();
@@ -4343,18 +4393,44 @@ static void RazerThread(HWND hWnd) {
             }
         }
 
+        auto sendToSelected = [&](const BYTE red, const BYTE green, const BYTE blue,
+            const char* operation) {
+            bool anyApplied = false;
+            bool allApplied = true;
+            const ULONGLONG sendNow = GetTickCount64();
+            for (const auto& key : selectedKeys) {
+                const auto it = runtimes.find(key);
+                if (it == runtimes.end() || !it->second->present ||
+                    !EnsureRazerOpen(*it->second, sendNow, detectionIntervalMs)) {
+                    allApplied = false;
+                    continue;
+                }
+
+                RazerDeviceRuntime& runtime = *it->second;
+                if (!SendRazerUniformFrame(runtime.controller, red, green, blue,
+                    1000 / refreshFPS, operation)) {
+                    char message[512] = {};
+                    snprintf(message, sizeof(message), "[Razer HID] %ls %s failed: %ls",
+                        runtime.device.productName.c_str(), operation,
+                        runtime.controller.LastError().c_str());
+                    Log(message);
+                    runtime.controller.Close();
+                    runtime.nextOpenAttempt = GetTickCount64() + detectionIntervalMs;
+                    allApplied = false;
+                    continue;
+                }
+
+                runtime.controlledSinceRestore = true;
+                runtime.restoreAttempted = false;
+                anyApplied = true;
+            }
+            return std::make_pair(anyApplied, allApplied);
+        };
+
         if (!lightsEnabled) {
             const LedRequestSnapshot request = CaptureLedRequest();
-            if (!SendRazerUniformFrame(controller, 0, 0, 0,
-                1000 / refreshFPS, loggedFirstWrite, "OFF frame")) {
-                char message[384] = {};
-                snprintf(message, sizeof(message), "[Razer HID] OFF frame failed: %ls",
-                    controller.LastError().c_str());
-                Log(message);
-                controller.Close();
-                nextOpenAttempt = GetTickCount64() + detectionIntervalMs;
-            }
-            else if (IsLedRequestCurrent(request) &&
+            const auto [anyApplied, allApplied] = sendToSelected(0, 0, 0, "OFF frame");
+            if (anyApplied && allApplied && IsLedRequestCurrent(request) &&
                 request.generation > lastAcknowledgedLedGeneration) {
                 lastAcknowledgedLedGeneration = request.generation;
                 char message[160] = {};
@@ -4368,8 +4444,6 @@ static void RazerThread(HWND hWnd) {
 
         const float rawTemperature = g_asyncTemp.load();
         if (g_activeSource.load() == DataSource::Searching || rawTemperature < 0.0f) {
-            // Unlike MSI's historical breathing search indicator, Razer remains
-            // untouched until there is a real sensor value to render.
             WaitForSingleObject(g_hRazerEvent, 100);
             continue;
         }
@@ -4402,19 +4476,11 @@ static void RazerThread(HWND hWnd) {
         }
 
         const LedRequestSnapshot request = CaptureLedRequest();
-        if (!SendRazerUniformFrame(controller,
+        const auto [anyApplied, allApplied] = sendToSelected(
             static_cast<BYTE>(roundf(currentRed)),
             static_cast<BYTE>(roundf(currentGreen)),
-            static_cast<BYTE>(roundf(currentBlue)),
-            1000 / refreshFPS, loggedFirstWrite, "RGB frame")) {
-            char message[384] = {};
-            snprintf(message, sizeof(message), "[Razer HID] RGB frame failed: %ls",
-                controller.LastError().c_str());
-            Log(message);
-            controller.Close();
-            nextOpenAttempt = GetTickCount64() + detectionIntervalMs;
-        }
-        else if (IsLedRequestCurrent(request) &&
+            static_cast<BYTE>(roundf(currentBlue)), "RGB frame");
+        if (anyApplied && allApplied && IsLedRequestCurrent(request) &&
             request.generation > lastAcknowledgedLedGeneration) {
             lastAcknowledgedLedGeneration = request.generation;
             char message[160] = {};
@@ -4424,12 +4490,13 @@ static void RazerThread(HWND hWnd) {
         }
     }
 
-    // Exit is intentionally write-free: closing the HID handle relinquishes the
-    // device without altering its firmware or persistent lighting state.
-    controller.Close();
-    Log("[Razer HID] Worker stopped; no shutdown command sent to keyboard.");
+    if (!g_windows_shutdown.load()) {
+        for (auto& [key, runtime] : runtimes) {
+            if (runtime->controlledSinceRestore) RestoreRazerSpectrum(*runtime, true);
+        }
+    }
+    for (auto& [key, runtime] : runtimes) runtime->controller.Close();
 }
-
 // ============================================================================
 // MAIN ENTRY POINT
 // ============================================================================
@@ -4442,7 +4509,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     if (TryRunSdkHostFromCommandLine(sdkHostExit)) return sdkHostExit;
 
     // Basic Process Initialization
-    INITCOMMONCONTROLSEX icce = { sizeof(icce), ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES };
+    INITCOMMONCONTROLSEX icce = { sizeof(icce),
+        ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES | ICC_LISTVIEW_CLASSES };
     InitCommonControlsEx(&icce);
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);

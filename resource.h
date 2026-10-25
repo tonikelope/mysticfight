@@ -50,9 +50,8 @@
 #define IDC_COMBO_LANGUAGE              2115
 #define IDC_COMBO_DATA_SOURCE           2116
 #define IDC_CHK_CONTROL_MSI             2117
-#define IDC_CHK_CONTROL_RAZER           2118
+#define IDC_LIST_RAZER_DEVICES          2118
 #define IDC_COMBO_RAZER_FPS             2119
-#define IDC_BTN_RAZER_TEST              2120
 
 // Profile Groups (CRITICAL: Added IDC_GRP_THRESHOLDS)
 #define IDC_GRP_MSI                     2200
@@ -82,9 +81,7 @@
 #define IDC_LBL_ADV_SMOOTH              2316
 #define IDC_LBL_LANGUAGE                2317
 #define IDC_LBL_LHM_SERVER              2318
-#define IDC_LBL_RAZER_DEVICE            2319
 #define IDC_LBL_ADV_RAZER               2320
-#define IDC_LBL_RAZER_TEST              2321
 
 // --- SHORTCUTS LAYER ---
 #define IDC_GRP_SHORTCUTS               3000

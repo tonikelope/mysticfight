@@ -26,6 +26,10 @@ Primary references:
   preference if more than one qualifying collection exists.
 
 Detection opens only zero-access inspection handles and sends no feature report.
+Every physical Razer device is deduplicated by its Windows container ID plus PID
+and is shown by product name and PID in the per-profile scrollable list. An unknown
+Razer model remains visible but cannot be selected until its command protocol
+has been explicitly validated and whitelisted.
 
 ## 90-byte control report
 
@@ -69,35 +73,41 @@ shapes and validates their zero/reserved fields and checksum again immediately
 before sending.
 
 The OpenRazer static-effect recipe uses variable storage (`VARSTORE=1`) for
-these devices. Because that may be persistent, MysticFight deliberately does
-not implement it. A uniform visually static color is produced with the
-model-specific volatile custom frame (ten zones on V3, one zone on V3 X).
+these devices. MysticFight does not use that persistent static recipe. A
+uniform visually static color is produced with the model-specific volatile
+custom frame (ten zones on V3, one zone on V3 X).
+
+The one intentional persistent command is the documented extended-matrix
+Spectrum Cycling recipe used to hand the device back to standalone operation:
+class `0x0F`, command `0x02`, data size `0x06`, arguments
+`01 00 03 00 00 00` (`VARSTORE`, `ZERO_LED`, Spectrum). It is sent only to a
+compatible device that MysticFight successfully controlled, when that device
+is deselected or the application exits normally. Windows shutdown/restart does
+not delay the OS by attempting this hand-off.
 
 ## Timing and safety decisions
 
 - OpenRazer specifies 600 us between request and response; openrazer-win uses a
   1 ms Windows minimum. MysticFight follows the 1 ms minimum.
-- Razer output defaults to 15 FPS, independently selectable as 15, 20 or 25
+- Razer output defaults to 25 FPS, independently selectable as 15, 20 or 25
   FPS. Transfer latency is measured; operations exceeding the frame budget are
   logged.
 - The Razer worker is separate from the UI, sensor and MSI SDK workers. It owns
-  its HID handle, samples only the newest temperature, queues no frames and
-  suppresses identical frames.
-- Before dynamic control can be enabled, Settings requires a separate manual
-  one-color safety test. Its confirmation names the exact color; the worker
-  sends one uniform frame, closes the HID handle, records success, and leaves
-  every dynamic Razer profile and consent flag disabled.
-- After that test, no dynamic Razer write is possible unless a profile enables
-  Razer, the second explicit warning has been accepted and saved, the verified
-  keyboard is present, and a valid sensor color (or an explicit global OFF
-  request) exists.
-- Disconnects close the handle and return to read-only detection. Application
-  exit only closes the handle; it sends no shutdown color or persistent command.
+  one HID controller per selected physical device, samples only the newest
+  temperature, queues no frames and suppresses identical frames per device.
+- Every profile starts with no Razer device selected. Checking a compatible
+  device and saving the profile is the complete opt-in; there is no test button,
+  warning dialog or separate consent state. Mere detection never enables output.
+- No Razer write is possible unless that exact physical device is selected in
+  the active profile, its model and 91-byte control collection are whitelisted,
+  and a valid sensor color (or an explicit global OFF request) exists.
+- Disconnects close only that device's handle and return it to read-only
+  detection. Normal deselection/exit restores Spectrum as described above.
 - Windows `HidD_SetFeature`/`HidD_GetFeature` calls are synchronous. They are
   isolated from MSI and the UI, bounded by the protocol retry count, and the
   application retains its existing bounded worker-shutdown policy. No claim is
   made that Windows provides a cancellable per-call HID deadline here.
 
 Not implemented: firmware, bootloader, EEPROM, macros, keyboard polling,
-persistent lighting, driver replacement, services, or automatic hardware-write
-tests.
+arbitrary persistent lighting, driver replacement, services, or automatic
+hardware-write tests.

@@ -17,8 +17,9 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * **Real-time Monitoring:** Temperature tracking via HTTP.
 * **VERY Lightweight:** No heavy dashboards; just a simple tray app that stays out of your way.
 * **Customizable Device and LED area:** Choose the one you prefer. <i>Please note that MSI Mystic Light SDK may not recognise all areas available on your device (you will have to wait for MSI to update the public SDK)</i>.
-* **Independent controllers per profile:** Control the MSI motherboard, the Razer Ornata V3 / V3 X, both, or neither.
-* **Native Razer Ornata V3 / V3 X support:** Direct Windows HID control with no Synapse, Chroma Runtime, OpenRGB, extra service, or kernel driver. Razer output is opt-in, begins with a manual one-color safety test, and uses only volatile custom RGB frames.
+* **Independent controllers per profile:** Control the MSI motherboard and any individually selected compatible Razer device. New profiles select no Razer device by default.
+* **Native Razer Ornata V3 / V3 X support:** Direct Windows HID control with no Synapse, Chroma Runtime, OpenRGB, extra service, or kernel driver. Settings inventories every physical Razer HID device in a fixed-height scrollable list; only models with a validated protocol are selectable.
+* **Clean Razer hand-off:** Normal exit (and deselection) explicitly restores Spectrum Cycling on every device MysticFight actually controlled.
 * **Independent refresh rates:** MSI and Razer can each use 15, 20, or 25 FPS while sharing the same thermal color and smoothing engine.
 * **Customizable Temperature Sensor:** Choose the one you prefer.
 * **Customizable Temperature and Colors Thresholds:** RMS interpolation with adaptive color transition smoothing.

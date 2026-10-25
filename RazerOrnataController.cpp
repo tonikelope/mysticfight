@@ -1,6 +1,7 @@
 #include "RazerOrnataController.h"
 
 #include <windows.h>
+#include <devpkey.h>
 #include <hidsdi.h>
 #include <setupapi.h>
 
@@ -18,6 +19,10 @@ constexpr std::uint8_t kTransactionId = 0x1F;
 constexpr int kMaxAttempts = 5;
 constexpr DWORD kInterTransferDelayMs = 1;
 constexpr DWORD kRetryDelayMs = 10;
+constexpr DEVPROPKEY kDeviceContainerId = {
+    { 0x8C7ED206, 0x3F8A, 0x4827, { 0xB3, 0xAB, 0xAE, 0x9E, 0x1F, 0xAE, 0xFC, 0x6C } },
+    2
+};
 
 constexpr std::uint8_t kStatusBusy = 0x01;
 constexpr std::uint8_t kStatusSuccessful = 0x02;
@@ -63,12 +68,26 @@ constexpr ControlReport BuildCustomEffectReport() {
     return activate;
 }
 
+constexpr ControlReport BuildSpectrumEffectReport() {
+    ControlReport spectrum = {};
+    spectrum[1] = kTransactionId;
+    spectrum[5] = 0x06;
+    spectrum[6] = 0x0F;
+    spectrum[7] = 0x02;
+    spectrum[8] = 0x01; // VARSTORE: restore the standalone device effect
+    spectrum[9] = 0x00; // ZERO_LED
+    spectrum[10] = 0x03; // OpenRazer extended-matrix Spectrum Cycling
+    FinalizeControlReport(spectrum);
+    return spectrum;
+}
+
 constexpr std::array<RazerOrnataController::Rgb, RazerOrnataController::kZoneCount>
     kBlackProtocolTest = {};
 constexpr ControlReport kBlackV3FrameProtocolTest =
     BuildCustomFrameReport(kBlackProtocolTest, RazerOrnataController::kZoneCount);
 constexpr ControlReport kBlackV3XFrameProtocolTest = BuildCustomFrameReport(kBlackProtocolTest, 1);
 constexpr ControlReport kCustomEffectProtocolTest = BuildCustomEffectReport();
+constexpr ControlReport kSpectrumEffectProtocolTest = BuildSpectrumEffectReport();
 static_assert(kReportSize == 90 && kFeatureReportSize == 91);
 static_assert(kBlackV3FrameProtocolTest[5] == 0x47 &&
     kBlackV3FrameProtocolTest[10] == 0 && kBlackV3FrameProtocolTest[12] == 9 &&
@@ -78,6 +97,9 @@ static_assert(kBlackV3XFrameProtocolTest[5] == 0x47 &&
     kBlackV3XFrameProtocolTest[88] == 0x4B);
 static_assert(kCustomEffectProtocolTest[5] == 0x0C &&
     kCustomEffectProtocolTest[10] == 0x08 && kCustomEffectProtocolTest[88] == 0x09);
+static_assert(kSpectrumEffectProtocolTest[5] == 0x06 &&
+    kSpectrumEffectProtocolTest[8] == 0x01 && kSpectrumEffectProtocolTest[10] == 0x03 &&
+    kSpectrumEffectProtocolTest[88] == 0x09);
 
 bool IsSupportedProduct(const USHORT productId) {
     return productId == RazerOrnataController::kProductIdOrnataV3 ||
@@ -126,14 +148,36 @@ HANDLE OpenHidPath(const std::wstring& path) {
     return INVALID_HANDLE_VALUE;
 }
 
-struct Candidate {
-    std::wstring path;
-    USHORT productId = 0;
-    std::wstring productName;
+struct EnumerationResult {
+    std::vector<RazerOrnataController::DetectedDevice> devices;
 };
 
-std::vector<Candidate> EnumerateCandidates(std::wstring& error) {
-    std::vector<Candidate> candidates;
+std::wstring ContainerKey(HDEVINFO deviceInfo, SP_DEVINFO_DATA& deviceData,
+    const USHORT productId, const std::wstring& productName) {
+    GUID container = {};
+    DEVPROPTYPE type = 0;
+    DWORD required = 0;
+    if (SetupDiGetDevicePropertyW(deviceInfo, &deviceData, &kDeviceContainerId,
+        &type, reinterpret_cast<PBYTE>(&container), sizeof(container), &required, 0) &&
+        type == DEVPROP_TYPE_GUID && !IsEqualGUID(container, GUID_NULL)) {
+        wchar_t key[80] = {};
+        swprintf_s(key, L"{%08lX-%04hX-%04hX-%02hhX%02hhX-%02hhX%02hhX%02hhX%02hhX%02hhX%02hhX}|PID_%04hX",
+            container.Data1, container.Data2, container.Data3,
+            container.Data4[0], container.Data4[1], container.Data4[2], container.Data4[3],
+            container.Data4[4], container.Data4[5], container.Data4[6], container.Data4[7],
+            productId);
+        return key;
+    }
+
+    // The container identifier is normally available. This fallback remains
+    // deterministic, but identical devices without a container may be merged.
+    wchar_t fallback[384] = {};
+    swprintf_s(fallback, L"VID_1532&PID_%04X|%ls", productId, productName.c_str());
+    return fallback;
+}
+
+EnumerationResult EnumerateCandidates(std::wstring& error) {
+    EnumerationResult result;
     GUID hidGuid = {};
     HidD_GetHidGuid(&hidGuid);
 
@@ -141,7 +185,7 @@ std::vector<Candidate> EnumerateCandidates(std::wstring& error) {
         DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
     if (deviceInfo == INVALID_HANDLE_VALUE) {
         error = FormatWin32Error(L"SetupDiGetClassDevsW", GetLastError());
-        return candidates;
+        return result;
     }
 
     for (DWORD index = 0;; ++index) {
@@ -163,8 +207,10 @@ std::vector<Candidate> EnumerateCandidates(std::wstring& error) {
         std::vector<std::uint8_t> storage(requiredSize);
         auto* detail = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(storage.data());
         detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+        SP_DEVINFO_DATA deviceData = {};
+        deviceData.cbSize = sizeof(deviceData);
         if (!SetupDiGetDeviceInterfaceDetailW(deviceInfo, &interfaceData, detail,
-            requiredSize, nullptr, nullptr)) {
+            requiredSize, nullptr, &deviceData)) {
             continue;
         }
 
@@ -187,7 +233,7 @@ std::vector<Candidate> EnumerateCandidates(std::wstring& error) {
             HidP_GetCaps(preparsed, &caps) == HIDP_STATUS_SUCCESS;
 
         wchar_t productBuffer[256] = {};
-        if (attributesOk && IsSupportedProduct(attributes.ProductID)) {
+        if (attributesOk && attributes.VendorID == RazerOrnataController::kVendorId) {
             if (!HidD_GetProductString(handle, productBuffer, sizeof(productBuffer))) {
                 productBuffer[0] = L'\0';
             }
@@ -196,32 +242,57 @@ std::vector<Candidate> EnumerateCandidates(std::wstring& error) {
         if (preparsed) HidD_FreePreparsedData(preparsed);
         CloseHandle(handle);
 
-        if (!attributesOk || attributes.VendorID != RazerOrnataController::kVendorId ||
-            !IsSupportedProduct(attributes.ProductID) || !capsOk ||
+        if (!attributesOk || attributes.VendorID != RazerOrnataController::kVendorId) {
+            continue;
+        }
+
+        std::wstring productName = productBuffer;
+        if (productName.empty()) {
+            wchar_t fallbackName[64] = {};
+            swprintf_s(fallbackName, L"Razer device (PID 0x%04X)", attributes.ProductID);
+            productName = fallbackName;
+        }
+        const std::wstring deviceKey = ContainerKey(deviceInfo, deviceData,
+            attributes.ProductID, productName);
+        auto deviceIt = std::find_if(result.devices.begin(), result.devices.end(),
+            [&](const RazerOrnataController::DetectedDevice& device) {
+                return device.deviceKey == deviceKey;
+            });
+        if (deviceIt == result.devices.end()) {
+            RazerOrnataController::DetectedDevice device;
+            device.deviceKey = deviceKey;
+            device.productId = attributes.ProductID;
+            device.productName = productName;
+            result.devices.push_back(std::move(device));
+            deviceIt = std::prev(result.devices.end());
+        }
+        else if (productBuffer[0] != L'\0' &&
+            deviceIt->productName.starts_with(L"Razer device (PID")) {
+            deviceIt->productName = productBuffer;
+        }
+
+        if (!IsSupportedProduct(attributes.ProductID) || !capsOk ||
             caps.FeatureReportByteLength != kFeatureReportSize) {
             continue;
         }
 
-        Candidate candidate;
-        candidate.path = path;
-        candidate.productId = attributes.ProductID;
-        candidate.productName = productBuffer[0] ? productBuffer :
-            (IsOrnataV3X(attributes.ProductID) ? L"Razer Ornata V3 X" : L"Razer Ornata V3");
-        candidates.push_back(std::move(candidate));
+        // A 91-byte feature report is authoritative. The upstream interface is
+        // only a tie-breaker because Windows can expose the control collection
+        // on another MI_XX path (observed on Ornata V3 X PID 0x02A2).
+        if (!deviceIt->controllable || IsPreferredInterface(path, attributes.ProductID)) {
+            deviceIt->controllable = true;
+            deviceIt->controlPath = path;
+        }
     }
 
     SetupDiDestroyDeviceInfoList(deviceInfo);
-    // Match openrazer-win's Windows selection rule: a 91-byte feature report
-    // identifies a usable Razer control collection. The upstream USB interface
-    // index is only a preference because Windows can expose that feature report
-    // on a different MI_XX collection (observed on Ornata V3 X PID 0x02A2).
-    std::stable_sort(candidates.begin(), candidates.end(),
-        [](const Candidate& left, const Candidate& right) {
-            const bool leftPreferred = IsPreferredInterface(left.path, left.productId);
-            const bool rightPreferred = IsPreferredInterface(right.path, right.productId);
-            return leftPreferred && !rightPreferred;
+    std::sort(result.devices.begin(), result.devices.end(),
+        [](const RazerOrnataController::DetectedDevice& left,
+            const RazerOrnataController::DetectedDevice& right) {
+            if (left.productName != right.productName) return left.productName < right.productName;
+            return left.deviceKey < right.deviceKey;
         });
-    return candidates;
+    return result;
 }
 
 bool ResponseMatches(const std::array<std::uint8_t, kFeatureReportSize>& feature,
@@ -243,29 +314,29 @@ RazerOrnataController::~RazerOrnataController() {
 RazerOrnataController::DetectionResult RazerOrnataController::Detect() {
     DetectionResult result;
     std::wstring error;
-    const auto candidates = EnumerateCandidates(error);
-    if (candidates.empty()) {
-        result.error = error;
-        return result;
-    }
+    const auto enumeration = EnumerateCandidates(error);
+    result.devices = enumeration.devices;
+    result.error = error;
+    const auto selected = std::find_if(result.devices.begin(), result.devices.end(),
+        [](const DetectedDevice& device) { return device.controllable; });
+    if (selected == result.devices.end()) return result;
 
-    const Candidate& selected = candidates.front();
     result.detected = true;
-    result.productId = selected.productId;
-    result.productName = selected.productName;
-    result.devicePath = selected.path;
+    result.productId = selected->productId;
+    result.productName = selected->productName;
+    result.devicePath = selected->controlPath;
     return result;
 }
 
-bool RazerOrnataController::Open(const DetectionResult& detection) {
+bool RazerOrnataController::Open(const DetectedDevice& device) {
     Close();
-    if (!detection.detected || !IsSupportedProduct(detection.productId) ||
-        detection.devicePath.empty()) {
+    if (!device.controllable || !IsSupportedProduct(device.productId) ||
+        device.controlPath.empty()) {
         lastError_ = L"Rejected unverified Razer HID identity";
         return false;
     }
 
-    HANDLE handle = OpenHidPath(detection.devicePath);
+    HANDLE handle = OpenHidPath(device.controlPath);
     if (handle == INVALID_HANDLE_VALUE) {
         lastError_ = FormatWin32Error(L"CreateFileW", GetLastError());
         return false;
@@ -277,7 +348,7 @@ bool RazerOrnataController::Open(const DetectionResult& detection) {
     HIDP_CAPS caps = {};
     const bool identityOk = HidD_GetAttributes(handle, &attributes) == TRUE &&
         attributes.VendorID == kVendorId &&
-        attributes.ProductID == detection.productId &&
+        attributes.ProductID == device.productId &&
         IsSupportedProduct(attributes.ProductID);
     const bool capsOk = HidD_GetPreparsedData(handle, &preparsed) == TRUE &&
         HidP_GetCaps(preparsed, &caps) == HIDP_STATUS_SUCCESS &&
@@ -291,7 +362,7 @@ bool RazerOrnataController::Open(const DetectionResult& detection) {
     }
 
     handle_ = handle;
-    productId_ = detection.productId;
+    productId_ = device.productId;
     customEffectActive_ = false;
     haveLastFrame_ = false;
     lastError_.clear();
@@ -343,6 +414,18 @@ bool RazerOrnataController::SetZoneColors(const std::array<Rgb, kZoneCount>& col
     return true;
 }
 
+bool RazerOrnataController::SetSpectrumCycling() {
+    if (!IsOpen()) {
+        lastError_ = L"Razer HID handle is not open";
+        return false;
+    }
+    auto spectrum = BuildSpectrumEffectReport();
+    if (!SendReport(spectrum)) return false;
+    customEffectActive_ = false;
+    haveLastFrame_ = false;
+    return true;
+}
+
 bool RazerOrnataController::IsWhitelistedReport(
     const std::array<std::uint8_t, kReportSize>& report) const {
     if (report[0] != 0 || report[1] != kTransactionId || report[2] != 0 ||
@@ -366,6 +449,14 @@ bool RazerOrnataController::IsWhitelistedReport(
 
     if (report[5] == 0x0C && report[6] == 0x0F && report[7] == 0x02) {
         if (report[8] != 0 || report[9] != 0 || report[10] != 0x08) return false;
+        for (std::size_t i = 11; i <= 87; ++i) {
+            if (report[i] != 0) return false;
+        }
+        return true;
+    }
+
+    if (report[5] == 0x06 && report[6] == 0x0F && report[7] == 0x02) {
+        if (report[8] != 0x01 || report[9] != 0 || report[10] != 0x03) return false;
         for (std::size_t i = 11; i <= 87; ++i) {
             if (report[i] != 0) return false;
         }
