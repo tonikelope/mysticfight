@@ -1748,10 +1748,9 @@ static void PopulateAdvancedRazerDevices(HWND hDlg) {
         if (!device.controllable || device.deviceKey.empty()) continue;
 
         wchar_t pid[32] = {};
-        swprintf_s(pid, L" [PID 0x%04X] · ", device.productId);
+        swprintf_s(pid, L" (PID 0x%04X)", device.productId);
         std::wstring label = device.productName;
         label += pid;
-        label += device.deviceKey;
 
         wchar_t* storedKey = HeapDupString(device.deviceKey.c_str());
         if (!storedKey) continue;
@@ -2799,7 +2798,8 @@ static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
     };
 
     const int advancedCtrls[] = {
-        IDC_GRP_ADVANCED, IDC_GRP_LIGHTING_CONTROLLERS, IDC_LBL_ADV_SENSOR, IDC_COMBO_SENSOR_UPDATE,
+        IDC_GRP_ADVANCED, IDC_GRP_LIGHTING_CONTROLLERS, IDC_GRP_ADV_RAZER_CONTROLLER,
+        IDC_LBL_ADV_SENSOR, IDC_COMBO_SENSOR_UPDATE,
         IDC_LBL_ADV_LED, IDC_LBL_ADV_MSI_FPS, IDC_COMBO_LED_FPS,
         IDC_LBL_ADV_SMOOTH, IDC_COMBO_SMOOTHING,
         IDC_COMBO_RAZER_DEVICE, IDC_LBL_ADV_RAZER, IDC_COMBO_RAZER_FPS,
@@ -2844,7 +2844,8 @@ static void ApplyDialogTranslations(HWND hDlg) {
 
     // Advanced layer
     SetDlgItemTextW(hDlg, IDC_GRP_ADVANCED, T(STR_GRP_ADVANCED));
-    SetDlgItemTextW(hDlg, IDC_GRP_LIGHTING_CONTROLLERS, T(STR_GRP_LIGHTING_CONTROLLERS));
+    SetDlgItemTextW(hDlg, IDC_GRP_LIGHTING_CONTROLLERS, L"MSI");
+    SetDlgItemTextW(hDlg, IDC_GRP_ADV_RAZER_CONTROLLER, L"Razer");
     SetDlgItemTextW(hDlg, IDC_LBL_ADV_SENSOR, T(STR_LBL_ADV_SENSOR));
     UpdateAdvancedMsiDeviceLabel(hDlg);
     SetDlgItemTextW(hDlg, IDC_LBL_ADV_MSI_FPS, T(STR_LBL_ADV_RAZER));
