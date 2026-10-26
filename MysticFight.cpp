@@ -144,7 +144,7 @@ const int   DEF_TEMP_MED = 70;
 const int   DEF_TEMP_HIGH = 90;
 
 const int   DEFAULT_PROFILE_COUNT = 5;
-const int   MAX_PROFILE_COUNT = 20;
+const int   MAX_PROFILE_COUNT = 50;
 const int   PROFILE_HOTKEY_VISIBLE_ROWS = 5;
 const int   PROFILE_HOTKEY_ID_BASE = 101;
 const int   HOTKEY_SETTINGS_VERSION = 2;
@@ -3614,7 +3614,18 @@ static void CaptureVisibleProfileHotkeys(HWND hDlg) {
 static void RefreshProfileHotkeyControls(HWND hDlg, const bool captureVisible) {
     if (captureVisible) CaptureVisibleProfileHotkeys(hDlg);
 
-    const int profileCount = ProfileCount();
+    // Use the same user-defined labels shown by the profile tabs.  Take a
+    // snapshot under the config lock so a concurrent config refresh cannot
+    // invalidate profile storage while the controls are being rebuilt.
+    std::vector<std::wstring> profileLabels;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+        profileLabels.reserve(g_Global.profiles.size());
+        for (const Config& profile : g_Global.profiles) {
+            profileLabels.emplace_back(profile.label);
+        }
+    }
+    const int profileCount = static_cast<int>(profileLabels.size());
     g_settingsProfileHotkeys.resize(profileCount, 0);
     const int maxOffset = (std::max)(0,
         profileCount - PROFILE_HOTKEY_VISIBLE_ROWS);
@@ -3631,14 +3642,15 @@ static void RefreshProfileHotkeyControls(HWND hDlg, const bool captureVisible) {
 
     for (int slot = 0; slot < PROFILE_HOTKEY_VISIBLE_ROWS; ++slot) {
         const int profileIndex = g_settingsHotkeyOffset + slot;
-        wchar_t label[96] = {};
         const WORD hotkey = profileIndex < profileCount
             ? g_settingsProfileHotkeys[profileIndex]
             : 0;
+        std::wstring label;
         if (profileIndex < profileCount) {
-            swprintf_s(label, T(STR_LBL_ACT_PROFILE), profileIndex + 1);
+            label = profileLabels[profileIndex];
+            label += L":";
         }
-        SetDlgItemTextW(hDlg, PROFILE_HOTKEY_LABEL_IDS[slot], label);
+        SetDlgItemTextW(hDlg, PROFILE_HOTKEY_LABEL_IDS[slot], label.c_str());
         SendDlgItemMessageW(hDlg, PROFILE_HOTKEY_CONTROL_IDS[slot],
             HKM_SETHOTKEY, hotkey, 0);
     }
