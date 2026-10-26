@@ -2,7 +2,7 @@
   
 # MysticFight
 
-<img src="rgb.png" width="64" height="64" align="right" />
+<img src="docs/assets/rgb.png" width="64" height="64" align="right" />
 
 Temperature-driven RGB control for MSI Mystic Light and explicitly supported Razer HID devices.
 
@@ -28,7 +28,7 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * **5 profiles settings:** You can set a custom global shortcut keys to change between profiles.
 * **Night-Mode:** You can set a custom global shortcut keys to power-off/on LEDs.
 * **SDK auto-reset:** Automatic reset mechanism for the Mystic Light service in case of failure.
-  <p align="center"><img src="mf_settings5.png" width="500" /></p>
+  <p align="center"><img src="docs/assets/mf_settings.png" width="500" /></p>
 
 ### Timing and idle behaviour
 
@@ -68,5 +68,5 @@ The exact Razer protocol scope and safety decisions are documented in [RAZER_HID
 
 The documented Razer HID command structures used by MysticFight were informed by the excellent reverse-engineering work of the [OpenRazer project](https://github.com/openrazer/openrazer) and cross-checked against [openrazer-win](https://github.com/Ar4ikov/openrazer-win). MysticFight does not bundle or require either project. On Windows it communicates directly with only the explicitly supported devices above.
 
-<p align="center"><img src="pepinazo.jpeg"/></p>
+<p align="center"><img src="docs/assets/pepinazo.jpeg"/></p>
 </div>

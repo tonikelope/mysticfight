@@ -149,7 +149,7 @@
     <ResourceCompile Include="MysticFight.rc" />
   </ItemGroup>
   <ItemGroup>
-    <Image Include="E:\DESCARGAS\favicon.ico" />
+    <Image Include="favicon.ico" />
   </ItemGroup>
   <ItemGroup>
     <None Include="MysticLight_SDK.dll" />

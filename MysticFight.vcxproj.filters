@@ -39,7 +39,7 @@
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
-    <Image Include="E:\DESCARGAS\favicon.ico">
+    <Image Include="favicon.ico">
       <Filter>Archivos de recursos</Filter>
     </Image>
   </ItemGroup>
