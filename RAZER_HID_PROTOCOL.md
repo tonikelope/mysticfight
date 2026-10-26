@@ -91,6 +91,12 @@ not stored persistently: while MysticFight owns the device it uses the volatile
 custom effect, and persistent commands are reserved for the configured Off or
 Spectrum Cycling hand-off.
 
+Profiles use one shared temperature sensor but may map it through either the
+backward-compatible General thermal scheme or an independent threshold/colour
+scheme for each selected physical Razer device. Every runtime keeps its own
+interpolation and FPS deadlines; once its visible colour settles, that device
+receives no repeated frame writes.
+
 A release command is sent only to a compatible device that MysticFight
 successfully controlled, when a new active profile no longer selects it or the
 application exits. A committed Windows shutdown/restart uses the same bounded

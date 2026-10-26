@@ -171,7 +171,8 @@ enum StrId {
     STR_LBL_PROFILE_NAME, STR_CHK_ACTIVE, STR_GRP_MSI, STR_CHK_CONTROL_MSI,
     STR_LBL_DEVICE, STR_LBL_AREA, STR_GRP_RAZER,
     STR_GRP_SOURCE,
-    STR_GRP_THRESHOLDS, STR_LBL_LOW, STR_LBL_MED, STR_LBL_HIGH, STR_LBL_COLOR_HEX,
+    STR_GRP_THRESHOLDS, STR_CHK_USE_GENERAL_THERMAL,
+    STR_LBL_LOW, STR_LBL_MED, STR_LBL_HIGH, STR_LBL_COLOR_HEX,
     STR_BTN_RESET_DEFAULTS,
     // Advanced layer
     STR_GRP_ADVANCED, STR_GRP_LIGHTING_CONTROLLERS,
@@ -211,7 +212,8 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Profile Label:", L"Set as Active Profile", L"MSI Hardware Control", L"Control MSI motherboard",
         L"Device:", L"Area:", L"Razer devices",
         L"Data Source",
-        L"Temperature Thresholds and Colors", L"LOW:", L"MEDIUM:", L"HIGH:", L"Color (hex):",
+        L"Temperature Thresholds and Colors", L"Use general scheme for all devices",
+        L"LOW:", L"MEDIUM:", L"HIGH:", L"Color (hex):",
         L"Reset Defaults",
         L"Shared Thermal Engine", L"Controllers", L"Sensor Update:", L"MSI device", L"FPS:", L"Smoothing:",
         L"On release:", L"Lights off", L"Spectrum Cycling",
@@ -236,7 +238,8 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Etiqueta del perfil:", L"Establecer como perfil activo", L"Control de hardware MSI", L"Controlar placa base MSI",
         L"Dispositivo:", L"Área:", L"Dispositivos Razer",
         L"Origen de datos",
-        L"Umbrales de temperatura y colores", L"BAJA:", L"MEDIA:", L"ALTA:", L"Color (hex):",
+        L"Umbrales de temperatura y colores", L"Usar esquema general para todos los dispositivos",
+        L"BAJA:", L"MEDIA:", L"ALTA:", L"Color (hex):",
         L"Restaurar valores",
         L"Motor térmico compartido", L"Controladoras", L"Actualización sensor:", L"Dispositivo MSI", L"FPS:", L"Suavizado:",
         L"Al liberar:", L"Apagar luces", L"Spectrum Cycling",
@@ -303,18 +306,31 @@ enum class DataSource {
     HTTP
 };
 
+struct ThermalScheme {
+    int tempLow = DEF_TEMP_LOW;
+    int tempMed = DEF_TEMP_MED;
+    int tempHigh = DEF_TEMP_HIGH;
+    COLORREF colorLow = RGB(0, 255, 0);
+    COLORREF colorMed = RGB(255, 255, 0);
+    COLORREF colorHigh = RGB(255, 0, 0);
+};
+
 struct Config {
     wchar_t sensorID[SENSOR_ID_LEN] = {};
     wchar_t targetDevice[256] = {};
     int targetLedIndex = 0;
-    int tempLow = 0, tempMed = 0, tempHigh = 0;
-    COLORREF colorLow = 0, colorMed = 0, colorHigh = 0;
     wchar_t webServerUrl[256] = {};
     wchar_t label[64] = {};
     // Semicolon-separated physical device IDs selected in this profile.
     std::wstring razerDeviceIds;
     bool controlMsi = false;
     bool controlRazer = false;
+    // Existing configurations migrate into General and keep their historical
+    // shared behavior until the user explicitly enables per-device schemes.
+    bool useGeneralThermal = true;
+    ThermalScheme generalThermal;
+    ThermalScheme msiThermal;
+    std::map<std::wstring, ThermalScheme> razerThermals;
 };
 
 struct AppHotkeys {
@@ -1028,19 +1044,131 @@ static std::wstring ReadIniString(const wchar_t* section, const wchar_t* key) {
     }
 }
 
+static std::set<std::wstring> ParseRazerDeviceIds(const wchar_t* value) {
+    std::set<std::wstring> result;
+    if (!value || !*value) return result;
+    std::wstring input(value);
+    std::size_t start = 0;
+    while (start <= input.size()) {
+        const std::size_t end = input.find(L';', start);
+        const std::wstring key = input.substr(start,
+            end == std::wstring::npos ? std::wstring::npos : end - start);
+        if (!key.empty()) result.insert(key);
+        if (end == std::wstring::npos) break;
+        start = end + 1;
+    }
+    return result;
+}
+
+static std::uint64_t StableUtf16Hash(const std::wstring& value,
+    std::uint64_t hash = 14695981039346656037ULL) {
+    for (const wchar_t codeUnit : value) {
+        hash ^= static_cast<std::uint16_t>(codeUnit);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
 static std::wstring RazerDeviceSettingsSection(const std::wstring& deviceKey) {
     // Stable FNV-1a over UTF-16 code units keeps arbitrary container IDs out of
     // INI section names. DeviceKey is also stored and verified against a hash
     // collision before any values are accepted.
-    std::uint64_t hash = 14695981039346656037ULL;
-    for (const wchar_t value : deviceKey) {
-        hash ^= static_cast<std::uint16_t>(value);
-        hash *= 1099511628211ULL;
-    }
+    const std::uint64_t hash = StableUtf16Hash(deviceKey);
     wchar_t section[40] = {};
     swprintf_s(section, L"RazerDevice_%016llX",
         static_cast<unsigned long long>(hash));
     return section;
+}
+
+static std::wstring RazerThermalSection(const int profileIndex,
+    const std::wstring& deviceKey) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    hash ^= static_cast<std::uint8_t>(profileIndex);
+    hash *= 1099511628211ULL;
+    hash = StableUtf16Hash(deviceKey, hash);
+    wchar_t section[48] = {};
+    swprintf_s(section, L"ProfileThermal_%d_%016llX", profileIndex,
+        static_cast<unsigned long long>(hash));
+    return section;
+}
+
+static ThermalScheme ValidateThermalScheme(ThermalScheme scheme,
+    const ThermalScheme& fallback, const char* context) {
+    if (!(scheme.tempLow < scheme.tempMed && scheme.tempMed < scheme.tempHigh)) {
+        char message[256] = {};
+        snprintf(message, sizeof(message),
+            "[Config] Invalid thermal thresholds for %s; using migrated defaults.", context);
+        Log(message);
+        return fallback;
+    }
+    return scheme;
+}
+
+static ThermalScheme ReadThermalScheme(const wchar_t* section,
+    const wchar_t* prefix, const ThermalScheme& fallback, const char* context) {
+    const std::wstring keyPrefix = prefix ? prefix : L"";
+    ThermalScheme scheme = fallback;
+    scheme.tempLow = GetPrivateProfileIntW(section,
+        (keyPrefix + L"TempLow").c_str(), fallback.tempLow, INI_FILE);
+    scheme.tempMed = GetPrivateProfileIntW(section,
+        (keyPrefix + L"TempMed").c_str(), fallback.tempMed, INI_FILE);
+    scheme.tempHigh = GetPrivateProfileIntW(section,
+        (keyPrefix + L"TempHigh").c_str(), fallback.tempHigh, INI_FILE);
+
+    wchar_t fallbackHex[10] = {};
+    wchar_t value[10] = {};
+    ColorToHex(fallback.colorLow, fallbackHex, 10);
+    GetPrivateProfileStringW(section, (keyPrefix + L"ColorLow").c_str(),
+        fallbackHex, value, 10, INI_FILE);
+    scheme.colorLow = IsValidHex(value) ? HexToColor(value) : fallback.colorLow;
+    ColorToHex(fallback.colorMed, fallbackHex, 10);
+    GetPrivateProfileStringW(section, (keyPrefix + L"ColorMed").c_str(),
+        fallbackHex, value, 10, INI_FILE);
+    scheme.colorMed = IsValidHex(value) ? HexToColor(value) : fallback.colorMed;
+    ColorToHex(fallback.colorHigh, fallbackHex, 10);
+    GetPrivateProfileStringW(section, (keyPrefix + L"ColorHigh").c_str(),
+        fallbackHex, value, 10, INI_FILE);
+    scheme.colorHigh = IsValidHex(value) ? HexToColor(value) : fallback.colorHigh;
+    return ValidateThermalScheme(scheme, fallback, context);
+}
+
+static ThermalScheme ReadRazerThermalScheme(const int profileIndex,
+    const std::wstring& deviceKey, const ThermalScheme& fallback) {
+    const std::wstring section = RazerThermalSection(profileIndex, deviceKey);
+    if (ReadIniString(section.c_str(), L"DeviceKey") != deviceKey ||
+        GetPrivateProfileIntW(section.c_str(), L"ProfileIndex", -1, INI_FILE) != profileIndex) {
+        return fallback;
+    }
+    return ReadThermalScheme(section.c_str(), L"", fallback, "Razer device");
+}
+
+static void WriteThermalScheme(const wchar_t* section, const wchar_t* prefix,
+    const ThermalScheme& scheme) {
+    const std::wstring keyPrefix = prefix ? prefix : L"";
+    WritePrivateProfileStringW(section, (keyPrefix + L"TempLow").c_str(),
+        std::to_wstring(scheme.tempLow).c_str(), INI_FILE);
+    WritePrivateProfileStringW(section, (keyPrefix + L"TempMed").c_str(),
+        std::to_wstring(scheme.tempMed).c_str(), INI_FILE);
+    WritePrivateProfileStringW(section, (keyPrefix + L"TempHigh").c_str(),
+        std::to_wstring(scheme.tempHigh).c_str(), INI_FILE);
+    wchar_t value[10] = {};
+    ColorToHex(scheme.colorLow, value, 10);
+    WritePrivateProfileStringW(section, (keyPrefix + L"ColorLow").c_str(), value, INI_FILE);
+    ColorToHex(scheme.colorMed, value, 10);
+    WritePrivateProfileStringW(section, (keyPrefix + L"ColorMed").c_str(), value, INI_FILE);
+    ColorToHex(scheme.colorHigh, value, 10);
+    WritePrivateProfileStringW(section, (keyPrefix + L"ColorHigh").c_str(), value, INI_FILE);
+}
+
+static ThermalScheme& EnsureRazerThermalSchemeLocked(Config& profile,
+    const int profileIndex, const std::wstring& deviceKey) {
+    const auto [it, inserted] = profile.razerThermals.try_emplace(deviceKey,
+        profile.generalThermal);
+    if (inserted) {
+        it->second = ReadRazerThermalScheme(profileIndex, deviceKey,
+            profile.generalThermal);
+    }
+    return it->second;
 }
 
 static RazerDeviceSettings ReadRazerDeviceSettings(const std::wstring& deviceKey) {
@@ -1124,20 +1252,25 @@ static void SaveSettings() {
         WritePrivateProfileStringW(section.c_str(), L"TargetLedIndex", std::to_wstring(p.targetLedIndex).c_str(), INI_FILE);
         WritePrivateProfileStringW(section.c_str(), L"ControlMSI", p.controlMsi ? L"1" : L"0", INI_FILE);
         WritePrivateProfileStringW(section.c_str(), L"ControlRazer", p.controlRazer ? L"1" : L"0", INI_FILE);
+        WritePrivateProfileStringW(section.c_str(), L"UseGeneralThermal",
+            p.useGeneralThermal ? L"1" : L"0", INI_FILE);
         WritePrivateProfileStringW(section.c_str(), L"RazerDeviceIds", p.razerDeviceIds.c_str(), INI_FILE);
 
-        WritePrivateProfileStringW(section.c_str(), L"TempLow", std::to_wstring(p.tempLow).c_str(), INI_FILE);
-        WritePrivateProfileStringW(section.c_str(), L"TempMed", std::to_wstring(p.tempMed).c_str(), INI_FILE);
-        WritePrivateProfileStringW(section.c_str(), L"TempHigh", std::to_wstring(p.tempHigh).c_str(), INI_FILE);
+        WritePrivateProfileStringW(section.c_str(), L"ThermalSchemesVersion", L"1", INI_FILE);
+        WriteThermalScheme(section.c_str(), L"Msi", p.msiThermal);
 
-        wchar_t hL[10], hM[10], hH[10];
-        ColorToHex(p.colorLow, hL, 10);
-        ColorToHex(p.colorMed, hM, 10);
-        ColorToHex(p.colorHigh, hH, 10);
+        // General is also the legacy shared scheme, so older MysticFight builds
+        // still receive the same coherent thresholds and colours.
+        WriteThermalScheme(section.c_str(), L"", p.generalThermal);
 
-        WritePrivateProfileStringW(section.c_str(), L"ColorLow", hL, INI_FILE);
-        WritePrivateProfileStringW(section.c_str(), L"ColorMed", hM, INI_FILE);
-        WritePrivateProfileStringW(section.c_str(), L"ColorHigh", hH, INI_FILE);
+        for (const auto& [deviceKey, scheme] : p.razerThermals) {
+            const std::wstring thermalSection = RazerThermalSection(i, deviceKey);
+            WritePrivateProfileStringW(thermalSection.c_str(), L"ProfileIndex",
+                std::to_wstring(i).c_str(), INI_FILE);
+            WritePrivateProfileStringW(thermalSection.c_str(), L"DeviceKey",
+                deviceKey.c_str(), INI_FILE);
+            WriteThermalScheme(thermalSection.c_str(), L"", scheme);
+        }
 
         // Keep the legacy profile key synchronized for backward compatibility.
         WritePrivateProfileStringW(section.c_str(), L"WebServerUrl", g_Global.lhmServerUrl, INI_FILE);
@@ -1308,15 +1441,11 @@ static void LoadSettings() {
         if (i > 0) section += L"_" + std::to_wstring(i);
         Config& p = g_Global.profiles[i];
 
-        p.tempLow = GetPrivateProfileIntW(section.c_str(), L"TempLow", DEF_TEMP_LOW, INI_FILE);
-        p.tempMed = GetPrivateProfileIntW(section.c_str(), L"TempMed", DEF_TEMP_MED, INI_FILE);
-        p.tempHigh = GetPrivateProfileIntW(section.c_str(), L"TempHigh", DEF_TEMP_HIGH, INI_FILE);
-        if (!(p.tempLow < p.tempMed && p.tempMed < p.tempHigh)) {
-            Log("[Config] Invalid temperature thresholds; using factory defaults.");
-            p.tempLow = DEF_TEMP_LOW;
-            p.tempMed = DEF_TEMP_MED;
-            p.tempHigh = DEF_TEMP_HIGH;
-        }
+        const ThermalScheme factoryScheme;
+        p.generalThermal = ReadThermalScheme(section.c_str(), L"",
+            factoryScheme, "legacy profile");
+        p.msiThermal = ReadThermalScheme(section.c_str(), L"Msi",
+            p.generalThermal, "MSI controller");
 
         GetPrivateProfileStringW(section.c_str(), L"TargetDevice", DEF_DEVICE_TYPE, p.targetDevice, 256, INI_FILE);
         if (p.targetDevice[0] == L'\0') wcscpy_s(p.targetDevice, DEF_DEVICE_TYPE);
@@ -1326,16 +1455,14 @@ static void LoadSettings() {
         // is next saved. New profiles always start with no selected device.
         p.controlMsi = GetPrivateProfileIntW(section.c_str(), L"ControlMSI", 1, INI_FILE) != 0;
         p.controlRazer = GetPrivateProfileIntW(section.c_str(), L"ControlRazer", 0, INI_FILE) != 0;
+        p.useGeneralThermal = GetPrivateProfileIntW(section.c_str(),
+            L"UseGeneralThermal", 1, INI_FILE) != 0;
         p.razerDeviceIds = ReadIniString(section.c_str(), L"RazerDeviceIds");
-
-        wchar_t hL[10], hM[10], hH[10];
-        GetPrivateProfileStringW(section.c_str(), L"ColorLow", DEF_COLOR_LOW, hL, 10, INI_FILE);
-        GetPrivateProfileStringW(section.c_str(), L"ColorMed", DEF_COLOR_MED, hM, 10, INI_FILE);
-        GetPrivateProfileStringW(section.c_str(), L"ColorHigh", DEF_COLOR_HIGH, hH, 10, INI_FILE);
-        if (!IsValidHex(hL)) wcscpy_s(hL, DEF_COLOR_LOW);
-        if (!IsValidHex(hM)) wcscpy_s(hM, DEF_COLOR_MED);
-        if (!IsValidHex(hH)) wcscpy_s(hH, DEF_COLOR_HIGH);
-        p.colorLow = HexToColor(hL); p.colorMed = HexToColor(hM); p.colorHigh = HexToColor(hH);
+        p.razerThermals.clear();
+        for (const auto& deviceKey : ParseRazerDeviceIds(p.razerDeviceIds.c_str())) {
+            p.razerThermals.emplace(deviceKey,
+                ReadRazerThermalScheme(i, deviceKey, p.generalThermal));
+        }
 
         GetPrivateProfileStringW(section.c_str(), L"SensorID", L"", p.sensorID, SENSOR_ID_LEN, INI_FILE);
         wcscpy_s(p.webServerUrl, g_Global.lhmServerUrl);
@@ -1624,21 +1751,15 @@ std::vector<RazerUiDevice> g_razerUiDevices;
 bool g_razerListUpdating = false;
 std::wstring g_advancedRazerDeviceKey;
 
-static std::set<std::wstring> ParseRazerDeviceIds(const wchar_t* value) {
-    std::set<std::wstring> result;
-    if (!value || !*value) return result;
-    std::wstring input(value);
-    std::size_t start = 0;
-    while (start <= input.size()) {
-        const std::size_t end = input.find(L';', start);
-        const std::wstring key = input.substr(start,
-            end == std::wstring::npos ? std::wstring::npos : end - start);
-        if (!key.empty()) result.insert(key);
-        if (end == std::wstring::npos) break;
-        start = end + 1;
-    }
-    return result;
-}
+enum class ThermalUiTargetKind { General, Msi, Razer };
+struct ThermalUiTarget {
+    ThermalUiTargetKind kind = ThermalUiTargetKind::General;
+    std::wstring deviceKey;
+    std::wstring label;
+};
+std::vector<ThermalUiTarget> g_thermalUiTargets;
+int g_thermalUiProfileIndex = -1;
+bool g_thermalTabsUpdating = false;
 
 static void LoadRazerSelectionsToUI(HWND hDlg, const Config& profile) {
     HWND list = GetDlgItem(hDlg, IDC_LIST_RAZER_DEVICES);
@@ -1808,23 +1929,157 @@ static void UpdateAdvancedMsiDeviceLabel(HWND hDlg) {
     SetDlgItemTextW(hDlg, IDC_LBL_ADV_LED, label.c_str());
 }
 
+static std::wstring ThermalTargetIdentity(const ThermalUiTarget& target) {
+    if (target.kind == ThermalUiTargetKind::General) return L"GENERAL";
+    if (target.kind == ThermalUiTargetKind::Msi) return L"MSI";
+    return L"RAZER:" + target.deviceKey;
+}
+
+static void EnableThermalSchemeControls(HWND hDlg, const bool enabled) {
+    for (const int id : { IDC_TEMP_LOW, IDC_TEMP_MED, IDC_TEMP_HIGH,
+        IDC_HEX_LOW, IDC_HEX_MED, IDC_HEX_HIGH, IDC_BTN_RESET,
+        IDC_LBL_LOW, IDC_LBL_MED, IDC_LBL_HIGH, IDC_LBL_C1, IDC_LBL_C2,
+        IDC_LBL_C3, IDC_LBL_HEX1, IDC_LBL_HEX2, IDC_LBL_HEX3 }) {
+        EnableWindow(GetDlgItem(hDlg, id), enabled ? TRUE : FALSE);
+    }
+}
+
+static ThermalScheme ThermalSchemeForUiTargetLocked(Config& profile,
+    const int profileIndex, const ThermalUiTarget& target) {
+    if (target.kind == ThermalUiTargetKind::General) return profile.generalThermal;
+    if (target.kind == ThermalUiTargetKind::Msi) return profile.msiThermal;
+    return EnsureRazerThermalSchemeLocked(profile, profileIndex, target.deviceKey);
+}
+
+static void LoadThermalSchemeControls(HWND hDlg, const int profileIndex) {
+    const int selection = static_cast<int>(SendDlgItemMessage(
+        hDlg, IDC_TAB_THERMAL_DEVICES, TCM_GETCURSEL, 0, 0));
+    if (profileIndex < 0 || profileIndex >= 5 || selection < 0 ||
+        selection >= static_cast<int>(g_thermalUiTargets.size())) {
+        EnableThermalSchemeControls(hDlg, false);
+        return;
+    }
+
+    ThermalScheme scheme;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+        scheme = ThermalSchemeForUiTargetLocked(g_Global.profiles[profileIndex],
+            profileIndex, g_thermalUiTargets[selection]);
+    }
+    SetDlgItemInt(hDlg, IDC_TEMP_LOW, scheme.tempLow, TRUE);
+    SetDlgItemInt(hDlg, IDC_TEMP_MED, scheme.tempMed, TRUE);
+    SetDlgItemInt(hDlg, IDC_TEMP_HIGH, scheme.tempHigh, TRUE);
+    wchar_t value[10] = {};
+    ColorToHex(scheme.colorLow, value, 10);
+    SetDlgItemTextW(hDlg, IDC_HEX_LOW, value);
+    ColorToHex(scheme.colorMed, value, 10);
+    SetDlgItemTextW(hDlg, IDC_HEX_MED, value);
+    ColorToHex(scheme.colorHigh, value, 10);
+    SetDlgItemTextW(hDlg, IDC_HEX_HIGH, value);
+    EnableThermalSchemeControls(hDlg, true);
+}
+
+static void SaveThermalSchemeControls(HWND hDlg, const int profileIndex) {
+    const int selection = static_cast<int>(SendDlgItemMessage(
+        hDlg, IDC_TAB_THERMAL_DEVICES, TCM_GETCURSEL, 0, 0));
+    if (profileIndex < 0 || profileIndex >= 5 || selection < 0 ||
+        selection >= static_cast<int>(g_thermalUiTargets.size())) return;
+
+    std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+    Config& profile = g_Global.profiles[profileIndex];
+    ThermalScheme scheme = ThermalSchemeForUiTargetLocked(profile, profileIndex,
+        g_thermalUiTargets[selection]);
+    BOOL translated = FALSE;
+    const int low = static_cast<int>(GetDlgItemInt(hDlg, IDC_TEMP_LOW, &translated, TRUE));
+    if (translated) scheme.tempLow = low;
+    const int medium = static_cast<int>(GetDlgItemInt(hDlg, IDC_TEMP_MED, &translated, TRUE));
+    if (translated) scheme.tempMed = medium;
+    const int high = static_cast<int>(GetDlgItemInt(hDlg, IDC_TEMP_HIGH, &translated, TRUE));
+    if (translated) scheme.tempHigh = high;
+    wchar_t value[10] = {};
+    GetDlgItemTextW(hDlg, IDC_HEX_LOW, value, 10);
+    if (IsValidHex(value)) scheme.colorLow = HexToColor(value);
+    GetDlgItemTextW(hDlg, IDC_HEX_MED, value, 10);
+    if (IsValidHex(value)) scheme.colorMed = HexToColor(value);
+    GetDlgItemTextW(hDlg, IDC_HEX_HIGH, value, 10);
+    if (IsValidHex(value)) scheme.colorHigh = HexToColor(value);
+
+    const ThermalUiTarget& target = g_thermalUiTargets[selection];
+    if (target.kind == ThermalUiTargetKind::General) profile.generalThermal = scheme;
+    else if (target.kind == ThermalUiTargetKind::Msi) profile.msiThermal = scheme;
+    else EnsureRazerThermalSchemeLocked(profile, profileIndex, target.deviceKey) = scheme;
+}
+
+static void RebuildThermalDeviceTabs(HWND hDlg, const int profileIndex,
+    const bool saveCurrent) {
+    HWND tab = GetDlgItem(hDlg, IDC_TAB_THERMAL_DEVICES);
+    if (!tab || profileIndex < 0 || profileIndex >= 5) return;
+
+    std::wstring previousIdentity;
+    const int previousSelection = TabCtrl_GetCurSel(tab);
+    if (previousSelection >= 0 &&
+        previousSelection < static_cast<int>(g_thermalUiTargets.size())) {
+        previousIdentity = ThermalTargetIdentity(g_thermalUiTargets[previousSelection]);
+    }
+    if (saveCurrent && g_thermalUiProfileIndex == profileIndex) {
+        SaveThermalSchemeControls(hDlg, profileIndex);
+    }
+
+    std::vector<ThermalUiTarget> targets;
+    targets.push_back({ ThermalUiTargetKind::General, L"", L"General" });
+    if (IsDlgButtonChecked(hDlg, IDC_CHK_CONTROL_MSI) == BST_CHECKED) {
+        targets.push_back({ ThermalUiTargetKind::Msi, L"", L"MSI" });
+    }
+
+    std::map<std::pair<std::wstring, std::uint16_t>, int> totals;
+    std::map<std::pair<std::wstring, std::uint16_t>, int> ordinals;
+    for (const auto& item : g_razerUiDevices) {
+        ++totals[{ item.device.productName, item.device.productId }];
+    }
+    HWND list = GetDlgItem(hDlg, IDC_LIST_RAZER_DEVICES);
+    for (int i = 0; list && i < static_cast<int>(g_razerUiDevices.size()); ++i) {
+        const auto& device = g_razerUiDevices[i].device;
+        const auto identity = std::make_pair(device.productName, device.productId);
+        const int ordinal = ++ordinals[identity];
+        if (!device.controllable || !ListView_GetCheckState(list, i)) continue;
+        std::wstring label = device.productName;
+        if (totals[identity] > 1) label += L" #" + std::to_wstring(ordinal);
+        targets.push_back({ ThermalUiTargetKind::Razer, device.deviceKey,
+            std::move(label) });
+    }
+
+    g_thermalTabsUpdating = true;
+    TabCtrl_DeleteAllItems(tab);
+    g_thermalUiTargets = std::move(targets);
+    int selectedIndex = -1;
+    for (int i = 0; i < static_cast<int>(g_thermalUiTargets.size()); ++i) {
+        TCITEMW item = {};
+        item.mask = TCIF_TEXT;
+        item.pszText = g_thermalUiTargets[i].label.data();
+        TabCtrl_InsertItem(tab, i, &item);
+        if (!previousIdentity.empty() &&
+            ThermalTargetIdentity(g_thermalUiTargets[i]) == previousIdentity) {
+            selectedIndex = i;
+        }
+    }
+    if (IsDlgButtonChecked(hDlg, IDC_CHK_USE_GENERAL_THERMAL) == BST_CHECKED) {
+        selectedIndex = 0;
+    }
+    else if (selectedIndex < 0 && !g_thermalUiTargets.empty()) selectedIndex = 0;
+    if (selectedIndex >= 0) TabCtrl_SetCurSel(tab, selectedIndex);
+    g_thermalUiProfileIndex = profileIndex;
+    g_thermalTabsUpdating = false;
+    LoadThermalSchemeControls(hDlg, profileIndex);
+}
+
 /**
  * Transfers Profile Data into the Settings Dialog controls
  */
 static void LoadProfileToUI(HWND hDlg, int profileIndex, int tempActiveIndex) {
     if (profileIndex < 0 || profileIndex >= 5) return;
     Config& p = g_Global.profiles[profileIndex];
-
-    SetDlgItemInt(hDlg, IDC_TEMP_LOW, p.tempLow, TRUE);
-    SetDlgItemInt(hDlg, IDC_TEMP_MED, p.tempMed, TRUE);
-    SetDlgItemInt(hDlg, IDC_TEMP_HIGH, p.tempHigh, TRUE);
     SetDlgItemTextW(hDlg, IDC_EDIT_LABEL, p.label);
     SendMessage(GetDlgItem(hDlg, IDC_COMBO_DATA_SOURCE), CB_SETCURSEL, 0, 0);
-
-    wchar_t hexBuf[10];
-    ColorToHex(p.colorLow, hexBuf, 10);  SetDlgItemTextW(hDlg, IDC_HEX_LOW, hexBuf);
-    ColorToHex(p.colorMed, hexBuf, 10);  SetDlgItemTextW(hDlg, IDC_HEX_MED, hexBuf);
-    ColorToHex(p.colorHigh, hexBuf, 10); SetDlgItemTextW(hDlg, IDC_HEX_HIGH, hexBuf);
 
     HWND hComboDev = GetDlgItem(hDlg, IDC_COMBO_DEVICE);
     int devCount = (int)SendMessage(hComboDev, CB_GETCOUNT, 0, 0);
@@ -1840,7 +2095,11 @@ static void LoadProfileToUI(HWND hDlg, int profileIndex, int tempActiveIndex) {
     PopulateSensorList(hDlg, p.webServerUrl, p.sensorID);
 
     CheckDlgButton(hDlg, IDC_CHK_CONTROL_MSI, p.controlMsi ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(hDlg, IDC_CHK_USE_GENERAL_THERMAL,
+        p.useGeneralThermal ? BST_CHECKED : BST_UNCHECKED);
     LoadRazerSelectionsToUI(hDlg, p);
+    g_thermalUiProfileIndex = -1;
+    RebuildThermalDeviceTabs(hDlg, profileIndex, false);
     CheckDlgButton(hDlg, IDC_CHK_ACTIVE_PROFILE, (profileIndex == tempActiveIndex) ? BST_CHECKED : BST_UNCHECKED);
     InvalidateRect(hDlg, NULL, TRUE);
 }
@@ -1927,24 +2186,15 @@ static void SaveGlobalAdvancedFromUI(HWND hDlg) {
  * Transfers Dialog data back to global config profiles
  */
 static void SaveUIToProfile(HWND hDlg, int profileIndex) {
+    SaveThermalSchemeControls(hDlg, profileIndex);
     std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
 
     Config& p = g_Global.profiles[profileIndex];
 
     p.controlMsi = IsDlgButtonChecked(hDlg, IDC_CHK_CONTROL_MSI) == BST_CHECKED;
+    p.useGeneralThermal = IsDlgButtonChecked(hDlg,
+        IDC_CHK_USE_GENERAL_THERMAL) == BST_CHECKED;
     SaveRazerSelectionsFromUI(hDlg, p);
-
-    p.tempLow = GetDlgItemInt(hDlg, IDC_TEMP_LOW, NULL, TRUE);
-    p.tempMed = GetDlgItemInt(hDlg, IDC_TEMP_MED, NULL, TRUE);
-    p.tempHigh = GetDlgItemInt(hDlg, IDC_TEMP_HIGH, NULL, TRUE);
-
-    wchar_t buf[256];
-    GetDlgItemTextW(hDlg, IDC_HEX_LOW, buf, 10);
-    p.colorLow = HexToColor(buf);
-    GetDlgItemTextW(hDlg, IDC_HEX_MED, buf, 10);
-    p.colorMed = HexToColor(buf);
-    GetDlgItemTextW(hDlg, IDC_HEX_HIGH, buf, 10);
-    p.colorHigh = HexToColor(buf);
 
     int idxDev = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_DEVICE), CB_GETCURSEL, 0, 0);
     if (idxDev != CB_ERR) {
@@ -2763,6 +3013,7 @@ static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
         IDC_GRP_MSI, IDC_GRP_RAZER, IDC_GRP_SOURCE, IDC_GRP_THRESHOLDS,
         IDC_EDIT_LABEL, IDC_CHK_ACTIVE_PROFILE, IDC_COMBO_DEVICE, IDC_COMBO_AREA,
         IDC_CHK_CONTROL_MSI, IDC_LIST_RAZER_DEVICES,
+        IDC_CHK_USE_GENERAL_THERMAL, IDC_TAB_THERMAL_DEVICES,
         IDC_COMBO_DATA_SOURCE, IDC_SENSOR_ID, IDC_TEMP_LOW, IDC_TEMP_MED, IDC_TEMP_HIGH,
         IDC_HEX_LOW, IDC_HEX_MED, IDC_HEX_HIGH, IDC_BTN_RESET,
         IDC_LBL_PROFILE_NAME, IDC_LBL_DEVICE, IDC_LBL_AREA,
@@ -2812,6 +3063,8 @@ static void ApplyDialogTranslations(HWND hDlg) {
     SetDlgItemTextW(hDlg, IDC_GRP_RAZER, T(STR_GRP_RAZER));
     SetDlgItemTextW(hDlg, IDC_GRP_SOURCE, T(STR_GRP_SOURCE));
     SetDlgItemTextW(hDlg, IDC_GRP_THRESHOLDS, T(STR_GRP_THRESHOLDS));
+    SetDlgItemTextW(hDlg, IDC_CHK_USE_GENERAL_THERMAL,
+        T(STR_CHK_USE_GENERAL_THERMAL));
     SetDlgItemTextW(hDlg, IDC_LBL_LOW, T(STR_LBL_LOW));
     SetDlgItemTextW(hDlg, IDC_LBL_MED, T(STR_LBL_MED));
     SetDlgItemTextW(hDlg, IDC_LBL_HIGH, T(STR_LBL_HIGH));
@@ -3066,6 +3319,48 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
     case WM_NOTIFY: {
         LPNMHDR pnm = (LPNMHDR)lParam;
+        if (pnm->idFrom == IDC_TAB_THERMAL_DEVICES && pnm->code == NM_CUSTOMDRAW) {
+            const auto draw = reinterpret_cast<const NMCUSTOMDRAW*>(lParam);
+            LRESULT result = CDRF_DODEFAULT;
+            if (draw->dwDrawStage == CDDS_PREPAINT) {
+                result = CDRF_NOTIFYITEMDRAW;
+            }
+            else if (draw->dwDrawStage == CDDS_ITEMPREPAINT &&
+                IsDlgButtonChecked(hDlg, IDC_CHK_USE_GENERAL_THERMAL) == BST_CHECKED &&
+                draw->dwItemSpec > 0) {
+                SetTextColor(draw->hdc, GetSysColor(COLOR_GRAYTEXT));
+                result = CDRF_NEWFONT;
+            }
+            SetWindowLongPtr(hDlg, DWLP_MSGRESULT, result);
+            return TRUE;
+        }
+        if (pnm->idFrom == IDC_TAB_THERMAL_DEVICES &&
+            pnm->code == TCN_SELCHANGING && !g_thermalTabsUpdating &&
+            s_currentTab >= 0 && s_currentTab <= 4) {
+            if (IsDlgButtonChecked(hDlg, IDC_CHK_USE_GENERAL_THERMAL) == BST_CHECKED) {
+                SetWindowLongPtr(hDlg, DWLP_MSGRESULT, TRUE);
+                return TRUE;
+            }
+            SaveThermalSchemeControls(hDlg, s_currentTab);
+            return FALSE;
+        }
+        if (pnm->idFrom == IDC_TAB_THERMAL_DEVICES &&
+            pnm->code == TCN_SELCHANGE && !g_thermalTabsUpdating &&
+            s_currentTab >= 0 && s_currentTab <= 4) {
+            LoadThermalSchemeControls(hDlg, s_currentTab);
+            return TRUE;
+        }
+        if (pnm->idFrom == IDC_LIST_RAZER_DEVICES &&
+            pnm->code == LVN_ITEMCHANGED && !g_razerListUpdating &&
+            s_currentTab >= 0 && s_currentTab <= 4) {
+            const auto change = reinterpret_cast<const NMLISTVIEW*>(lParam);
+            if ((change->uChanged & LVIF_STATE) != 0 &&
+                (change->uOldState & LVIS_STATEIMAGEMASK) !=
+                (change->uNewState & LVIS_STATEIMAGEMASK)) {
+                RebuildThermalDeviceTabs(hDlg, s_currentTab, true);
+            }
+            return TRUE;
+        }
         if (pnm->idFrom == IDC_TAB_PROFILES && pnm->code == TCN_SELCHANGE) {
             int newTab = TabCtrl_GetCurSel(pnm->hwndFrom);
 
@@ -3114,6 +3409,17 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
         if (id == IDC_CHK_CONTROL_MSI && code == BN_CLICKED) {
             SetMsiHardwareControlsEnabled(hDlg, !g_Resetting_sdk.load());
+            if (s_currentTab >= 0 && s_currentTab <= 4) {
+                RebuildThermalDeviceTabs(hDlg, s_currentTab, true);
+            }
+            return TRUE;
+        }
+
+        if (id == IDC_CHK_USE_GENERAL_THERMAL && code == BN_CLICKED) {
+            if (s_currentTab >= 0 && s_currentTab <= 4) {
+                RebuildThermalDeviceTabs(hDlg, s_currentTab, true);
+                InvalidateRect(GetDlgItem(hDlg, IDC_TAB_THERMAL_DEVICES), nullptr, TRUE);
+            }
             return TRUE;
         }
 
@@ -3286,6 +3592,9 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         UpdateRazerPanelLayout(hDlg);
         if (s_currentTab == 6) PopulateAdvancedRazerDevices(hDlg);
         ShowSettingsLayer(hDlg, LayerForTab(s_currentTab));
+        if (s_currentTab >= 0 && s_currentTab <= 4) {
+            RebuildThermalDeviceTabs(hDlg, s_currentTab, true);
+        }
         return (INT_PTR)TRUE;
 
     case WM_APP_STATUS:
@@ -3306,6 +3615,8 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         ClearComboHeapData(GetDlgItem(hDlg, IDC_COMBO_RAZER_DEVICE));
         g_advancedRazerDeviceKey.clear();
         g_razerUiDevices.clear();
+        g_thermalUiTargets.clear();
+        g_thermalUiProfileIndex = -1;
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_LOW), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_MED), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_HIGH), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
@@ -4134,9 +4445,11 @@ static int ProbeSdkOutput(const Config& cfg, bool* outputApplied) {
         DWORD probeG = lastG.load();
         DWORD probeB = lastB.load();
         if (probeR > 255 || probeG > 255 || probeB > 255) {
-            probeR = GetRValue(cfg.colorLow);
-            probeG = GetGValue(cfg.colorLow);
-            probeB = GetBValue(cfg.colorLow);
+            const ThermalScheme& startupScheme = cfg.useGeneralThermal
+                ? cfg.generalThermal : cfg.msiThermal;
+            probeR = GetRValue(startupScheme.colorLow);
+            probeG = GetGValue(startupScheme.colorLow);
+            probeB = GetBValue(startupScheme.colorLow);
         }
         result = SdkSetColor(cfg.targetDevice, cfg.targetLedIndex, probeR, probeG, probeB);
         if (outputApplied && result == MLAPI_OK) *outputApplied = true;
@@ -4287,35 +4600,38 @@ static void ShowLetsDanceNotification(HWND hWnd) {
 // Shared thermal color engine used by every lighting controller. Controllers
 // keep independent cadence/state, but temperature mapping and smoothing math
 // live in one place so MSI and Razer cannot drift algorithmically.
-static void CalculateThermalTargetColor(const Config& config, float temperature,
+static void CalculateThermalTargetColor(const ThermalScheme& scheme, float temperature,
     DWORD& red, DWORD& green, DWORD& blue) {
     float ratio = 0.0f;
     COLORREF first = 0, second = 0;
+    bool interpolate = false;
 
-    if (temperature <= static_cast<float>(config.tempLow)) {
-        red = GetRValue(config.colorLow);
-        green = GetGValue(config.colorLow);
-        blue = GetBValue(config.colorLow);
+    if (temperature <= static_cast<float>(scheme.tempLow)) {
+        red = GetRValue(scheme.colorLow);
+        green = GetGValue(scheme.colorLow);
+        blue = GetBValue(scheme.colorLow);
     }
-    else if (temperature < static_cast<float>(config.tempMed)) {
-        const float range = static_cast<float>(config.tempMed - config.tempLow);
-        ratio = range > 0.0f ? (temperature - static_cast<float>(config.tempLow)) / range : 0.0f;
-        first = config.colorLow;
-        second = config.colorMed;
+    else if (temperature < static_cast<float>(scheme.tempMed)) {
+        const float range = static_cast<float>(scheme.tempMed - scheme.tempLow);
+        ratio = range > 0.0f ? (temperature - static_cast<float>(scheme.tempLow)) / range : 0.0f;
+        first = scheme.colorLow;
+        second = scheme.colorMed;
+        interpolate = true;
     }
-    else if (temperature < static_cast<float>(config.tempHigh)) {
-        const float range = static_cast<float>(config.tempHigh - config.tempMed);
-        ratio = range > 0.0f ? (temperature - static_cast<float>(config.tempMed)) / range : 0.0f;
-        first = config.colorMed;
-        second = config.colorHigh;
+    else if (temperature < static_cast<float>(scheme.tempHigh)) {
+        const float range = static_cast<float>(scheme.tempHigh - scheme.tempMed);
+        ratio = range > 0.0f ? (temperature - static_cast<float>(scheme.tempMed)) / range : 0.0f;
+        first = scheme.colorMed;
+        second = scheme.colorHigh;
+        interpolate = true;
     }
     else {
-        red = GetRValue(config.colorHigh);
-        green = GetGValue(config.colorHigh);
-        blue = GetBValue(config.colorHigh);
+        red = GetRValue(scheme.colorHigh);
+        green = GetGValue(scheme.colorHigh);
+        blue = GetBValue(scheme.colorHigh);
     }
 
-    if (first != 0 || second != 0) {
+    if (interpolate) {
         const double r1 = static_cast<double>(GetRValue(first));
         const double g1 = static_cast<double>(GetGValue(first));
         const double b1 = static_cast<double>(GetBValue(first));
@@ -4357,6 +4673,19 @@ static void EngineWaitUntil(const ULONGLONG deadline) {
     EngineWait(waitMs);
 }
 
+static Config CopyMsiRuntimeConfig(const Config& source) {
+    // The MSI render loop can wake at 25 FPS during a transition. Copy only the
+    // fields it consumes; per-Razer maps belong to the independent Razer worker.
+    Config copy;
+    wcscpy_s(copy.targetDevice, source.targetDevice);
+    copy.targetLedIndex = source.targetLedIndex;
+    copy.controlMsi = source.controlMsi;
+    copy.useGeneralThermal = source.useGeneralThermal;
+    copy.generalThermal = source.generalThermal;
+    copy.msiThermal = source.msiThermal;
+    return copy;
+}
+
 // The engine owns the supervisor and IPC channel. The vendor SDK itself runs in
 // a killable child process, so a permanently blocked MSI call cannot strand the
 // UI or prevent bounded recovery.
@@ -4377,7 +4706,7 @@ static void EngineThread(HWND hWnd) {
     Config startupConfig;
     {
         std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-        startupConfig = g_cfg;
+        startupConfig = CopyMsiRuntimeConfig(g_cfg);
     }
 
     bool msiControlledSinceRelease = false;
@@ -4425,7 +4754,7 @@ static void EngineThread(HWND hWnd) {
         float smoothingFactor;
         {
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-            cfgLocal = g_cfg;
+            cfgLocal = CopyMsiRuntimeConfig(g_cfg);
             configVersion = g_ConfigVersion.load();
             ledRefreshFPS = g_Global.ledRefreshFPS;
             smoothingFactor = g_Global.smoothingFactor;
@@ -4668,7 +4997,10 @@ static void EngineThread(HWND hWnd) {
                 float temp = floorf(rawTemp * 2.0f + 0.5f) / 2.0f;
                 if (temp != lastTemp) {
                     lastTemp = temp;
-                    CalculateThermalTargetColor(cfgLocal, temp, targetR, targetG, targetB);
+                    const ThermalScheme& msiScheme = cfgLocal.useGeneralThermal
+                        ? cfgLocal.generalThermal : cfgLocal.msiThermal;
+                    CalculateThermalTargetColor(msiScheme, temp,
+                        targetR, targetG, targetB);
                     colorTransitionActive = true;
 
                     if (firstRunLoop) {
@@ -4890,7 +5222,25 @@ struct RazerDeviceRuntime {
     ULONGLONG nextFrame = 0;
     ULONGLONG nextReleaseAttempt = 0;
     ULONGLONG nextOpenAttempt = 0;
+    bool firstThermalFrame = true;
+    bool colorTransitionActive = true;
+    float currentRed = 0.0f;
+    float currentGreen = 0.0f;
+    float currentBlue = 0.0f;
+    DWORD targetRed = 0;
+    DWORD targetGreen = 0;
+    DWORD targetBlue = 0;
+    float lastTemperature = -1.0f;
+    ULONGLONG nextColorFrame = 0;
 };
+
+static void ResetRazerThermalState(RazerDeviceRuntime& runtime) {
+    runtime.firstThermalFrame = true;
+    runtime.colorTransitionActive = true;
+    runtime.lastTemperature = -1.0f;
+    runtime.nextColorFrame = 0;
+    runtime.nextFrame = 0;
+}
 
 static bool IsRazerRequestPending(const RazerDeviceRuntime& runtime,
     const LedRequestSnapshot& request) {
@@ -5006,6 +5356,14 @@ static RazerDeviceSettings SettingsForRazerDevice(
     return settings != settingsByDevice.end() ? settings->second : RazerDeviceSettings{};
 }
 
+static const ThermalScheme& ThermalSchemeForRazerDevice(const Config& config,
+    const std::wstring& deviceKey) {
+    if (config.useGeneralThermal) return config.generalThermal;
+    const auto scheme = config.razerThermals.find(deviceKey);
+    return scheme != config.razerThermals.end()
+        ? scheme->second : config.generalThermal;
+}
+
 static void LogRazerDeviceSchedule(const RazerDeviceRuntime& runtime,
     const RazerDeviceSettings& settings) {
     char message[768] = {};
@@ -5027,13 +5385,7 @@ static void RazerThread(HWND hWnd) {
     int lastConfigVersion = -1;
     float smoothingFactor = DEF_SMOOTHING_FACTOR;
     bool previousLightsEnabled = g_LedsEnabled.load();
-    bool firstFrame = true;
-    bool colorTransitionActive = true;
-    float currentRed = 0.0f, currentGreen = 0.0f, currentBlue = 0.0f;
-    DWORD targetRed = 0, targetGreen = 0, targetBlue = 0;
-    float lastTemperature = -1.0f;
     ULONGLONG nextDetection = 0;
-    ULONGLONG nextColorFrame = 0;
     ULONGLONG lastAcknowledgedLedGeneration = 0;
     bool detectionPublished = false;
 
@@ -5047,12 +5399,8 @@ static void RazerThread(HWND hWnd) {
                 deviceSettings = g_Global.razerDeviceSettings;
             }
             lastConfigVersion = configVersion;
-            lastTemperature = -1.0f;
-            firstFrame = true;
-            colorTransitionActive = true;
-            nextColorFrame = 0;
             for (auto& [key, runtime] : runtimes) {
-                runtime->nextFrame = 0;
+                ResetRazerThermalState(*runtime);
                 if (runtime->present) {
                     LogRazerDeviceSchedule(*runtime,
                         SettingsForRazerDevice(deviceSettings, key));
@@ -5176,10 +5524,10 @@ static void RazerThread(HWND hWnd) {
         if (lightsEnabled != previousLightsEnabled) {
             previousLightsEnabled = lightsEnabled;
             if (lightsEnabled) {
-                firstFrame = true;
-                lastTemperature = -1.0f;
-                colorTransitionActive = true;
-                nextColorFrame = 0;
+                for (const auto& key : selectedKeys) {
+                    const auto runtime = runtimes.find(key);
+                    if (runtime != runtimes.end()) ResetRazerThermalState(*runtime->second);
+                }
             }
         }
 
@@ -5261,60 +5609,105 @@ static void RazerThread(HWND hWnd) {
             continue;
         }
 
-        int fastestRefreshFPS = 15;
-        for (const auto& key : selectedKeys) {
-            fastestRefreshFPS = (std::max)(fastestRefreshFPS,
-                settingsForKey(key).refreshFPS);
-        }
-        now = GetTickCount64();
-        if (nextColorFrame == 0 || now >= nextColorFrame) {
-            const float temperature = floorf(rawTemperature * 2.0f + 0.5f) / 2.0f;
-            if (temperature != lastTemperature) {
-                lastTemperature = temperature;
-                CalculateThermalTargetColor(config, temperature,
-                    targetRed, targetGreen, targetBlue);
-                colorTransitionActive = true;
-            }
-
-            if (firstFrame) {
-                currentRed = static_cast<float>(targetRed);
-                currentGreen = static_cast<float>(targetGreen);
-                currentBlue = static_cast<float>(targetBlue);
-                firstFrame = false;
-            }
-            else if (colorTransitionActive) {
-                const float adjustedFactor = AdjustedSmoothingFactor(
-                    smoothingFactor, fastestRefreshFPS);
-                currentRed = SmoothColorChannel(currentRed, targetRed, adjustedFactor);
-                currentGreen = SmoothColorChannel(currentGreen, targetGreen, adjustedFactor);
-                currentBlue = SmoothColorChannel(currentBlue, targetBlue, adjustedFactor);
-            }
-
-            const bool settled = static_cast<DWORD>(roundf(currentRed)) == targetRed &&
-                static_cast<DWORD>(roundf(currentGreen)) == targetGreen &&
-                static_cast<DWORD>(roundf(currentBlue)) == targetBlue;
-            if (settled) {
-                // Once the visible 8-bit colour is exact, snap the hidden floats
-                // too. There is no useful animation work until a sensor/config
-                // event supplies a different target.
-                currentRed = static_cast<float>(targetRed);
-                currentGreen = static_cast<float>(targetGreen);
-                currentBlue = static_cast<float>(targetBlue);
-                colorTransitionActive = false;
-                nextColorFrame = 0;
-            }
-            else {
-                colorTransitionActive = true;
-                nextColorFrame = now + (1000 / fastestRefreshFPS);
-            }
-        }
-
-        const BYTE outputRed = static_cast<BYTE>(roundf(currentRed));
-        const BYTE outputGreen = static_cast<BYTE>(roundf(currentGreen));
-        const BYTE outputBlue = static_cast<BYTE>(roundf(currentBlue));
+        const float temperature = floorf(rawTemperature * 2.0f + 0.5f) / 2.0f;
         const LedRequestSnapshot request = CaptureLedRequest();
-        const auto [anyApplied, allApplied] = sendToSelected(
-            outputRed, outputGreen, outputBlue, "RGB frame", request);
+        bool anyApplied = false;
+        now = GetTickCount64();
+        for (const auto& key : selectedKeys) {
+            const auto it = runtimes.find(key);
+            if (it == runtimes.end() || !it->second->present) continue;
+            RazerDeviceRuntime& runtime = *it->second;
+            const RazerDeviceSettings settings = settingsForKey(key);
+            const DWORD frameInterval = 1000 / settings.refreshFPS;
+
+            if (runtime.nextColorFrame == 0 || now >= runtime.nextColorFrame) {
+                if (temperature != runtime.lastTemperature) {
+                    runtime.lastTemperature = temperature;
+                    const ThermalScheme& scheme = ThermalSchemeForRazerDevice(config, key);
+                    CalculateThermalTargetColor(scheme, temperature,
+                        runtime.targetRed, runtime.targetGreen, runtime.targetBlue);
+                    runtime.colorTransitionActive = true;
+                }
+
+                if (runtime.firstThermalFrame) {
+                    runtime.currentRed = static_cast<float>(runtime.targetRed);
+                    runtime.currentGreen = static_cast<float>(runtime.targetGreen);
+                    runtime.currentBlue = static_cast<float>(runtime.targetBlue);
+                    runtime.firstThermalFrame = false;
+                }
+                else if (runtime.colorTransitionActive) {
+                    const float adjustedFactor = AdjustedSmoothingFactor(
+                        smoothingFactor, settings.refreshFPS);
+                    runtime.currentRed = SmoothColorChannel(runtime.currentRed,
+                        runtime.targetRed, adjustedFactor);
+                    runtime.currentGreen = SmoothColorChannel(runtime.currentGreen,
+                        runtime.targetGreen, adjustedFactor);
+                    runtime.currentBlue = SmoothColorChannel(runtime.currentBlue,
+                        runtime.targetBlue, adjustedFactor);
+                }
+
+                const bool settled =
+                    static_cast<DWORD>(roundf(runtime.currentRed)) == runtime.targetRed &&
+                    static_cast<DWORD>(roundf(runtime.currentGreen)) == runtime.targetGreen &&
+                    static_cast<DWORD>(roundf(runtime.currentBlue)) == runtime.targetBlue;
+                if (settled) {
+                    runtime.currentRed = static_cast<float>(runtime.targetRed);
+                    runtime.currentGreen = static_cast<float>(runtime.targetGreen);
+                    runtime.currentBlue = static_cast<float>(runtime.targetBlue);
+                    runtime.colorTransitionActive = false;
+                    runtime.nextColorFrame = 0;
+                }
+                else {
+                    runtime.colorTransitionActive = true;
+                    runtime.nextColorFrame = now + frameInterval;
+                }
+            }
+
+            const BYTE outputRed = static_cast<BYTE>(roundf(runtime.currentRed));
+            const BYTE outputGreen = static_cast<BYTE>(roundf(runtime.currentGreen));
+            const BYTE outputBlue = static_cast<BYTE>(roundf(runtime.currentBlue));
+            const bool requestPending = IsRazerRequestPending(runtime, request);
+            const bool colorChanged = IsRazerColorChanged(
+                runtime, outputRed, outputGreen, outputBlue);
+            if (!requestPending && !colorChanged) continue;
+            if (!requestPending && runtime.nextFrame != 0 && now < runtime.nextFrame) continue;
+            if (!EnsureRazerOpen(runtime, now, detectionIntervalMs)) continue;
+
+            runtime.nextFrame = now + frameInterval;
+            if (!SendRazerUniformFrame(runtime.controller, outputRed, outputGreen,
+                outputBlue, frameInterval, "RGB frame")) {
+                char message[512] = {};
+                snprintf(message, sizeof(message), "[Razer HID] %ls RGB frame failed: %ls",
+                    runtime.device.productName.c_str(), runtime.controller.LastError().c_str());
+                Log(message);
+                runtime.controller.Close();
+                runtime.hasAppliedFrame = false;
+                runtime.nextOpenAttempt = GetTickCount64() + detectionIntervalMs;
+                continue;
+            }
+
+            runtime.controlledSinceRelease = true;
+            runtime.nextReleaseAttempt = 0;
+            runtime.hasAppliedFrame = true;
+            runtime.lastAppliedEnabled = request.enabled;
+            runtime.lastAppliedRed = outputRed;
+            runtime.lastAppliedGreen = outputGreen;
+            runtime.lastAppliedBlue = outputBlue;
+            runtime.lastAppliedGeneration = request.generation;
+            anyApplied = true;
+        }
+
+        bool allApplied = true;
+        for (const auto& key : selectedKeys) {
+            const auto it = runtimes.find(key);
+            if (it == runtimes.end() || !it->second->present ||
+                !it->second->hasAppliedFrame ||
+                it->second->lastAppliedGeneration < request.generation ||
+                it->second->lastAppliedEnabled != request.enabled) {
+                allApplied = false;
+                break;
+            }
+        }
         if (anyApplied && allApplied && IsLedRequestCurrent(request) &&
             request.generation > lastAcknowledgedLedGeneration) {
             lastAcknowledgedLedGeneration = request.generation;
@@ -5324,18 +5717,21 @@ static void RazerThread(HWND hWnd) {
             Log(message);
         }
 
-        // The worker wakes at the nearest physical-device deadline. Using only
-        // the fastest FPS as a global tick would quantize 15 FPS behind 25 FPS
-        // (roughly 12.5 writes/s); independent deadlines avoid that regression.
+        // Every physical device owns both its colour-transition deadline and
+        // its HID write deadline. Different schemes and FPS values therefore
+        // remain independent without turning stable colours into polling.
         now = GetTickCount64();
         ULONGLONG nextWake = nextDetection;
-        if (colorTransitionActive && nextColorFrame != 0) {
-            nextWake = (std::min)(nextWake, nextColorFrame);
-        }
         for (const auto& key : selectedKeys) {
             const auto it = runtimes.find(key);
             if (it == runtimes.end() || !it->second->present) continue;
             const RazerDeviceRuntime& runtime = *it->second;
+            if (runtime.colorTransitionActive && runtime.nextColorFrame != 0) {
+                nextWake = (std::min)(nextWake, runtime.nextColorFrame);
+            }
+            const BYTE outputRed = static_cast<BYTE>(roundf(runtime.currentRed));
+            const BYTE outputGreen = static_cast<BYTE>(roundf(runtime.currentGreen));
+            const BYTE outputBlue = static_cast<BYTE>(roundf(runtime.currentBlue));
             const bool requestPending = IsRazerRequestPending(runtime, request);
             const bool colorChanged = IsRazerColorChanged(
                 runtime, outputRed, outputGreen, outputBlue);
