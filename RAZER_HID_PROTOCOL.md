@@ -91,11 +91,12 @@ not stored persistently: while MysticFight owns the device it uses the volatile
 custom effect, and persistent commands are reserved for the configured Off or
 Spectrum Cycling hand-off.
 
-Profiles use one shared temperature sensor but may map it through either the
-backward-compatible General thermal scheme or an independent threshold/colour
-scheme for each selected physical Razer device. Every runtime keeps its own
-interpolation and FPS deadlines; once its visible colour settles, that device
-receives no repeated frame writes.
+Profiles may share the backward-compatible General data source, sensor and
+threshold/colour scheme, or assign an independent scheme to each selected
+physical Razer device. LibreHardwareMonitor is downloaded and parsed only once
+per polling cycle; every runtime reads its assigned sensor from that coherent
+snapshot and keeps its own interpolation and FPS deadlines. Once its visible
+colour settles, that device receives no repeated frame writes.
 
 A release command is sent only to a compatible device that MysticFight
 successfully controlled, when a new active profile no longer selects it or the

@@ -187,7 +187,7 @@ enum StrId {
     // Smoothing combo
     STR_SMOOTH_DISABLED, STR_SMOOTH_SLOW, STR_SMOOTH_NORMAL, STR_SMOOTH_FAST,
     // Sensor / area combo
-    STR_LHM_NOT_FOUND, STR_UNKNOWN_AREA,
+    STR_LHM_NOT_FOUND, STR_SENSOR_UNAVAILABLE, STR_UNKNOWN_AREA,
     // Tray menu
     STR_TRAY_LIGHTS, STR_TRAY_ACTIVE_PROFILE, STR_TRAY_SETTINGS, STR_TRAY_ABOUT, STR_TRAY_LOG, STR_TRAY_EXIT,
     // Notifications
@@ -223,7 +223,7 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Global Hotkeys Configuration", L"Toggle ON/OFF:", L"Activate Profile %d:", L"Reset Hotkeys",
         L"Run on Windows startup", L"Show notifications", L"Save", L"Cancel",
         L"Disabled", L"Slow", L"Normal", L"Fast",
-        L"LHM Not Found (Port 8085)", L"Unknown Area",
+        L"LHM Not Found (Port 8085)", L"Configured sensor unavailable", L"Unknown Area",
         L"Lights Enabled", L"Active Profile", L"Settings", L"About MysticFight", L"View Debug Log", L"Exit MysticFight",
         L"Lights ON", L"Lights OUT", L"Switched to %ls", L"Let's dance baby",
         L"Duplicate hotkey detected.", L"Error", L"MysticFight is already running.", L"Information",
@@ -250,7 +250,7 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Configuración de atajos globales", L"Activar/Desactivar:", L"Activar perfil %d:", L"Restaurar atajos",
         L"Ejecutar al inicio de Windows", L"Mostrar notificaciones", L"Guardar", L"Cancelar",
         L"Desactivado", L"Lento", L"Normal", L"Rápido",
-        L"LHM no encontrado (Puerto 8085)", L"Área desconocida",
+        L"LHM no encontrado (Puerto 8085)", L"Sensor configurado no disponible", L"Área desconocida",
         L"Luces activadas", L"Perfil activo", L"Ajustes", L"Acerca de MysticFight", L"Ver registro de depuración", L"Salir de MysticFight",
         L"Luces encendidas", L"Luces apagadas", L"Cambiado a %ls", L"A bailar, nena",
         L"Atajo duplicado detectado.", L"Error", L"MysticFight ya se está ejecutando.", L"Información",
@@ -1817,7 +1817,25 @@ static void PopulateSensorList(HWND hDlg, const wchar_t* webServerUrl, const wch
         }
     }
 
-    const LRESULT count = SendMessageW(hCombo, CB_GETCOUNT, 0, 0);
+    if (!idSelected && currentTargetID && currentTargetID[0]) {
+        std::wstring unavailable = T(STR_SENSOR_UNAVAILABLE);
+        unavailable += L": ";
+        unavailable += currentTargetID;
+        wchar_t* safeId = HeapDupString(currentTargetID);
+        const int index = static_cast<int>(SendMessageW(hCombo, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(unavailable.c_str())));
+        if (index != CB_ERR) {
+            SendMessageW(hCombo, CB_SETITEMDATA, index,
+                reinterpret_cast<LPARAM>(safeId));
+            SendMessageW(hCombo, CB_SETCURSEL, index, 0);
+            idSelected = true;
+        }
+        else if (safeId) {
+            HeapFree(GetProcessHeap(), 0, safeId);
+        }
+    }
+
+    LRESULT count = SendMessageW(hCombo, CB_GETCOUNT, 0, 0);
     if (!idSelected && count > 0) SendMessageW(hCombo, CB_SETCURSEL, 0, 0);
     EnableWindow(hCombo, count > 1);
     if (count == 0) {
@@ -5339,10 +5357,21 @@ static void EngineThread(HWND hWnd) {
             }
         }
         if (g_pendingStyleChange.load()) {
-            ULONGLONG retryDelay = 1000 / ledRefreshFPS;
-            if (!lightsEnabled) retryDelay = MAIN_LOOP_OFF_DELAY_MS;
-            else if (activeSource == DataSource::Searching) retryDelay = 100;
-            nextWake = (std::min)(nextWake, currentTime + retryDelay);
+            if (!lightsEnabled) {
+                nextWake = (std::min)(nextWake,
+                    currentTime + MAIN_LOOP_OFF_DELAY_MS);
+            }
+            else if (activeSource == DataSource::Searching) {
+                nextWake = (std::min)(nextWake, currentTime + 100);
+            }
+            else if (latestTemperature >= 0.0f) {
+                nextWake = (std::min)(nextWake,
+                    currentTime + (1000 / ledRefreshFPS));
+            }
+            // With a responsive source but a missing per-device sensor, keep
+            // the pending style request intact and sleep until SensorThread
+            // publishes a value/config event (or the SDK heartbeat is due).
+            // Polling this state at the renderer FPS would only burn CPU.
         }
         EngineWaitUntil(nextWake);
     }
