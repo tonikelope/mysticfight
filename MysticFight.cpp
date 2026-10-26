@@ -222,7 +222,7 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"MSI Hardware Control", L"Control MSI motherboard",
         L"Device:", L"Area:", L"Razer devices",
         L"Data Source",
-        L"Thermal scheme", L"Use general scheme for all devices",
+        L"Thermal scheme", L"Use the same scheme for all devices",
         L"LOW:", L"MEDIUM:", L"HIGH:", L"Color (hex):",
         L"Reset scheme", L"Reset Defaults",
         L"Shared Thermal Engine", L"Controllers", L"Sensor Update:", L"MSI device", L"FPS:", L"Smoothing:",
@@ -253,7 +253,7 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Control de hardware MSI", L"Controlar placa base MSI",
         L"Dispositivo:", L"Área:", L"Dispositivos Razer",
         L"Origen de datos",
-        L"Esquema térmico", L"Usar esquema general para todos los dispositivos",
+        L"Esquema térmico", L"Usar el mismo esquema para todos los dispositivos",
         L"BAJA:", L"MEDIA:", L"ALTA:", L"Color (hex):",
         L"Restaurar esquema", L"Restaurar valores",
         L"Motor térmico compartido", L"Controladoras", L"Actualización sensor:", L"Dispositivo MSI", L"FPS:", L"Suavizado:",
@@ -352,8 +352,8 @@ struct Config {
     std::wstring razerDeviceIds;
     bool controlMsi = false;
     bool controlRazer = false;
-    // Existing configurations migrate into General and keep their historical
-    // shared behavior until the user explicitly enables per-device schemes.
+    // Existing configurations keep their historical shared behavior until the
+    // user explicitly enables per-device schemes.
     bool useGeneralThermal = true;
     ThermalScheme generalThermal;
     ThermalScheme msiThermal;
@@ -2243,6 +2243,46 @@ static void EnableThermalSchemeControls(HWND hDlg, const bool enabled) {
     }
 }
 
+static void UpdateThermalSchemeLayout(HWND hDlg, const bool useSharedScheme) {
+    // The resource positions below are the per-device layout. When the shared
+    // scheme is active, the hidden tab row is reclaimed so no empty strip is
+    // left between the checkbox and the scheme controls.
+    struct ControlPosition {
+        int id;
+        int topDlu;
+    };
+    static constexpr ControlPosition controls[] = {
+        { IDC_GRP_SOURCE, 214 },
+        { IDC_COMBO_DATA_SOURCE, 225 },
+        { IDC_SENSOR_ID, 242 },
+        { IDC_FRAME_THERMAL_CONTENT, 262 },
+        { IDC_LBL_LOW, 272 }, { IDC_TEMP_LOW, 270 },
+        { IDC_LBL_C1, 272 }, { IDC_LBL_HEX1, 272 }, { IDC_HEX_LOW, 270 },
+        { IDC_LBL_MED, 289 }, { IDC_TEMP_MED, 287 },
+        { IDC_LBL_C2, 289 }, { IDC_LBL_HEX2, 289 }, { IDC_HEX_MED, 287 },
+        { IDC_LBL_HIGH, 306 }, { IDC_TEMP_HIGH, 304 },
+        { IDC_LBL_C3, 306 }, { IDC_LBL_HEX3, 306 }, { IDC_HEX_HIGH, 304 },
+    };
+    constexpr int reclaimedTabRowDlu = 18;
+    const int verticalOffset = useSharedScheme ? reclaimedTabRowDlu : 0;
+    for (const ControlPosition& position : controls) {
+        HWND control = GetDlgItem(hDlg, position.id);
+        if (!control) continue;
+
+        RECT current = {};
+        GetWindowRect(control, &current);
+        MapWindowPoints(HWND_DESKTOP, hDlg,
+            reinterpret_cast<POINT*>(&current), 2);
+        RECT desired = { 0, position.topDlu - verticalOffset, 0, 0 };
+        MapDialogRect(hDlg, &desired);
+        SetWindowPos(control, nullptr, current.left, desired.top, 0, 0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
+
+    ShowWindow(GetDlgItem(hDlg, IDC_TAB_THERMAL_DEVICES),
+        useSharedScheme ? SW_HIDE : SW_SHOW);
+}
+
 static ThermalScheme ThermalSchemeForUiTargetLocked(Config& profile,
     const int profileIndex, const ThermalUiTarget& target) {
     if (target.kind == ThermalUiTargetKind::General) return profile.generalThermal;
@@ -2352,25 +2392,27 @@ static void RebuildThermalDeviceTabs(HWND hDlg, const int profileIndex,
     if (useGeneral) {
         targets.push_back({ ThermalUiTargetKind::General, L"", L"General" });
     }
-    if (IsDlgButtonChecked(hDlg, IDC_CHK_CONTROL_MSI) == BST_CHECKED) {
-        targets.push_back({ ThermalUiTargetKind::Msi, L"", L"MSI" });
-    }
+    else {
+        if (IsDlgButtonChecked(hDlg, IDC_CHK_CONTROL_MSI) == BST_CHECKED) {
+            targets.push_back({ ThermalUiTargetKind::Msi, L"", L"MSI" });
+        }
 
-    std::map<std::pair<std::wstring, std::uint16_t>, int> totals;
-    std::map<std::pair<std::wstring, std::uint16_t>, int> ordinals;
-    for (const auto& item : g_razerUiDevices) {
-        ++totals[{ item.device.productName, item.device.productId }];
-    }
-    HWND list = GetDlgItem(hDlg, IDC_LIST_RAZER_DEVICES);
-    for (int i = 0; list && i < static_cast<int>(g_razerUiDevices.size()); ++i) {
-        const auto& device = g_razerUiDevices[i].device;
-        const auto identity = std::make_pair(device.productName, device.productId);
-        const int ordinal = ++ordinals[identity];
-        if (!device.controllable || !ListView_GetCheckState(list, i)) continue;
-        std::wstring label = device.productName;
-        if (totals[identity] > 1) label += L" #" + std::to_wstring(ordinal);
-        targets.push_back({ ThermalUiTargetKind::Razer, device.deviceKey,
-            std::move(label) });
+        std::map<std::pair<std::wstring, std::uint16_t>, int> totals;
+        std::map<std::pair<std::wstring, std::uint16_t>, int> ordinals;
+        for (const auto& item : g_razerUiDevices) {
+            ++totals[{ item.device.productName, item.device.productId }];
+        }
+        HWND list = GetDlgItem(hDlg, IDC_LIST_RAZER_DEVICES);
+        for (int i = 0; list && i < static_cast<int>(g_razerUiDevices.size()); ++i) {
+            const auto& device = g_razerUiDevices[i].device;
+            const auto identity = std::make_pair(device.productName, device.productId);
+            const int ordinal = ++ordinals[identity];
+            if (!device.controllable || !ListView_GetCheckState(list, i)) continue;
+            std::wstring label = device.productName;
+            if (totals[identity] > 1) label += L" #" + std::to_wstring(ordinal);
+            targets.push_back({ ThermalUiTargetKind::Razer, device.deviceKey,
+                std::move(label) });
+        }
     }
 
     g_thermalTabsUpdating = true;
@@ -2396,16 +2438,15 @@ static void RebuildThermalDeviceTabs(HWND hDlg, const int profileIndex,
     }
     else if (selectedIndex < 0 && !g_thermalUiTargets.empty()) selectedIndex = 0;
     if (selectedIndex >= 0) TabCtrl_SetCurSel(tab, selectedIndex);
-    // Keep the native control enabled and block device selection through
-    // TCN_SELCHANGING while General is active. Disabling the complete HWND is
-    // theme-dependent and can suppress its painting after a checkbox toggle.
     EnableWindow(tab, TRUE);
-    ShowWindow(tab, SW_SHOW);
-    SetWindowPos(tab, HWND_TOP, 0, 0, 0, 0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    UpdateThermalSchemeLayout(hDlg, useGeneral);
     SendMessageW(tab, WM_SETREDRAW, TRUE, 0);
-    RedrawWindow(tab, nullptr, nullptr,
-        RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW | RDW_ALLCHILDREN);
+    if (!useGeneral) {
+        RedrawWindow(tab, nullptr, nullptr,
+            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW |
+            RDW_ALLCHILDREN);
+    }
+    InvalidateRect(GetDlgItem(hDlg, IDC_GRP_THRESHOLDS), nullptr, TRUE);
     const int insertedCount = TabCtrl_GetItemCount(tab);
     if (insertionFailed || insertedCount != static_cast<int>(g_thermalUiTargets.size())) {
         char message[192] = {};
