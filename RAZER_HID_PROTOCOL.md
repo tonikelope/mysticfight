@@ -69,7 +69,7 @@ The report following the Windows report-ID byte is:
 The checksum is XOR over report bytes 2 through 87 inclusive. Responses are
 accepted only if their checksum, remaining-packet fields, command class and
 command ID match. Status `0x02` (successful) and `0x01` (busy/accepted) are
-success; `0x05` (not supported) stops retries. Other failures use at most five
+success while `0x05` (not supported) stops retries. Other failures use at most five
 attempts with 10 ms between retries.
 
 ## Commands used by MysticFight
@@ -82,7 +82,7 @@ allowlist immediately before sending. There is no generic Razer command API.
    column (`0`, `7`, `9` or `20`). The following bytes are the corresponding
    `R,G,B` triples.
 2. Volatile extended custom effect: class `0x0F`, command `0x02`, data size
-   `0x0C`. Arguments 0 and 1 are zero; argument 2 is custom effect `0x08`.
+   `0x0C`. Arguments 0 and 1 are zero while argument 2 is custom effect `0x08`.
 3. Persistent Off/Spectrum hand-off: class `0x0F`, command `0x02`, data size
    `0x06`, with `VARSTORE=1` and `BACKLIGHT_LED=5`. Effect `0x00` is Off and
    effect `0x03` is Spectrum Cycling.
@@ -96,7 +96,7 @@ Spectrum Cycling hand-off.
 Profiles may share the backward-compatible General data source, sensor and
 threshold/colour scheme, or assign an independent scheme to each selected
 physical Razer device. LibreHardwareMonitor is downloaded and parsed only once
-per polling cycle; every runtime reads its assigned sensor from that coherent
+per polling cycle qhile every runtime reads its assigned sensor from that coherent
 snapshot and keeps its own interpolation and FPS deadlines. Once its visible
 colour settles, that device receives no repeated frame writes.
 
@@ -112,7 +112,7 @@ release command.
 - Razer output defaults to 25 FPS and is independently selectable as 15, 20 or
   25 FPS per physical device. FPS is a maximum transition cadence, not a
   continuous write rate: identical frames are suppressed at both the worker and
-  controller boundaries. LibreHardwareMonitor sampling continues independently;
+  controller boundaries. LibreHardwareMonitor sampling continues independently while
   a settled Razer worker wakes only for a sensor/source change, configuration,
   device detection/retry or shutdown work.
 - The Razer worker is separate from the UI, sensor and MSI SDK workers. It owns
