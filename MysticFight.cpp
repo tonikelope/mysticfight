@@ -2049,14 +2049,18 @@ static void RebuildThermalDeviceTabs(HWND hDlg, const int profileIndex,
     }
 
     g_thermalTabsUpdating = true;
+    SendMessageW(tab, WM_SETREDRAW, FALSE, 0);
     TabCtrl_DeleteAllItems(tab);
     g_thermalUiTargets = std::move(targets);
     int selectedIndex = -1;
+    bool insertionFailed = false;
     for (int i = 0; i < static_cast<int>(g_thermalUiTargets.size()); ++i) {
         TCITEMW item = {};
         item.mask = TCIF_TEXT;
         item.pszText = g_thermalUiTargets[i].label.data();
-        TabCtrl_InsertItem(tab, i, &item);
+        const LRESULT inserted = SendMessageW(tab, TCM_INSERTITEMW, i,
+            reinterpret_cast<LPARAM>(&item));
+        if (inserted == -1) insertionFailed = true;
         if (!previousIdentity.empty() &&
             ThermalTargetIdentity(g_thermalUiTargets[i]) == previousIdentity) {
             selectedIndex = i;
@@ -2069,13 +2073,24 @@ static void RebuildThermalDeviceTabs(HWND hDlg, const int profileIndex,
     }
     else if (selectedIndex < 0 && !g_thermalUiTargets.empty()) selectedIndex = 0;
     if (selectedIndex >= 0) TabCtrl_SetCurSel(tab, selectedIndex);
-    // The native tab control has no supported per-item disabled state. Disable
-    // the complete selector while General owns every controller, then re-enable
-    // and repaint it immediately when independent schemes are requested. The
-    // General scheme fields remain separate controls and stay fully editable.
-    EnableWindow(tab, useGeneral ? FALSE : TRUE);
+    // Keep the native control enabled and block device selection through
+    // TCN_SELCHANGING while General is active. Disabling the complete HWND is
+    // theme-dependent and can suppress its painting after a checkbox toggle.
+    EnableWindow(tab, TRUE);
+    ShowWindow(tab, SW_SHOW);
+    SetWindowPos(tab, HWND_TOP, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    SendMessageW(tab, WM_SETREDRAW, TRUE, 0);
     RedrawWindow(tab, nullptr, nullptr,
-        RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
+        RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW | RDW_ALLCHILDREN);
+    const int insertedCount = TabCtrl_GetItemCount(tab);
+    if (insertionFailed || insertedCount != static_cast<int>(g_thermalUiTargets.size())) {
+        char message[192] = {};
+        snprintf(message, sizeof(message),
+            "[Settings] Thermal tab rebuild failed: expected=%zu actual=%d",
+            g_thermalUiTargets.size(), insertedCount);
+        Log(message);
+    }
     g_thermalUiProfileIndex = profileIndex;
     g_thermalTabsUpdating = false;
     LoadThermalSchemeControls(hDlg, profileIndex);
