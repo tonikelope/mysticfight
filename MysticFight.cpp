@@ -128,7 +128,6 @@ const ULONGLONG HTTP_FAST_TIMEOUT = 1000;           // UI-blocking timeout
 const ULONGLONG HTTP_NORMAL_TIMEOUT = 60000;        // Background network timeout
 const int       HEX_COLOR_LEN = 7;                  // Format: #RRGGBB
 const int       LOG_BUFFER_SIZE = 512;
-const int       SENSOR_ID_LEN = 256;
 
 // Default Factory Settings
 const int   DEF_SENSOR_UPDATE_MS = 500;
@@ -168,7 +167,8 @@ enum StrId {
     // Tab captions (profile tabs use user labels, not translated)
     STR_TAB_SHORTCUTS, STR_TAB_ADVANCED,
     // Profile layer
-    STR_LBL_PROFILE_NAME, STR_CHK_ACTIVE, STR_GRP_MSI, STR_CHK_CONTROL_MSI,
+    STR_LBL_PROFILE_NAME, STR_CHK_ACTIVE, STR_GRP_RGB_DEVICES,
+    STR_GRP_MSI, STR_CHK_CONTROL_MSI,
     STR_LBL_DEVICE, STR_LBL_AREA, STR_GRP_RAZER,
     STR_GRP_SOURCE,
     STR_GRP_THRESHOLDS, STR_CHK_USE_GENERAL_THERMAL,
@@ -209,10 +209,11 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
     // ---- English (LANG_EN) ----
     {
         L"Shortcuts", L"Advanced",
-        L"Profile Label:", L"Set as Active Profile", L"MSI Hardware Control", L"Control MSI motherboard",
+        L"Profile Label:", L"Set as Active Profile", L"RGB Devices",
+        L"MSI Hardware Control", L"Control MSI motherboard",
         L"Device:", L"Area:", L"Razer devices",
         L"Data Source",
-        L"Temperature Thresholds and Colors", L"Use general scheme for all devices",
+        L"Thermal scheme", L"Use general scheme for all devices",
         L"LOW:", L"MEDIUM:", L"HIGH:", L"Color (hex):",
         L"Reset scheme", L"Reset Defaults",
         L"Shared Thermal Engine", L"Controllers", L"Sensor Update:", L"MSI device", L"FPS:", L"Smoothing:",
@@ -235,10 +236,11 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
     // ---- Spanish (LANG_ES) ----
     {
         L"Atajos", L"Avanzado",
-        L"Etiqueta del perfil:", L"Establecer como perfil activo", L"Control de hardware MSI", L"Controlar placa base MSI",
+        L"Etiqueta del perfil:", L"Establecer como perfil activo", L"Dispositivos RGB",
+        L"Control de hardware MSI", L"Controlar placa base MSI",
         L"Dispositivo:", L"Área:", L"Dispositivos Razer",
         L"Origen de datos",
-        L"Umbrales de temperatura y colores", L"Usar esquema general para todos los dispositivos",
+        L"Esquema térmico", L"Usar esquema general para todos los dispositivos",
         L"BAJA:", L"MEDIA:", L"ALTA:", L"Color (hex):",
         L"Restaurar esquema", L"Restaurar valores",
         L"Motor térmico compartido", L"Controladoras", L"Actualización sensor:", L"Dispositivo MSI", L"FPS:", L"Suavizado:",
@@ -306,7 +308,16 @@ enum class DataSource {
     HTTP
 };
 
+// Persisted per-scheme input selection. LibreHardwareMonitor is the only
+// implemented provider today, but keeping the provider in the scheme prevents
+// the UI/config model from becoming ambiguous when more sources are added.
+enum class ThermalDataSource : int {
+    LibreHardwareMonitor = 0
+};
+
 struct ThermalScheme {
+    ThermalDataSource dataSource = ThermalDataSource::LibreHardwareMonitor;
+    std::wstring sensorId;
     int tempLow = DEF_TEMP_LOW;
     int tempMed = DEF_TEMP_MED;
     int tempHigh = DEF_TEMP_HIGH;
@@ -316,7 +327,6 @@ struct ThermalScheme {
 };
 
 struct Config {
-    wchar_t sensorID[SENSOR_ID_LEN] = {};
     wchar_t targetDevice[256] = {};
     int targetLedIndex = 0;
     wchar_t webServerUrl[256] = {};
@@ -472,7 +482,6 @@ std::atomic<bool> g_Running{ true };
 std::atomic<bool> g_windows_shutdown{ false };
 std::atomic<bool> g_LedsEnabled{ true };
 std::atomic<bool> g_NotificationsEnabled{ true };
-std::atomic<float> g_asyncTemp{ -1.0f };
 std::atomic<int> g_httpConnectionDrops{ 0 };
 std::atomic<bool> g_SettingsOpen{ false };
 std::atomic<bool> g_AboutOpen{ false };
@@ -482,6 +491,13 @@ std::atomic<int> g_ConfigVersion{ 0 };
 // Guard them together so the engine never acknowledges a mixed snapshot.
 std::mutex g_ledRequestMutex;
 ULONGLONG g_ledCommandGeneration = 0;
+
+// One immutable logical sample is published for all configured sensors. The
+// sensor thread replaces the complete map after a single HTTP fetch + JSON
+// parse, so renderers can never combine values from different polling cycles.
+using TemperatureSnapshot = std::map<std::wstring, float>;
+std::mutex g_temperatureMutex;
+TemperatureSnapshot g_asyncTemperatures;
 
 // LED Real-time State Tracking
 std::atomic<DWORD> lastR{ RGB_LED_REFRESH }, lastG{ RGB_LED_REFRESH }, lastB{ RGB_LED_REFRESH };
@@ -999,31 +1015,46 @@ static float FindSensorValueRecursive(const json& jNode, const std::string& targ
 
 
 
-/**
- * Main Sensor Parser
- */
-static float ParseLHMJsonForTemp(const std::string& jsonStr, const wchar_t* sensorIDW) {
-    if (jsonStr.empty() || !sensorIDW) return -1.0f;
+static std::string WideToUtf8(const std::wstring& value) {
+    if (value.empty()) return {};
+    const int size = WideCharToMultiByte(CP_UTF8, 0, value.c_str(),
+        static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+    if (size <= 0) return {};
+    std::string result(static_cast<size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()),
+        result.data(), size, nullptr, nullptr);
+    return result;
+}
 
-    // Convert Wchar ID to Standard String
-    char sensorID[256];
-    size_t converted;
-    wcstombs_s(&converted, sensorID, sizeof(sensorID), sensorIDW, _TRUNCATE);
-
-    try {
-        // 1. Parse JSON string to DOM object
-        auto j = json::parse(jsonStr);
-
-        // 2. Search value navigating the tree
-        return FindSensorValueRecursive(j, std::string(sensorID));
-
+// Extract every requested sensor from one parsed LHM tree. This deliberately
+// walks the DOM once, regardless of how many MSI/Razer controllers use
+// independent sensors.
+static void CollectRequestedSensorValues(const json& node,
+    const std::map<std::string, std::wstring>& requested,
+    TemperatureSnapshot& values) {
+    if (requested.empty() || values.size() >= requested.size()) return;
+    if (node.is_object()) {
+        if (node.contains("SensorId") && node["SensorId"].is_string()) {
+            const auto id = node["SensorId"].get<std::string>();
+            const auto requestedSensor = requested.find(id);
+            if (requestedSensor != requested.end() && node.contains("Value") &&
+                !node["Value"].is_null()) {
+                const float value = ParseLHMValue(node["Value"]);
+                if (value >= 0.0f) values[requestedSensor->second] = value;
+            }
+        }
+        if (node.contains("Children") && node["Children"].is_array()) {
+            for (const auto& child : node["Children"]) {
+                CollectRequestedSensorValues(child, requested, values);
+                if (values.size() >= requested.size()) break;
+            }
+        }
     }
-    catch (const json::parse_error& e) {
-        // Log error if JSON is corrupt
-        char buf[256];
-        snprintf(buf, sizeof(buf), "[JSON Error] %s", e.what());
-        Log(buf);
-        return -1.0f;
+    else if (node.is_array()) {
+        for (const auto& element : node) {
+            CollectRequestedSensorValues(element, requested, values);
+            if (values.size() >= requested.size()) break;
+        }
     }
 }
 
@@ -1129,7 +1160,18 @@ static ThermalScheme ReadThermalScheme(const wchar_t* section,
     GetPrivateProfileStringW(section, (keyPrefix + L"ColorHigh").c_str(),
         fallbackHex, value, 10, INI_FILE);
     scheme.colorHigh = IsValidHex(value) ? HexToColor(value) : fallback.colorHigh;
-    return ValidateThermalScheme(scheme, fallback, context);
+    scheme = ValidateThermalScheme(scheme, fallback, context);
+
+    const int dataSource = GetPrivateProfileIntW(section,
+        (keyPrefix + L"DataSource").c_str(),
+        static_cast<int>(fallback.dataSource), INI_FILE);
+    scheme.dataSource = dataSource == static_cast<int>(
+        ThermalDataSource::LibreHardwareMonitor)
+        ? ThermalDataSource::LibreHardwareMonitor : fallback.dataSource;
+    scheme.sensorId = ReadIniString(section,
+        (keyPrefix + L"SensorID").c_str());
+    if (scheme.sensorId.empty()) scheme.sensorId = fallback.sensorId;
+    return scheme;
 }
 
 static ThermalScheme ReadRazerThermalScheme(const int profileIndex,
@@ -1145,6 +1187,10 @@ static ThermalScheme ReadRazerThermalScheme(const int profileIndex,
 static void WriteThermalScheme(const wchar_t* section, const wchar_t* prefix,
     const ThermalScheme& scheme) {
     const std::wstring keyPrefix = prefix ? prefix : L"";
+    WritePrivateProfileStringW(section, (keyPrefix + L"DataSource").c_str(),
+        std::to_wstring(static_cast<int>(scheme.dataSource)).c_str(), INI_FILE);
+    WritePrivateProfileStringW(section, (keyPrefix + L"SensorID").c_str(),
+        scheme.sensorId.c_str(), INI_FILE);
     WritePrivateProfileStringW(section, (keyPrefix + L"TempLow").c_str(),
         std::to_wstring(scheme.tempLow).c_str(), INI_FILE);
     WritePrivateProfileStringW(section, (keyPrefix + L"TempMed").c_str(),
@@ -1247,7 +1293,6 @@ static void SaveSettings() {
 
         WritePrivateProfileStringW(section.c_str(), L"Label", p.label, INI_FILE);
 
-        WritePrivateProfileStringW(section.c_str(), L"SensorID", p.sensorID, INI_FILE);
         WritePrivateProfileStringW(section.c_str(), L"TargetDevice", p.targetDevice, INI_FILE);
         WritePrivateProfileStringW(section.c_str(), L"TargetLedIndex", std::to_wstring(p.targetLedIndex).c_str(), INI_FILE);
         WritePrivateProfileStringW(section.c_str(), L"ControlMSI", p.controlMsi ? L"1" : L"0", INI_FILE);
@@ -1256,7 +1301,7 @@ static void SaveSettings() {
             p.useGeneralThermal ? L"1" : L"0", INI_FILE);
         WritePrivateProfileStringW(section.c_str(), L"RazerDeviceIds", p.razerDeviceIds.c_str(), INI_FILE);
 
-        WritePrivateProfileStringW(section.c_str(), L"ThermalSchemesVersion", L"1", INI_FILE);
+        WritePrivateProfileStringW(section.c_str(), L"ThermalSchemesVersion", L"2", INI_FILE);
         WriteThermalScheme(section.c_str(), L"Msi", p.msiThermal);
 
         // General is also the legacy shared scheme, so older MysticFight builds
@@ -1340,14 +1385,28 @@ static bool AutoSelectFirstSensor() {
                 std::vector<wchar_t> wId(len);
                 MultiByteToWideChar(CP_UTF8, 0, foundId.c_str(), -1, &wId[0], len);
 
-                // 5. Apply to empty profiles
+                // 5. Apply to empty schemes. Existing profiles keep their
+                // selected sensor; fresh independent schemes inherit the
+                // same safe first sensor until the user customizes them.
                 {
                     std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
                     bool updated = false;
                     for (int i = 0; i < 5; i++) {
-                        if (wcslen(g_Global.profiles[i].sensorID) == 0) {
-                            wcscpy_s(g_Global.profiles[i].sensorID, SENSOR_ID_LEN, &wId[0]);
+                        Config& profile = g_Global.profiles[i];
+                        if (profile.generalThermal.sensorId.empty()) {
+                            profile.generalThermal.sensorId = &wId[0];
                             updated = true;
+                        }
+                        if (profile.msiThermal.sensorId.empty()) {
+                            profile.msiThermal.sensorId = &wId[0];
+                            updated = true;
+                        }
+                        for (auto& entry : profile.razerThermals) {
+                            ThermalScheme& scheme = entry.second;
+                            if (scheme.sensorId.empty()) {
+                                scheme.sensorId = &wId[0];
+                                updated = true;
+                            }
                         }
                     }
                     if (updated) {
@@ -1464,7 +1523,6 @@ static void LoadSettings() {
                 ReadRazerThermalScheme(i, deviceKey, p.generalThermal));
         }
 
-        GetPrivateProfileStringW(section.c_str(), L"SensorID", L"", p.sensorID, SENSOR_ID_LEN, INI_FILE);
         wcscpy_s(p.webServerUrl, g_Global.lhmServerUrl);
 
         wchar_t defLabel[64]; swprintf_s(defLabel, T(STR_DEFAULT_PROFILE), i + 1);
@@ -1480,7 +1538,7 @@ static void LoadSettings() {
         }
     }
 
-        needAutoSelect = (wcslen(g_cfg.sensorID) == 0);
+        needAutoSelect = g_cfg.generalThermal.sensorId.empty();
 
         // Hotkey default values (Ctrl+Alt+Shift + Keys)
         BYTE defMod = HOTKEYF_CONTROL | HOTKEYF_SHIFT | HOTKEYF_ALT;
@@ -1688,55 +1746,83 @@ static void CollectSensorsRecursive(const json& jNode, std::vector<std::pair<std
     }
 }
 
+struct SensorUiEntry {
+    std::wstring label;
+    std::wstring id;
+};
+std::vector<SensorUiEntry> g_sensorUiCatalog;
+std::wstring g_sensorUiCatalogUrl;
+bool g_sensorUiCatalogValid = false;
+
+static std::wstring Utf8ToWide(const std::string& value) {
+    if (value.empty()) return {};
+    const int size = MultiByteToWideChar(CP_UTF8, 0, value.c_str(),
+        static_cast<int>(value.size()), nullptr, 0);
+    if (size <= 0) return {};
+    std::wstring result(static_cast<size_t>(size), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()),
+        result.data(), size);
+    return result;
+}
+
 static void PopulateSensorList(HWND hDlg, const wchar_t* webServerUrl, const wchar_t* currentTargetID) {
     HWND hCombo = GetDlgItem(hDlg, IDC_SENSOR_ID);
     ClearComboHeapData(hCombo);
 
-    std::string jsonStr = FetchLHMJson(webServerUrl, (int)HTTP_FAST_TIMEOUT);
-    if (jsonStr.empty()) {
-        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)T(STR_LHM_NOT_FOUND));
+    const std::wstring requestedUrl = webServerUrl ? webServerUrl : L"";
+    if (!g_sensorUiCatalogValid || g_sensorUiCatalogUrl != requestedUrl) {
+        g_sensorUiCatalog.clear();
+        g_sensorUiCatalogUrl = requestedUrl;
+        const std::string jsonStr = FetchLHMJson(webServerUrl, (int)HTTP_FAST_TIMEOUT);
+        if (!jsonStr.empty()) {
+            try {
+                const auto root = json::parse(jsonStr);
+                std::vector<std::pair<std::string, std::string>> sensors;
+                CollectSensorsRecursive(root, sensors);
+                for (const auto& [label, id] : sensors) {
+                    SensorUiEntry entry{ Utf8ToWide(label), Utf8ToWide(id) };
+                    if (!entry.label.empty() && !entry.id.empty()) {
+                        g_sensorUiCatalog.push_back(std::move(entry));
+                    }
+                }
+                g_sensorUiCatalogValid = true;
+            }
+            catch (const std::exception&) {
+                Log("[UI Error] Error parsing JSON for sensor list");
+            }
+        }
+    }
+
+    if (!g_sensorUiCatalogValid) {
+        SendMessageW(hCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(T(STR_LHM_NOT_FOUND)));
         EnableWindow(hCombo, FALSE);
         return;
     }
 
-    try {
-        auto j = json::parse(jsonStr);
-        std::vector<std::pair<std::string, std::string>> sensors;
-        CollectSensorsRecursive(j, sensors);
-
-        bool idSelected = false;
-
-        for (const auto& sensor : sensors) {
-            // Convert strings to wide chars for Windows Controls
-            int lenName = MultiByteToWideChar(CP_UTF8, 0, sensor.first.c_str(), -1, NULL, 0);
-            int lenId = MultiByteToWideChar(CP_UTF8, 0, sensor.second.c_str(), -1, NULL, 0);
-
-            std::vector<wchar_t> wName(lenName), wId(lenId);
-            MultiByteToWideChar(CP_UTF8, 0, sensor.first.c_str(), -1, &wName[0], lenName);
-            MultiByteToWideChar(CP_UTF8, 0, sensor.second.c_str(), -1, &wId[0], lenId);
-
-            wchar_t* pSafeId = HeapDupString(&wId[0]);
-            int idx = (int)SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)&wName[0]);
-            if (idx != CB_ERR) {
-                SendMessage(hCombo, CB_SETITEMDATA, idx, (LPARAM)pSafeId);
-                if (currentTargetID && wcscmp(&wId[0], currentTargetID) == 0) {
-                    SendMessage(hCombo, CB_SETCURSEL, idx, 0);
-                    idSelected = true;
-                }
-            }
-            else {
-                HeapFree(GetProcessHeap(), 0, pSafeId);
+    bool idSelected = false;
+    for (const auto& sensor : g_sensorUiCatalog) {
+        wchar_t* safeId = HeapDupString(sensor.id.c_str());
+        const int index = static_cast<int>(SendMessageW(hCombo, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(sensor.label.c_str())));
+        if (index != CB_ERR) {
+            SendMessageW(hCombo, CB_SETITEMDATA, index,
+                reinterpret_cast<LPARAM>(safeId));
+            if (currentTargetID && sensor.id == currentTargetID) {
+                SendMessageW(hCombo, CB_SETCURSEL, index, 0);
+                idSelected = true;
             }
         }
-
-        if (!idSelected && SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 0) {
-            SendMessage(hCombo, CB_SETCURSEL, 0, 0);
+        else if (safeId) {
+            HeapFree(GetProcessHeap(), 0, safeId);
         }
-
-        EnableWindow(hCombo, SendMessage(hCombo, CB_GETCOUNT, 0, 0) > 1);
     }
-    catch (const std::exception) {
-        Log("[UI Error] Error parsing JSON for list");
+
+    const LRESULT count = SendMessageW(hCombo, CB_GETCOUNT, 0, 0);
+    if (!idSelected && count > 0) SendMessageW(hCombo, CB_SETCURSEL, 0, 0);
+    EnableWindow(hCombo, count > 1);
+    if (count == 0) {
+        SendMessageW(hCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(T(STR_LHM_NOT_FOUND)));
+        EnableWindow(hCombo, FALSE);
     }
 }
 
@@ -1936,7 +2022,8 @@ static std::wstring ThermalTargetIdentity(const ThermalUiTarget& target) {
 }
 
 static void EnableThermalSchemeControls(HWND hDlg, const bool enabled) {
-    for (const int id : { IDC_TEMP_LOW, IDC_TEMP_MED, IDC_TEMP_HIGH,
+    for (const int id : { IDC_COMBO_DATA_SOURCE, IDC_SENSOR_ID,
+        IDC_TEMP_LOW, IDC_TEMP_MED, IDC_TEMP_HIGH,
         IDC_HEX_LOW, IDC_HEX_MED, IDC_HEX_HIGH, IDC_BTN_RESET,
         IDC_LBL_LOW, IDC_LBL_MED, IDC_LBL_HIGH, IDC_LBL_C1, IDC_LBL_C2,
         IDC_LBL_C3, IDC_LBL_HEX1, IDC_LBL_HEX2, IDC_LBL_HEX3 }) {
@@ -1961,11 +2048,17 @@ static void LoadThermalSchemeControls(HWND hDlg, const int profileIndex) {
     }
 
     ThermalScheme scheme;
+    wchar_t serverUrl[256] = {};
     {
         std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
         scheme = ThermalSchemeForUiTargetLocked(g_Global.profiles[profileIndex],
             profileIndex, g_thermalUiTargets[selection]);
+        wcscpy_s(serverUrl, g_Global.lhmServerUrl);
     }
+    EnableThermalSchemeControls(hDlg, true);
+    SendDlgItemMessage(hDlg, IDC_COMBO_DATA_SOURCE, CB_SETCURSEL,
+        static_cast<int>(scheme.dataSource), 0);
+    PopulateSensorList(hDlg, serverUrl, scheme.sensorId.c_str());
     SetDlgItemInt(hDlg, IDC_TEMP_LOW, scheme.tempLow, TRUE);
     SetDlgItemInt(hDlg, IDC_TEMP_MED, scheme.tempMed, TRUE);
     SetDlgItemInt(hDlg, IDC_TEMP_HIGH, scheme.tempHigh, TRUE);
@@ -1976,7 +2069,6 @@ static void LoadThermalSchemeControls(HWND hDlg, const int profileIndex) {
     SetDlgItemTextW(hDlg, IDC_HEX_MED, value);
     ColorToHex(scheme.colorHigh, value, 10);
     SetDlgItemTextW(hDlg, IDC_HEX_HIGH, value);
-    EnableThermalSchemeControls(hDlg, true);
 }
 
 static void SaveThermalSchemeControls(HWND hDlg, const int profileIndex) {
@@ -1989,6 +2081,23 @@ static void SaveThermalSchemeControls(HWND hDlg, const int profileIndex) {
     Config& profile = g_Global.profiles[profileIndex];
     ThermalScheme scheme = ThermalSchemeForUiTargetLocked(profile, profileIndex,
         g_thermalUiTargets[selection]);
+    const int dataSource = static_cast<int>(SendDlgItemMessage(hDlg,
+        IDC_COMBO_DATA_SOURCE, CB_GETCURSEL, 0, 0));
+    switch (dataSource) {
+    case static_cast<int>(ThermalDataSource::LibreHardwareMonitor):
+    default:
+        scheme.dataSource = ThermalDataSource::LibreHardwareMonitor;
+        break;
+    }
+    const int sensorSelection = static_cast<int>(SendDlgItemMessage(hDlg,
+        IDC_SENSOR_ID, CB_GETCURSEL, 0, 0));
+    if (sensorSelection != CB_ERR) {
+        const auto sensorId = reinterpret_cast<const wchar_t*>(SendDlgItemMessage(
+            hDlg, IDC_SENSOR_ID, CB_GETITEMDATA, sensorSelection, 0));
+        if (sensorId && sensorId != reinterpret_cast<const wchar_t*>(CB_ERR)) {
+            scheme.sensorId = sensorId;
+        }
+    }
     BOOL translated = FALSE;
     const int low = static_cast<int>(GetDlgItemInt(hDlg, IDC_TEMP_LOW, &translated, TRUE));
     if (translated) scheme.tempLow = low;
@@ -2105,7 +2214,6 @@ static void LoadProfileToUI(HWND hDlg, int profileIndex, int tempActiveIndex) {
     if (profileIndex < 0 || profileIndex >= 5) return;
     Config& p = g_Global.profiles[profileIndex];
     SetDlgItemTextW(hDlg, IDC_EDIT_LABEL, p.label);
-    SendMessage(GetDlgItem(hDlg, IDC_COMBO_DATA_SOURCE), CB_SETCURSEL, 0, 0);
 
     HWND hComboDev = GetDlgItem(hDlg, IDC_COMBO_DEVICE);
     int devCount = (int)SendMessage(hComboDev, CB_GETCOUNT, 0, 0);
@@ -2118,8 +2226,6 @@ static void LoadProfileToUI(HWND hDlg, int profileIndex, int tempActiveIndex) {
     }
 
     PopulateAreaList(hDlg, p.targetDevice, p.targetLedIndex);
-    PopulateSensorList(hDlg, p.webServerUrl, p.sensorID);
-
     CheckDlgButton(hDlg, IDC_CHK_CONTROL_MSI, p.controlMsi ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(hDlg, IDC_CHK_USE_GENERAL_THERMAL,
         p.useGeneralThermal ? BST_CHECKED : BST_UNCHECKED);
@@ -2231,12 +2337,6 @@ static void SaveUIToProfile(HWND hDlg, int profileIndex) {
     int idxArea = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_AREA), CB_GETCURSEL, 0, 0);
     if (idxArea != CB_ERR) {
         p.targetLedIndex = (int)SendMessage(GetDlgItem(hDlg, IDC_COMBO_AREA), CB_GETITEMDATA, idxArea, 0);
-    }
-
-    int idxSens = (int)SendMessage(GetDlgItem(hDlg, IDC_SENSOR_ID), CB_GETCURSEL, 0, 0);
-    if (idxSens != CB_ERR) {
-        wchar_t* sID = (wchar_t*)SendMessage(GetDlgItem(hDlg, IDC_SENSOR_ID), CB_GETITEMDATA, idxSens, 0);
-        if (sID) wcscpy_s(p.sensorID, sID);
     }
 
     GetDlgItemTextW(hDlg, IDC_EDIT_LABEL, p.label, 64);
@@ -2607,67 +2707,31 @@ static void SetMsiHardwareControlsEnabled(HWND hDlg, bool sdkReady) {
 /**
  * Debug utility to dump all available LHM sensors to the log file
  */
-static void LogAllLHMTemperatureSensors() {
+static void LogAllLHMTemperatureSensors(const json& root) {
     Log("[MysticFight] --- DUMPING ALL LHM TEMPERATURE SENSORS ---");
-
-    wchar_t localURL[256];
-    {
-        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-        wcscpy_s(localURL, g_cfg.webServerUrl);
-    }
-
-    // 1. Descargamos el JSON crudo
-    std::string jsonStr = FetchLHMJson(localURL, (int)HTTP_FAST_TIMEOUT);
-
-    if (jsonStr.empty()) {
-        Log("[MysticFight] Error: LHM returned EMPTY response.");
-        return;
-    }
-
-    // 2. Intentamos parsear con control de errores detallado
     try {
-        auto j = json::parse(jsonStr);
         std::vector<std::pair<std::string, std::string>> sensors;
-        CollectSensorsRecursive(j, sensors);
+        CollectSensorsRecursive(root, sensors);
 
         if (sensors.empty()) {
             Log("[MysticFight] JSON parsed, but NO temperature sensors found.");
-            // Imprimimos el inicio del JSON para ver qué estructura tiene
-            std::string debugSnippet = jsonStr.substr(0, 200);
-            Log(("[JSON Snippet]: " + debugSnippet).c_str());
         }
         else {
             for (const auto& s : sensors) {
-                // Try to fetch value for logging
-                float val = FindSensorValueRecursive(j, s.second);
-
-                int lenName = MultiByteToWideChar(CP_UTF8, 0, s.first.c_str(), -1, NULL, 0);
-                int lenId = MultiByteToWideChar(CP_UTF8, 0, s.second.c_str(), -1, NULL, 0);
-                std::vector<wchar_t> wName(lenName + 1), wId(lenId + 1); // +1 por seguridad
-                MultiByteToWideChar(CP_UTF8, 0, s.first.c_str(), -1, &wName[0], lenName);
-                MultiByteToWideChar(CP_UTF8, 0, s.second.c_str(), -1, &wId[0], lenId);
+                const float val = FindSensorValueRecursive(root, s.second);
+                const std::wstring name = Utf8ToWide(s.first);
+                const std::wstring id = Utf8ToWide(s.second);
 
                 wchar_t wBuf[LOG_BUFFER_SIZE];
-                swprintf_s(wBuf, L"[HTTP] ID: %ls | Name: %ls | Value: %.1f", &wId[0], &wName[0], val);
+                swprintf_s(wBuf, L"[HTTP] ID: %ls | Name: %ls | Value: %.1f",
+                    id.c_str(), name.c_str(), val);
 
-                // Conversión segura para el Log (char*)
                 _bstr_t logConverter(wBuf);
                 Log(logConverter);
             }
         }
     }
-    catch (const json::parse_error& e) {
-        // ERROR DE SINTAXIS JSON
-        char buf[512];
-        snprintf(buf, sizeof(buf), "[JSON PARSE ERROR] Byte: %llu | Msg: %s", e.byte, e.what());
-        Log(buf);
-
-        // Muestra qué demonios recibió
-        std::string debugSnippet = jsonStr.substr(0, 150);
-        Log(("[RECEIVED DATA]: " + debugSnippet).c_str());
-    }
     catch (const std::exception& e) {
-        // OTRO ERROR (posiblemente de tipo)
         char buf[256];
         snprintf(buf, sizeof(buf), "[STD EXCEPTION] %s", e.what());
         Log(buf);
@@ -2679,24 +2743,85 @@ static void LogAllLHMTemperatureSensors() {
     Log("[MysticFight] --- END OF HTTP DUMP ---");
 }
 
+static std::set<std::wstring> ConfiguredSensorIds(const Config& config) {
+    std::set<std::wstring> ids;
+    const auto add = [&](const ThermalScheme& scheme) {
+        if (scheme.dataSource == ThermalDataSource::LibreHardwareMonitor &&
+            !scheme.sensorId.empty()) ids.insert(scheme.sensorId);
+    };
+
+    if (config.useGeneralThermal) {
+        add(config.generalThermal);
+    }
+    else {
+        if (config.controlMsi) add(config.msiThermal);
+        if (config.controlRazer) {
+            const auto selected = ParseRazerDeviceIds(config.razerDeviceIds.c_str());
+            if (selected.empty()) {
+                // Legacy single-Razer profiles use General until their explicit
+                // device key is migrated by the detection worker.
+                add(config.generalThermal);
+            }
+            for (const auto& deviceKey : selected) {
+                const auto scheme = config.razerThermals.find(deviceKey);
+                add(scheme != config.razerThermals.end()
+                    ? scheme->second : config.generalThermal);
+            }
+        }
+    }
+    // Preserve source-health monitoring even if the profile currently controls
+    // no RGB target.
+    if (ids.empty()) add(config.generalThermal);
+    return ids;
+}
+
+static float TemperatureForSensor(const std::wstring& sensorId) {
+    if (sensorId.empty()) return -1.0f;
+    std::lock_guard<std::mutex> lock(g_temperatureMutex);
+    const auto value = g_asyncTemperatures.find(sensorId);
+    return value != g_asyncTemperatures.end() ? value->second : -1.0f;
+}
+
+static TemperatureSnapshot CaptureTemperatureSnapshot() {
+    std::lock_guard<std::mutex> lock(g_temperatureMutex);
+    return g_asyncTemperatures;
+}
+
+static void ClearTemperatureSnapshot() {
+    std::lock_guard<std::mutex> lock(g_temperatureMutex);
+    g_asyncTemperatures.clear();
+}
+
+static float TemperatureFromSnapshot(const TemperatureSnapshot& snapshot,
+    const std::wstring& sensorId) {
+    const auto value = snapshot.find(sensorId);
+    return value != snapshot.end() ? value->second : -1.0f;
+}
+
+static bool SensorTemperatureChanged(const TemperatureSnapshot& before,
+    const TemperatureSnapshot& after, const ThermalScheme& scheme) {
+    return TemperatureFromSnapshot(before, scheme.sensorId) !=
+        TemperatureFromSnapshot(after, scheme.sensorId);
+}
+
 /**
  * Primary sensor polling function with state management
  */
-static float GetCPUTempFast(int& sampledConfigVersion) {
-    wchar_t localSensorID[SENSOR_ID_LEN];
+static TemperatureSnapshot GetTemperaturesFast(int& sampledConfigVersion) {
     wchar_t localURL[256];
+    std::set<std::wstring> sensorIds;
     {
         std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
         sampledConfigVersion = g_ConfigVersion.load();
-        wcscpy_s(localSensorID, g_cfg.sensorID);
         wcscpy_s(localURL, g_cfg.webServerUrl);
+        sensorIds = ConfiguredSensorIds(g_cfg);
     }
 
     ULONGLONG currentTime = GetTickCount64();
     if (g_activeSource == DataSource::Searching) {
-        if (currentTime - g_lastDataSourceSearchRetry <= LHM_RETRY_DELAY_MS) return -1.0f;
+        if (currentTime - g_lastDataSourceSearchRetry <= LHM_RETRY_DELAY_MS) return {};
         std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-        if (sampledConfigVersion != g_ConfigVersion.load()) return -1.0f;
+        if (sampledConfigVersion != g_ConfigVersion.load()) return {};
         g_lastDataSourceSearchRetry = currentTime;
     }
 
@@ -2704,7 +2829,7 @@ static float GetCPUTempFast(int& sampledConfigVersion) {
 
     if (jsonStr.empty()) {
         std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-        if (sampledConfigVersion != g_ConfigVersion.load()) return -1.0f;
+        if (sampledConfigVersion != g_ConfigVersion.load()) return {};
         if (g_activeSource == DataSource::HTTP) {
             g_httpConnectionDrops++;
             if (g_httpConnectionDrops >= 2) {
@@ -2715,13 +2840,37 @@ static float GetCPUTempFast(int& sampledConfigVersion) {
                 SetEvent(g_hSensorEvent);
             }
         }
-        return -1.0f;
+        return {};
+    }
+
+    json root;
+    TemperatureSnapshot temperatures;
+    try {
+        root = json::parse(jsonStr);
+        std::map<std::string, std::wstring> requested;
+        for (const auto& sensorId : sensorIds) {
+            const std::string utf8Id = WideToUtf8(sensorId);
+            if (!utf8Id.empty()) requested.emplace(utf8Id, sensorId);
+        }
+        CollectRequestedSensorValues(root, requested, temperatures);
+    }
+    catch (const json::parse_error& e) {
+        char message[256] = {};
+        snprintf(message, sizeof(message), "[JSON Error] %s", e.what());
+        Log(message);
+        return {};
+    }
+    catch (const std::exception& e) {
+        char message[256] = {};
+        snprintf(message, sizeof(message), "[Sensor Error] %s", e.what());
+        Log(message);
+        return {};
     }
 
     bool sourceDetected = false;
     {
         std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-        if (sampledConfigVersion != g_ConfigVersion.load()) return -1.0f;
+        if (sampledConfigVersion != g_ConfigVersion.load()) return {};
         if (g_activeSource == DataSource::Searching) {
             g_activeSource = DataSource::HTTP;
             g_pendingStyleChange = true;
@@ -2731,10 +2880,11 @@ static float GetCPUTempFast(int& sampledConfigVersion) {
     }
     if (sourceDetected) {
         Log("[MysticFight] LHM HTTP Data Source detected");
-        LogAllLHMTemperatureSensors();
+        // Reuse the already downloaded and parsed document: detection logging
+        // must not create a second HTTP request.
+        LogAllLHMTemperatureSensors(root);
     }
-
-    return ParseLHMJsonForTemp(jsonStr, localSensorID);
+    return temperatures;
 }
 
 /**
@@ -2744,30 +2894,53 @@ static void SensorThread() {
     while (g_Running) {
         const DataSource sourceBeforeSample = g_activeSource.load();
         int sampledConfigVersion = -1;
-        float sampledTemp = GetCPUTempFast(sampledConfigVersion);
-        bool temperatureChanged = false;
-        bool msiConsumesSensor = false;
-        bool razerConsumesSensor = false;
+        TemperatureSnapshot sampledTemperatures = GetTemperaturesFast(sampledConfigVersion);
+        Config activeConfig;
+        bool publishSample = false;
         {
             // Config writers use the same mutex while advancing the version.
             // An HTTP result from an older profile/config is therefore discarded.
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
             if (sampledConfigVersion == g_ConfigVersion.load()) {
-                const float previousTemp = g_asyncTemp.exchange(sampledTemp);
-                temperatureChanged = previousTemp != sampledTemp;
-                const bool lightsEnabled = g_LedsEnabled.load();
-                msiConsumesSensor = lightsEnabled && g_cfg.controlMsi;
-                razerConsumesSensor = lightsEnabled && g_cfg.controlRazer;
+                activeConfig = g_cfg;
+                publishSample = true;
             }
         }
+        TemperatureSnapshot previousTemperatures;
+        if (publishSample) {
+            std::lock_guard<std::mutex> lock(g_temperatureMutex);
+            previousTemperatures = std::move(g_asyncTemperatures);
+            g_asyncTemperatures = sampledTemperatures;
+        }
         const bool sourceChanged = sourceBeforeSample != g_activeSource.load();
-        // Both renderers are event-driven while their output is stable. Wake
-        // them only when a fresh sample or source transition can change the
-        // target; event coalescing is intentional because workers consume the
-        // latest state rather than queueing stale samples.
-        if (temperatureChanged || sourceChanged) {
-            if (msiConsumesSensor && g_hEngineEvent) SetEvent(g_hEngineEvent);
-            if (razerConsumesSensor && g_hRazerEvent) SetEvent(g_hRazerEvent);
+        if (publishSample && g_LedsEnabled.load()) {
+            const ThermalScheme& msiScheme = activeConfig.useGeneralThermal
+                ? activeConfig.generalThermal : activeConfig.msiThermal;
+            const bool msiChanged = activeConfig.controlMsi &&
+                SensorTemperatureChanged(previousTemperatures,
+                    sampledTemperatures, msiScheme);
+            bool razerChanged = false;
+            if (activeConfig.controlRazer) {
+                const auto selected = ParseRazerDeviceIds(
+                    activeConfig.razerDeviceIds.c_str());
+                if (selected.empty()) {
+                    razerChanged = SensorTemperatureChanged(previousTemperatures,
+                        sampledTemperatures, activeConfig.generalThermal);
+                }
+                for (const auto& deviceKey : selected) {
+                    const auto scheme = activeConfig.razerThermals.find(deviceKey);
+                    const ThermalScheme& thermal = scheme != activeConfig.razerThermals.end()
+                        ? scheme->second : activeConfig.generalThermal;
+                    razerChanged = razerChanged || SensorTemperatureChanged(
+                        previousTemperatures, sampledTemperatures, thermal);
+                }
+            }
+            // Workers are event-driven while stable; wake only the consumer
+            // whose selected sensor changed. Event coalescing is intentional.
+            if ((msiChanged || sourceChanged) && activeConfig.controlMsi &&
+                g_hEngineEvent) SetEvent(g_hEngineEvent);
+            if ((razerChanged || sourceChanged) && activeConfig.controlRazer &&
+                g_hRazerEvent) SetEvent(g_hRazerEvent);
         }
 
         DWORD waitMs = (DWORD)SENSOR_LOOP_OFF_DELAY_MS;
@@ -2830,7 +3003,7 @@ static void SwitchActiveProfile(HWND hWnd, int index) {
         g_ConfigVersion++;
         g_lastDataSourceSearchRetry = 0;
         g_activeSource = DataSource::Searching;
-        g_asyncTemp = -1.0f;
+        ClearTemperatureSnapshot();
         g_pendingStyleChange = true;
     }
 
@@ -3051,8 +3224,8 @@ static void UpdateRazerPanelLayout(HWND hDlg) {
  */
 static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
     const int profileCtrls[] = {
-        IDC_GRP_MSI, IDC_GRP_RAZER, IDC_GRP_SOURCE, IDC_GRP_THRESHOLDS,
-        IDC_FRAME_THERMAL_CONTENT,
+        IDC_GRP_RGB_DEVICES, IDC_GRP_MSI, IDC_GRP_RAZER, IDC_GRP_SOURCE,
+        IDC_GRP_THRESHOLDS, IDC_FRAME_THERMAL_CONTENT, IDC_SEPARATOR_PROFILE,
         IDC_EDIT_LABEL, IDC_CHK_ACTIVE_PROFILE, IDC_COMBO_DEVICE, IDC_COMBO_AREA,
         IDC_CHK_CONTROL_MSI, IDC_LIST_RAZER_DEVICES,
         IDC_CHK_USE_GENERAL_THERMAL, IDC_TAB_THERMAL_DEVICES,
@@ -3098,6 +3271,7 @@ static void ApplyDialogTranslations(HWND hDlg) {
     // Profile layer
     SetDlgItemTextW(hDlg, IDC_LBL_PROFILE_NAME, T(STR_LBL_PROFILE_NAME));
     SetDlgItemTextW(hDlg, IDC_CHK_ACTIVE_PROFILE, T(STR_CHK_ACTIVE));
+    SetDlgItemTextW(hDlg, IDC_GRP_RGB_DEVICES, T(STR_GRP_RGB_DEVICES));
     SetDlgItemTextW(hDlg, IDC_GRP_MSI, T(STR_GRP_MSI));
     SetDlgItemTextW(hDlg, IDC_CHK_CONTROL_MSI, T(STR_CHK_CONTROL_MSI));
     SetDlgItemTextW(hDlg, IDC_LBL_DEVICE, T(STR_LBL_DEVICE));
@@ -3262,6 +3436,9 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
     case WM_INITDIALOG: {
         g_hSettingsDlg = hDlg; // let the engine notify us when hardware becomes ready
+        g_sensorUiCatalog.clear();
+        g_sensorUiCatalogUrl.clear();
+        g_sensorUiCatalogValid = false;
 
         HWND hMainWnd = GetParent(hDlg);
         if (hMainWnd) {
@@ -3540,7 +3717,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             g_NotificationsEnabled = (IsDlgButtonChecked(hDlg, IDC_CHK_NOTIFICATIONS) == BST_CHECKED);
             SaveSettings();
             g_ConfigVersion++;
-            g_asyncTemp = -1.0f;
+            ClearTemperatureSnapshot();
             SetEvent(g_hSensorEvent);
             SetEvent(g_hEngineEvent);
             if (g_hRazerEvent) SetEvent(g_hRazerEvent);
@@ -3553,7 +3730,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                 std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
                 g_Global = s_snapshot;
                 g_ConfigVersion++;
-                g_asyncTemp = -1.0f;
+                ClearTemperatureSnapshot();
             }
             g_Language = s_langSnapshot; // revert any live language change
             // The engine runs in parallel and may have latched an edited color
@@ -3668,6 +3845,9 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         ClearComboHeapData(GetDlgItem(hDlg, IDC_COMBO_RAZER_DEVICE));
         g_advancedRazerDeviceKey.clear();
         g_razerUiDevices.clear();
+        g_sensorUiCatalog.clear();
+        g_sensorUiCatalogUrl.clear();
+        g_sensorUiCatalogValid = false;
         g_thermalUiTargets.clear();
         g_thermalUiProfileIndex = -1;
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_LOW), GWLP_WNDPROC, (LONG_PTR)oldEditProc);
@@ -5039,7 +5219,9 @@ static void EngineThread(HWND hWnd) {
         else if (currentTime >= nextFrameTime || g_pendingStyleChange.load()) {
             const ULONGLONG frameIntervalMs = 1000 / ledRefreshFPS;
             nextFrameTime = currentTime + frameIntervalMs;
-            float rawTemp = g_asyncTemp;
+            const ThermalScheme& msiScheme = cfgLocal.useGeneralThermal
+                ? cfgLocal.generalThermal : cfgLocal.msiThermal;
+            const float rawTemp = TemperatureForSensor(msiScheme.sensorId);
 
             if (rawTemp >= 0.0f) {
                 if (g_pendingStyleChange.exchange(false)) {
@@ -5050,8 +5232,6 @@ static void EngineThread(HWND hWnd) {
                 float temp = floorf(rawTemp * 2.0f + 0.5f) / 2.0f;
                 if (temp != lastTemp) {
                     lastTemp = temp;
-                    const ThermalScheme& msiScheme = cfgLocal.useGeneralThermal
-                        ? cfgLocal.generalThermal : cfgLocal.msiThermal;
                     CalculateThermalTargetColor(msiScheme, temp,
                         targetR, targetG, targetB);
                     colorTransitionActive = true;
@@ -5143,7 +5323,9 @@ static void EngineThread(HWND hWnd) {
         ULONGLONG nextWake = g_lastSdkProgress + heartbeatInterval;
         const bool lightsEnabled = g_LedsEnabled.load();
         const DataSource activeSource = g_activeSource.load();
-        const float latestTemperature = g_asyncTemp.load();
+        const ThermalScheme& msiScheme = cfgLocal.useGeneralThermal
+            ? cfgLocal.generalThermal : cfgLocal.msiThermal;
+        const float latestTemperature = TemperatureForSensor(msiScheme.sensorId);
         if (lightsEnabled && activeSource != DataSource::Searching &&
             latestTemperature >= 0.0f) {
             const DWORD desiredR = static_cast<DWORD>(roundf(currR.load()));
@@ -5656,15 +5838,15 @@ static void RazerThread(HWND hWnd) {
             continue;
         }
 
-        const float rawTemperature = g_asyncTemp.load();
-        if (g_activeSource.load() == DataSource::Searching || rawTemperature < 0.0f) {
+        if (g_activeSource.load() == DataSource::Searching) {
             waitForIdleWork();
             continue;
         }
 
-        const float temperature = floorf(rawTemperature * 2.0f + 0.5f) / 2.0f;
         const LedRequestSnapshot request = CaptureLedRequest();
         bool anyApplied = false;
+        std::set<std::wstring> temperatureReadyKeys;
+        const TemperatureSnapshot temperatures = CaptureTemperatureSnapshot();
         now = GetTickCount64();
         for (const auto& key : selectedKeys) {
             const auto it = runtimes.find(key);
@@ -5672,11 +5854,22 @@ static void RazerThread(HWND hWnd) {
             RazerDeviceRuntime& runtime = *it->second;
             const RazerDeviceSettings settings = settingsForKey(key);
             const DWORD frameInterval = 1000 / settings.refreshFPS;
+            const ThermalScheme& scheme = ThermalSchemeForRazerDevice(config, key);
+            const float rawTemperature = TemperatureFromSnapshot(
+                temperatures, scheme.sensorId);
+            if (rawTemperature < 0.0f) {
+                // Do not spin at the device FPS while only this controller's
+                // selected sensor is unavailable. A sensor/config event resumes
+                // its pending transition immediately.
+                runtime.nextColorFrame = 0;
+                continue;
+            }
+            temperatureReadyKeys.insert(key);
+            const float temperature = floorf(rawTemperature * 2.0f + 0.5f) / 2.0f;
 
             if (runtime.nextColorFrame == 0 || now >= runtime.nextColorFrame) {
                 if (temperature != runtime.lastTemperature) {
                     runtime.lastTemperature = temperature;
-                    const ThermalScheme& scheme = ThermalSchemeForRazerDevice(config, key);
                     CalculateThermalTargetColor(scheme, temperature,
                         runtime.targetRed, runtime.targetGreen, runtime.targetBlue);
                     runtime.colorTransitionActive = true;
@@ -5777,7 +5970,8 @@ static void RazerThread(HWND hWnd) {
         ULONGLONG nextWake = nextDetection;
         for (const auto& key : selectedKeys) {
             const auto it = runtimes.find(key);
-            if (it == runtimes.end() || !it->second->present) continue;
+            if (it == runtimes.end() || !it->second->present ||
+                !temperatureReadyKeys.contains(key)) continue;
             const RazerDeviceRuntime& runtime = *it->second;
             if (runtime.colorTransitionActive && runtime.nextColorFrame != 0) {
                 nextWake = (std::min)(nextWake, runtime.nextColorFrame);
