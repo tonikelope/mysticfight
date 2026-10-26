@@ -57,6 +57,8 @@
 #define IDC_COMBO_RAZER_DEVICE          2122
 #define IDC_TAB_THERMAL_DEVICES         2123
 #define IDC_CHK_USE_GENERAL_THERMAL     2124
+#define IDC_BTN_DELETE_PROFILE          2125
+#define IDC_TAB_SETTINGS_ACTIONS        2126
 
 // Profile Groups (CRITICAL: Added IDC_GRP_THRESHOLDS)
 #define IDC_GRP_MSI                     2200

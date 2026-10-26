@@ -96,7 +96,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define ID_TRAY_ABOUT           4001
 #define ID_TRAY_PROFILE_BASE    5000
 
-// New: Profile Switching Menu IDs (5000 - 5004)
+// Dynamic profile switching menu IDs begin here (bounded by MAX_PROFILE_COUNT).
 #define ID_TRAY_PROFILE_START   5000 
 
 // Application Metadata
@@ -143,6 +143,10 @@ const int   DEF_TEMP_LOW = 50;
 const int   DEF_TEMP_MED = 70;
 const int   DEF_TEMP_HIGH = 90;
 
+const int   DEFAULT_PROFILE_COUNT = 5;
+const int   MAX_PROFILE_COUNT = 20;
+const int   PROFILE_HOTKEY_COUNT = 5;
+
 const wchar_t* DEF_COLOR_LOW = L"#00FF00"; // Green
 const wchar_t* DEF_COLOR_MED = L"#FFFF00"; // Yellow
 const wchar_t* DEF_COLOR_HIGH = L"#FF0000"; // Red
@@ -165,9 +169,10 @@ std::atomic<int> g_Language{ LANG_EN };
 
 enum StrId {
     // Tab captions (profile tabs use user labels, not translated)
-    STR_TAB_SHORTCUTS, STR_TAB_ADVANCED,
+    STR_TAB_NEW_PROFILE, STR_TAB_SHORTCUTS, STR_TAB_ADVANCED,
     // Profile layer
-    STR_LBL_PROFILE_NAME, STR_CHK_ACTIVE, STR_GRP_RGB_DEVICES,
+    STR_LBL_PROFILE_NAME, STR_CHK_ACTIVE, STR_BTN_DELETE_PROFILE,
+    STR_GRP_RGB_DEVICES,
     STR_GRP_MSI, STR_CHK_CONTROL_MSI,
     STR_LBL_DEVICE, STR_LBL_AREA, STR_GRP_RAZER,
     STR_GRP_SOURCE,
@@ -194,6 +199,8 @@ enum StrId {
     STR_NOTIF_LIGHTS_ON, STR_NOTIF_LIGHTS_OFF, STR_NOTIF_SWITCHED, STR_NOTIF_LETSDANCE,
     // Message boxes
     STR_MSG_DUP_HOTKEY, STR_MSG_ERROR_TITLE, STR_MSG_ALREADY_RUNNING, STR_MSG_INFO_TITLE,
+    STR_MSG_DELETE_PROFILE, STR_MSG_LAST_PROFILE, STR_MSG_ACTIVE_PROFILE,
+    STR_MSG_PROFILE_LIMIT,
     STR_MSG_SDK_CRITICAL, STR_MSG_SDK_FATAL, STR_MSG_UNKNOWN_ERROR, STR_MSG_CRASH_TITLE,
     // Tray tooltip status
     STR_STATUS_RESTARTING, STR_STATUS_CONNECTING, STR_STATUS_INITIALIZING,
@@ -208,8 +215,8 @@ enum StrId {
 static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
     // ---- English (LANG_EN) ----
     {
-        L"Shortcuts", L"Advanced",
-        L"Profile Label:", L"Set as Active Profile", L"RGB Devices",
+        L"New profile", L"Shortcuts", L"Advanced",
+        L"Profile Label:", L"Set as Active Profile", L"Delete profile", L"RGB Devices",
         L"MSI Hardware Control", L"Control MSI motherboard",
         L"Device:", L"Area:", L"Razer devices",
         L"Data Source",
@@ -227,6 +234,10 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Lights Enabled", L"Active Profile", L"Settings", L"About MysticFight", L"View Debug Log", L"Exit MysticFight",
         L"Lights ON", L"Lights OUT", L"Switched to %ls", L"Let's dance baby",
         L"Duplicate hotkey detected.", L"Error", L"MysticFight is already running.", L"Information",
+        L"Delete profile \"%ls\"? This action is immediate and cannot be undone.",
+        L"At least one profile must remain.",
+        L"The active profile cannot be deleted. Set another profile as active, save the changes, and try again.",
+        L"The maximum of %d profiles has been reached.",
         L"MSI SDK Critical Error. Please check MSI Center installation.", L"MSI SDK Fatal Error. Please reinstall MSI Center.",
         L"An unknown critical error occurred.", L"MysticFight Crash",
         L"Restarting MSI Service...", L"Connecting to SDK...", L"Initializing...",
@@ -235,8 +246,8 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
     },
     // ---- Spanish (LANG_ES) ----
     {
-        L"Atajos", L"Avanzado",
-        L"Etiqueta del perfil:", L"Establecer como perfil activo", L"Dispositivos RGB",
+        L"Nuevo perfil", L"Atajos", L"Avanzado",
+        L"Etiqueta del perfil:", L"Establecer como perfil activo", L"Borrar perfil", L"Dispositivos RGB",
         L"Control de hardware MSI", L"Controlar placa base MSI",
         L"Dispositivo:", L"Área:", L"Dispositivos Razer",
         L"Origen de datos",
@@ -254,6 +265,10 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Luces activadas", L"Perfil activo", L"Ajustes", L"Acerca de MysticFight", L"Ver registro de depuración", L"Salir de MysticFight",
         L"Luces encendidas", L"Luces apagadas", L"Cambiado a %ls", L"A bailar, nena",
         L"Atajo duplicado detectado.", L"Error", L"MysticFight ya se está ejecutando.", L"Información",
+        L"¿Borrar el perfil \"%ls\"? Esta acción es inmediata y no se puede deshacer.",
+        L"Debe quedar al menos un perfil.",
+        L"No se puede borrar el perfil activo. Establece otro perfil como activo, guarda los cambios y vuelve a intentarlo.",
+        L"Se ha alcanzado el máximo de %d perfiles.",
         L"Error crítico del SDK de MSI. Comprueba la instalación de MSI Center.", L"Error fatal del SDK de MSI. Reinstala MSI Center.",
         L"Se ha producido un error crítico desconocido.", L"Fallo de MysticFight",
         L"Reiniciando servicio MSI...", L"Conectando al SDK...", L"Inicializando...",
@@ -358,7 +373,7 @@ struct RazerDeviceSettings {
 };
 
 struct GlobalConfig {
-    Config profiles[5] = {};
+    std::vector<Config> profiles = std::vector<Config>(DEFAULT_PROFILE_COUNT);
     int activeProfileIndex = 0;
     AppHotkeys hotkeys = {};
     wchar_t lhmServerUrl[256] = {};
@@ -575,6 +590,41 @@ LPMLAPI_GetLedInfo      lpMLAPI_GetLedInfo = nullptr;
 // Helper Accessor Macro for Thread Safety
 inline Config& GetCfgSafe() { return g_Global.profiles[g_Global.activeProfileIndex]; }
 #define g_cfg GetCfgSafe()
+
+static int ProfileCount() {
+    std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+    return static_cast<int>(g_Global.profiles.size());
+}
+
+static bool IsProfileIndex(const int index) {
+    return index >= 0 && index < ProfileCount();
+}
+
+static bool CanAddProfile() { return ProfileCount() < MAX_PROFILE_COUNT; }
+static int AddProfileTabIndex() {
+    return CanAddProfile() ? ProfileCount() : -1;
+}
+static int ShortcutsTabIndex() {
+    return ProfileCount() + (CanAddProfile() ? 1 : 0);
+}
+static int AdvancedTabIndex() { return ShortcutsTabIndex() + 1; }
+
+// The top navigation is rendered as two adjacent tab controls: the profile
+// strip can overflow, while the action strip stays permanently visible.
+// These helpers keep the rest of Settings working with one logical index.
+static int SettingsActionTabCount() { return CanAddProfile() ? 3 : 2; }
+
+static int LogicalTabFromActionTab(const int actionTab) {
+    if (actionTab < 0 || actionTab >= SettingsActionTabCount()) return -1;
+    return ProfileCount() + actionTab;
+}
+
+static int ActionTabFromLogicalTab(const int logicalTab) {
+    const int actionTab = logicalTab - ProfileCount();
+    return actionTab >= 0 && actionTab < SettingsActionTabCount()
+        ? actionTab
+        : -1;
+}
 
 HICON g_hIconColor = NULL;
 HICON g_hIconGray = NULL;
@@ -896,12 +946,22 @@ static void RegisterAppHotkeys(HWND hWnd) {
     UnregisterHotKey(hWnd, 1);
     for (int i = 101; i <= 105; i++) UnregisterHotKey(hWnd, i);
 
-    SafeRegisterHotkey(hWnd, 1, g_Global.hotkeys.toggleLEDs);
-    SafeRegisterHotkey(hWnd, 101, g_Global.hotkeys.profile1);
-    SafeRegisterHotkey(hWnd, 102, g_Global.hotkeys.profile2);
-    SafeRegisterHotkey(hWnd, 103, g_Global.hotkeys.profile3);
-    SafeRegisterHotkey(hWnd, 104, g_Global.hotkeys.profile4);
-    SafeRegisterHotkey(hWnd, 105, g_Global.hotkeys.profile5);
+    AppHotkeys hotkeys;
+    int profileCount = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+        hotkeys = g_Global.hotkeys;
+        profileCount = static_cast<int>(g_Global.profiles.size());
+    }
+    SafeRegisterHotkey(hWnd, 1, hotkeys.toggleLEDs);
+    const WORD profileHotkeys[PROFILE_HOTKEY_COUNT] = {
+        hotkeys.profile1, hotkeys.profile2, hotkeys.profile3,
+        hotkeys.profile4, hotkeys.profile5
+    };
+    const int registeredProfiles = (std::min)(profileCount, PROFILE_HOTKEY_COUNT);
+    for (int i = 0; i < registeredProfiles; ++i) {
+        SafeRegisterHotkey(hWnd, 101 + i, profileHotkeys[i]);
+    }
 }
 
 
@@ -1075,6 +1135,41 @@ static std::wstring ReadIniString(const wchar_t* section, const wchar_t* key) {
     }
 }
 
+static std::vector<std::wstring> ReadIniSectionNames() {
+    std::vector<wchar_t> buffer(4096);
+    for (;;) {
+        const DWORD copied = GetPrivateProfileSectionNamesW(buffer.data(),
+            static_cast<DWORD>(buffer.size()), INI_FILE);
+        if (copied < buffer.size() - 2 || buffer.size() >= 262144) {
+            std::vector<std::wstring> sections;
+            for (const wchar_t* name = buffer.data(); *name; name += wcslen(name) + 1) {
+                sections.emplace_back(name);
+            }
+            return sections;
+        }
+        buffer.resize(buffer.size() * 2);
+    }
+}
+
+static void CleanupObsoleteProfileSections(const int profileCount,
+    const std::set<std::wstring>& liveThermalSections) {
+    for (const std::wstring& section : ReadIniSectionNames()) {
+        if (section.starts_with(L"ProfileThermal_") &&
+            !liveThermalSections.contains(section)) {
+            WritePrivateProfileStringW(section.c_str(), nullptr, nullptr, INI_FILE);
+            continue;
+        }
+        constexpr const wchar_t* settingsPrefix = L"Settings_";
+        if (!section.starts_with(settingsPrefix)) continue;
+        const wchar_t* suffix = section.c_str() + wcslen(settingsPrefix);
+        wchar_t* end = nullptr;
+        const long index = wcstol(suffix, &end, 10);
+        if (suffix != end && end && *end == L'\0' && index >= profileCount) {
+            WritePrivateProfileStringW(section.c_str(), nullptr, nullptr, INI_FILE);
+        }
+    }
+}
+
 static std::set<std::wstring> ParseRazerDeviceIds(const wchar_t* value) {
     std::set<std::wstring> result;
     if (!value || !*value) return result;
@@ -1184,6 +1279,28 @@ static ThermalScheme ReadRazerThermalScheme(const int profileIndex,
     return ReadThermalScheme(section.c_str(), L"", fallback, "Razer device");
 }
 
+static void LoadSavedRazerThermalSchemesLocked() {
+    for (const std::wstring& section : ReadIniSectionNames()) {
+        if (!section.starts_with(L"ProfileThermal_")) continue;
+        const int profileIndex = GetPrivateProfileIntW(section.c_str(),
+            L"ProfileIndex", -1, INI_FILE);
+        if (profileIndex < 0 ||
+            profileIndex >= static_cast<int>(g_Global.profiles.size())) {
+            continue;
+        }
+        const std::wstring deviceKey = ReadIniString(section.c_str(), L"DeviceKey");
+        if (deviceKey.empty() || RazerThermalSection(profileIndex, deviceKey) != section) {
+            Log("[Config] Ignoring invalid or colliding saved Razer thermal section.");
+            continue;
+        }
+        Config& profile = g_Global.profiles[profileIndex];
+        if (!profile.razerThermals.contains(deviceKey)) {
+            profile.razerThermals.emplace(deviceKey, ReadThermalScheme(
+                section.c_str(), L"", profile.generalThermal, "Razer device"));
+        }
+    }
+}
+
 static void WriteThermalScheme(const wchar_t* section, const wchar_t* prefix,
     const ThermalScheme& scheme) {
     const std::wstring keyPrefix = prefix ? prefix : L"";
@@ -1250,10 +1367,60 @@ static bool EnsureRazerDeviceSettings(
     return added;
 }
 
+// Persists only the profile collection and its active index. Settings uses
+// this narrower path for immediate add/delete operations so unrelated edits in
+// the still-open dialog remain cancellable.
+static void SaveProfiles(const GlobalConfig& config) {
+    std::set<std::wstring> liveThermalSections;
+    for (int i = 0; i < static_cast<int>(config.profiles.size()); ++i) {
+        std::wstring section = L"Settings";
+        if (i > 0) section += L"_" + std::to_wstring(i);
+
+        const Config& p = config.profiles[i];
+        WritePrivateProfileStringW(section.c_str(), L"Label", p.label, INI_FILE);
+        WritePrivateProfileStringW(section.c_str(), L"TargetDevice", p.targetDevice, INI_FILE);
+        WritePrivateProfileStringW(section.c_str(), L"TargetLedIndex",
+            std::to_wstring(p.targetLedIndex).c_str(), INI_FILE);
+        WritePrivateProfileStringW(section.c_str(), L"ControlMSI", p.controlMsi ? L"1" : L"0", INI_FILE);
+        WritePrivateProfileStringW(section.c_str(), L"ControlRazer", p.controlRazer ? L"1" : L"0", INI_FILE);
+        WritePrivateProfileStringW(section.c_str(), L"UseGeneralThermal",
+            p.useGeneralThermal ? L"1" : L"0", INI_FILE);
+        WritePrivateProfileStringW(section.c_str(), L"RazerDeviceIds", p.razerDeviceIds.c_str(), INI_FILE);
+        WritePrivateProfileStringW(section.c_str(), L"ThermalSchemesVersion", L"2", INI_FILE);
+        WriteThermalScheme(section.c_str(), L"Msi", p.msiThermal);
+        WriteThermalScheme(section.c_str(), L"", p.generalThermal);
+
+        for (const auto& [deviceKey, scheme] : p.razerThermals) {
+            const std::wstring thermalSection = RazerThermalSection(i, deviceKey);
+            liveThermalSections.insert(thermalSection);
+            WritePrivateProfileStringW(thermalSection.c_str(), L"ProfileIndex",
+                std::to_wstring(i).c_str(), INI_FILE);
+            WritePrivateProfileStringW(thermalSection.c_str(), L"DeviceKey",
+                deviceKey.c_str(), INI_FILE);
+            WriteThermalScheme(thermalSection.c_str(), L"", scheme);
+        }
+
+        // Keep the legacy profile key synchronized for backward compatibility.
+        WritePrivateProfileStringW(section.c_str(), L"WebServerUrl",
+            config.lhmServerUrl, INI_FILE);
+    }
+
+    CleanupObsoleteProfileSections(static_cast<int>(config.profiles.size()),
+        liveThermalSections);
+
+    // Publish the new collection shape last. If the process is interrupted
+    // mid-write, startup will not expose a newly added slot before its complete
+    // section exists.
+    WritePrivateProfileStringW(L"Global", L"ActiveProfile",
+        std::to_wstring(config.activeProfileIndex).c_str(), INI_FILE);
+    WritePrivateProfileStringW(L"Global", L"ProfileCount",
+        std::to_wstring(config.profiles.size()).c_str(), INI_FILE);
+}
+
 static void SaveSettings() {
     std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
 
-    WritePrivateProfileStringW(L"Global", L"ActiveProfile", std::to_wstring(g_Global.activeProfileIndex).c_str(), INI_FILE);
+    SaveProfiles(g_Global);
     WritePrivateProfileStringW(L"Global", L"Notifications", g_NotificationsEnabled ? L"1" : L"0", INI_FILE);
     WritePrivateProfileStringW(L"Global", L"Language", std::to_wstring(g_Language.load()).c_str(), INI_FILE);
     WritePrivateProfileStringW(L"Global", L"LibreHardwareMonitorUrl", g_Global.lhmServerUrl, INI_FILE);
@@ -1283,42 +1450,6 @@ static void SaveSettings() {
             std::to_wstring(settings.refreshFPS).c_str(), INI_FILE);
         WritePrivateProfileStringW(section.c_str(), L"ReleaseEffect",
             std::to_wstring(static_cast<int>(settings.releaseEffect)).c_str(), INI_FILE);
-    }
-
-    for (int i = 0; i < 5; i++) {
-        std::wstring section = L"Settings";
-        if (i > 0) section += L"_" + std::to_wstring(i);
-
-        Config& p = g_Global.profiles[i];
-
-        WritePrivateProfileStringW(section.c_str(), L"Label", p.label, INI_FILE);
-
-        WritePrivateProfileStringW(section.c_str(), L"TargetDevice", p.targetDevice, INI_FILE);
-        WritePrivateProfileStringW(section.c_str(), L"TargetLedIndex", std::to_wstring(p.targetLedIndex).c_str(), INI_FILE);
-        WritePrivateProfileStringW(section.c_str(), L"ControlMSI", p.controlMsi ? L"1" : L"0", INI_FILE);
-        WritePrivateProfileStringW(section.c_str(), L"ControlRazer", p.controlRazer ? L"1" : L"0", INI_FILE);
-        WritePrivateProfileStringW(section.c_str(), L"UseGeneralThermal",
-            p.useGeneralThermal ? L"1" : L"0", INI_FILE);
-        WritePrivateProfileStringW(section.c_str(), L"RazerDeviceIds", p.razerDeviceIds.c_str(), INI_FILE);
-
-        WritePrivateProfileStringW(section.c_str(), L"ThermalSchemesVersion", L"2", INI_FILE);
-        WriteThermalScheme(section.c_str(), L"Msi", p.msiThermal);
-
-        // General is also the legacy shared scheme, so older MysticFight builds
-        // still receive the same coherent thresholds and colours.
-        WriteThermalScheme(section.c_str(), L"", p.generalThermal);
-
-        for (const auto& [deviceKey, scheme] : p.razerThermals) {
-            const std::wstring thermalSection = RazerThermalSection(i, deviceKey);
-            WritePrivateProfileStringW(thermalSection.c_str(), L"ProfileIndex",
-                std::to_wstring(i).c_str(), INI_FILE);
-            WritePrivateProfileStringW(thermalSection.c_str(), L"DeviceKey",
-                deviceKey.c_str(), INI_FILE);
-            WriteThermalScheme(thermalSection.c_str(), L"", scheme);
-        }
-
-        // Keep the legacy profile key synchronized for backward compatibility.
-        WritePrivateProfileStringW(section.c_str(), L"WebServerUrl", g_Global.lhmServerUrl, INI_FILE);
     }
 
     WritePrivateProfileStringW(L"Hotkeys", L"Toggle", std::to_wstring(g_Global.hotkeys.toggleLEDs).c_str(), INI_FILE);
@@ -1391,8 +1522,7 @@ static bool AutoSelectFirstSensor() {
                 {
                     std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
                     bool updated = false;
-                    for (int i = 0; i < 5; i++) {
-                        Config& profile = g_Global.profiles[i];
+                    for (Config& profile : g_Global.profiles) {
                         if (profile.generalThermal.sensorId.empty()) {
                             profile.generalThermal.sensorId = &wId[0];
                             updated = true;
@@ -1434,8 +1564,23 @@ static void LoadSettings() {
     {
         std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
 
+        int profileCount = GetPrivateProfileIntW(L"Global", L"ProfileCount",
+            DEFAULT_PROFILE_COUNT, INI_FILE);
+        if (profileCount < 1) {
+            Log("[Config] Invalid ProfileCount; using factory default.");
+            profileCount = DEFAULT_PROFILE_COUNT;
+        }
+        else if (profileCount > MAX_PROFILE_COUNT) {
+            Log("[Config] ProfileCount exceeds the supported maximum; clamping it.");
+            profileCount = MAX_PROFILE_COUNT;
+        }
+        g_Global.profiles.assign(static_cast<std::size_t>(profileCount), Config{});
+
         g_Global.activeProfileIndex = GetPrivateProfileIntW(L"Global", L"ActiveProfile", 0, INI_FILE);
-    if (g_Global.activeProfileIndex < 0 || g_Global.activeProfileIndex > 4) g_Global.activeProfileIndex = 0;
+    if (g_Global.activeProfileIndex < 0 ||
+        g_Global.activeProfileIndex >= static_cast<int>(g_Global.profiles.size())) {
+        g_Global.activeProfileIndex = 0;
+    }
 
     g_NotificationsEnabled = GetPrivateProfileIntW(L"Global", L"Notifications", 1, INI_FILE) != 0;
 
@@ -1495,7 +1640,7 @@ static void LoadSettings() {
         g_Global.smoothingFactor = DEF_SMOOTHING_FACTOR;
     }
 
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < static_cast<int>(g_Global.profiles.size()); i++) {
         std::wstring section = L"Settings";
         if (i > 0) section += L"_" + std::to_wstring(i);
         Config& p = g_Global.profiles[i];
@@ -1537,6 +1682,11 @@ static void LoadSettings() {
             if (wcscmp(p.label, langDef) == 0) { wcscpy_s(p.label, defLabel); break; }
         }
     }
+
+        // Preserve schemes for currently unselected Razer devices. Their tabs
+        // disappear when deselected, but selecting the same physical device
+        // again must restore its previous thresholds, sensor and colours.
+        LoadSavedRazerThermalSchemesLocked();
 
         needAutoSelect = g_cfg.generalThermal.sensorId.empty();
 
@@ -2059,7 +2209,7 @@ static ThermalScheme ThermalSchemeForUiTargetLocked(Config& profile,
 static void LoadThermalSchemeControls(HWND hDlg, const int profileIndex) {
     const int selection = static_cast<int>(SendDlgItemMessage(
         hDlg, IDC_TAB_THERMAL_DEVICES, TCM_GETCURSEL, 0, 0));
-    if (profileIndex < 0 || profileIndex >= 5 || selection < 0 ||
+    if (!IsProfileIndex(profileIndex) || selection < 0 ||
         selection >= static_cast<int>(g_thermalUiTargets.size())) {
         EnableThermalSchemeControls(hDlg, false);
         return;
@@ -2092,7 +2242,7 @@ static void LoadThermalSchemeControls(HWND hDlg, const int profileIndex) {
 static void SaveThermalSchemeControls(HWND hDlg, const int profileIndex) {
     const int selection = static_cast<int>(SendDlgItemMessage(
         hDlg, IDC_TAB_THERMAL_DEVICES, TCM_GETCURSEL, 0, 0));
-    if (profileIndex < 0 || profileIndex >= 5 || selection < 0 ||
+    if (!IsProfileIndex(profileIndex) || selection < 0 ||
         selection >= static_cast<int>(g_thermalUiTargets.size())) return;
 
     std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
@@ -2140,7 +2290,7 @@ static void SaveThermalSchemeControls(HWND hDlg, const int profileIndex) {
 static void RebuildThermalDeviceTabs(HWND hDlg, const int profileIndex,
     const bool saveCurrent) {
     HWND tab = GetDlgItem(hDlg, IDC_TAB_THERMAL_DEVICES);
-    if (!tab || profileIndex < 0 || profileIndex >= 5) return;
+    if (!tab || !IsProfileIndex(profileIndex)) return;
 
     std::wstring previousIdentity;
     const int previousSelection = TabCtrl_GetCurSel(tab);
@@ -2229,7 +2379,7 @@ static void RebuildThermalDeviceTabs(HWND hDlg, const int profileIndex,
  * Transfers Profile Data into the Settings Dialog controls
  */
 static void LoadProfileToUI(HWND hDlg, int profileIndex, int tempActiveIndex) {
-    if (profileIndex < 0 || profileIndex >= 5) return;
+    if (!IsProfileIndex(profileIndex)) return;
     Config& p = g_Global.profiles[profileIndex];
     SetDlgItemTextW(hDlg, IDC_EDIT_LABEL, p.label);
 
@@ -2336,6 +2486,7 @@ static void SaveGlobalAdvancedFromUI(HWND hDlg) {
  * Transfers Dialog data back to global config profiles
  */
 static void SaveUIToProfile(HWND hDlg, int profileIndex) {
+    if (!IsProfileIndex(profileIndex)) return;
     SaveThermalSchemeControls(hDlg, profileIndex);
     std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
 
@@ -3014,10 +3165,12 @@ static bool ExtractMSIDLL() {
 }
 
 static void SwitchActiveProfile(HWND hWnd, int index) {
-    if (index < 0 || index >= 5) return;
+    wchar_t profileLabel[64] = {};
     {
         std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+        if (index < 0 || index >= static_cast<int>(g_Global.profiles.size())) return;
         g_Global.activeProfileIndex = index;
+        wcscpy_s(profileLabel, g_Global.profiles[index].label);
         g_ConfigVersion++;
         g_lastDataSourceSearchRetry = 0;
         g_activeSource = DataSource::Searching;
@@ -3032,7 +3185,7 @@ static void SwitchActiveProfile(HWND hWnd, int index) {
     if (g_hRazerEvent) SetEvent(g_hRazerEvent);
 
     wchar_t msg[128];
-    swprintf_s(msg, T(STR_NOTIF_SWITCHED), g_cfg.label);
+    swprintf_s(msg, T(STR_NOTIF_SWITCHED), profileLabel);
     ShowNotification(hWnd, L"MysticFight", msg);
 }
 
@@ -3138,12 +3291,166 @@ LRESULT CALLBACK ColorEditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
 // Settings dialog layers, selected by the active tab.
 enum DlgLayer { LAYER_PROFILE = 0, LAYER_SHORTCUTS = 1, LAYER_ADVANCED = 2 };
 
-// Returns the layer that the given tab index belongs to (tabs 0-4 = profiles,
-// tab 5 = shortcuts, tab 6 = advanced).
+// Profile tabs are followed by '+', Shortcuts and Advanced.
 static DlgLayer LayerForTab(int tab) {
-    if (tab == 5) return LAYER_SHORTCUTS;
-    if (tab == 6) return LAYER_ADVANCED;
+    if (tab == ShortcutsTabIndex()) return LAYER_SHORTCUTS;
+    if (tab == AdvancedTabIndex()) return LAYER_ADVANCED;
     return LAYER_PROFILE;
+}
+
+static bool HasFactoryProfileLabel(const Config& profile, const int index) {
+    for (int language = 0; language < LANG_COUNT; ++language) {
+        wchar_t defaultLabel[64] = {};
+        swprintf_s(defaultLabel, TR[language][STR_DEFAULT_PROFILE], index + 1);
+        if (wcscmp(profile.label, defaultLabel) == 0) return true;
+    }
+    return false;
+}
+
+static Config CreateBlankProfile(const GlobalConfig& source, const int index,
+    const int language) {
+    Config profile;
+    wcscpy_s(profile.targetDevice, DEF_DEVICE_TYPE);
+    wcscpy_s(profile.webServerUrl, source.lhmServerUrl);
+    if (!source.profiles.empty()) {
+        const int sourceIndex = (std::clamp)(source.activeProfileIndex, 0,
+            static_cast<int>(source.profiles.size()) - 1);
+        profile.generalThermal.sensorId =
+            source.profiles[sourceIndex].generalThermal.sensorId;
+        profile.msiThermal.sensorId = profile.generalThermal.sensorId;
+    }
+    const int safeLanguage = language >= 0 && language < LANG_COUNT ? language : LANG_EN;
+    swprintf_s(profile.label, TR[safeLanguage][STR_DEFAULT_PROFILE], index + 1);
+    // New profiles are intentionally opt-in: no MSI or Razer controller is
+    // selected until the user explicitly enables it.
+    profile.controlMsi = false;
+    profile.controlRazer = false;
+    return profile;
+}
+
+static bool DeleteProfileAt(GlobalConfig& config, const int index,
+    const int language) {
+    if (config.profiles.size() <= 1 || index < 0 ||
+        index >= static_cast<int>(config.profiles.size())) {
+        return false;
+    }
+
+    std::vector<bool> factoryLabels;
+    factoryLabels.reserve(config.profiles.size());
+    for (int i = 0; i < static_cast<int>(config.profiles.size()); ++i) {
+        factoryLabels.push_back(HasFactoryProfileLabel(config.profiles[i], i));
+    }
+    const bool deletedActive = config.activeProfileIndex == index;
+    config.profiles.erase(config.profiles.begin() + index);
+    if (config.activeProfileIndex > index) --config.activeProfileIndex;
+    else if (deletedActive) {
+        config.activeProfileIndex = (std::min)(index,
+            static_cast<int>(config.profiles.size()) - 1);
+    }
+
+    // Keep automatically named profiles aligned with their new positions;
+    // custom labels are never modified.
+    const int safeLanguage = language >= 0 && language < LANG_COUNT ? language : LANG_EN;
+    for (int i = index; i < static_cast<int>(config.profiles.size()); ++i) {
+        if (factoryLabels[i + 1]) {
+            swprintf_s(config.profiles[i].label,
+                TR[safeLanguage][STR_DEFAULT_PROFILE], i + 1);
+        }
+    }
+    return true;
+}
+
+static void SelectSettingsTab(HWND hDlg, const int selectedTab,
+    const bool resetProfileViewport = false) {
+    HWND profileTabs = GetDlgItem(hDlg, IDC_TAB_PROFILES);
+    HWND actionTabs = GetDlgItem(hDlg, IDC_TAB_SETTINGS_ACTIONS);
+    if (!profileTabs || !actionTabs) return;
+
+    if (IsProfileIndex(selectedTab)) {
+        // Starting at the first tab and then selecting the target makes the
+        // native control reveal the target at the right-hand edge instead of
+        // leaving it alone at the left after a complete rebuild.
+        if (resetProfileViewport && selectedTab > 0) {
+            TabCtrl_SetCurSel(profileTabs, -1);
+            TabCtrl_SetCurSel(profileTabs, 0);
+        }
+        TabCtrl_SetCurSel(profileTabs, selectedTab);
+        TabCtrl_SetCurSel(actionTabs, -1);
+    }
+    else {
+        TabCtrl_SetCurSel(profileTabs, -1);
+        TabCtrl_SetCurSel(actionTabs, ActionTabFromLogicalTab(selectedTab));
+    }
+
+    InvalidateRect(profileTabs, nullptr, TRUE);
+    InvalidateRect(actionTabs, nullptr, TRUE);
+}
+
+static int SelectedSettingsTab(HWND hDlg) {
+    HWND profileTabs = GetDlgItem(hDlg, IDC_TAB_PROFILES);
+    const int profileTab = profileTabs ? TabCtrl_GetCurSel(profileTabs) : -1;
+    if (IsProfileIndex(profileTab)) return profileTab;
+
+    HWND actionTabs = GetDlgItem(hDlg, IDC_TAB_SETTINGS_ACTIONS);
+    return actionTabs
+        ? LogicalTabFromActionTab(TabCtrl_GetCurSel(actionTabs))
+        : -1;
+}
+
+static void RebuildProfileTabs(HWND hDlg, int selectedTab) {
+    HWND profileTabs = GetDlgItem(hDlg, IDC_TAB_PROFILES);
+    HWND actionTabs = GetDlgItem(hDlg, IDC_TAB_SETTINGS_ACTIONS);
+    if (!profileTabs || !actionTabs) return;
+
+    std::vector<std::wstring> labels;
+    int activeIndex = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+        labels.reserve(g_Global.profiles.size());
+        for (const Config& profile : g_Global.profiles) labels.emplace_back(profile.label);
+        activeIndex = g_Global.activeProfileIndex;
+    }
+
+    SendMessageW(profileTabs, WM_SETREDRAW, FALSE, 0);
+    SendMessageW(actionTabs, WM_SETREDRAW, FALSE, 0);
+    TabCtrl_DeleteAllItems(profileTabs);
+    TabCtrl_DeleteAllItems(actionTabs);
+    TCITEMW item = {};
+    item.mask = TCIF_TEXT;
+    for (int i = 0; i < static_cast<int>(labels.size()); ++i) {
+        item.pszText = labels[i].data();
+        TabCtrl_InsertItem(profileTabs, i, &item);
+    }
+    const bool canAddProfile = static_cast<int>(labels.size()) < MAX_PROFILE_COUNT;
+    int actionIndex = 0;
+    if (canAddProfile) {
+        item.pszText = const_cast<wchar_t*>(T(STR_TAB_NEW_PROFILE));
+        TabCtrl_InsertItem(actionTabs, actionIndex++, &item);
+    }
+    item.pszText = const_cast<wchar_t*>(T(STR_TAB_SHORTCUTS));
+    TabCtrl_InsertItem(actionTabs, actionIndex++, &item);
+    item.pszText = const_cast<wchar_t*>(T(STR_TAB_ADVANCED));
+    TabCtrl_InsertItem(actionTabs, actionIndex, &item);
+
+    const int tabCount = static_cast<int>(labels.size()) +
+        (canAddProfile ? 3 : 2);
+    if (selectedTab < 0 || selectedTab >= tabCount ||
+        (canAddProfile && selectedTab == static_cast<int>(labels.size()))) {
+        selectedTab = (std::clamp)(activeIndex, 0,
+            static_cast<int>(labels.size()) - 1);
+    }
+    SelectSettingsTab(hDlg, selectedTab, true);
+    SendMessageW(profileTabs, WM_SETREDRAW, TRUE, 0);
+    SendMessageW(actionTabs, WM_SETREDRAW, TRUE, 0);
+    RedrawWindow(profileTabs, nullptr, nullptr,
+        RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
+    RedrawWindow(actionTabs, nullptr, nullptr,
+        RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
+}
+
+static void UpdateDeleteProfileButton(HWND hDlg, const int currentTab) {
+    EnableWindow(GetDlgItem(hDlg, IDC_BTN_DELETE_PROFILE),
+        IsProfileIndex(currentTab));
 }
 
 // The dialog resource contains a fixed-height Razer subpanel. The ListView owns
@@ -3151,11 +3458,11 @@ static DlgLayer LayerForTab(int tab) {
 // dialog itself also remains fixed-size while switching tabs or detection state.
 static void UpdateRazerPanelLayout(HWND hDlg) {
     const bool anyDetected = g_razerAnyDetected.load();
-    HWND tab = GetDlgItem(hDlg, IDC_TAB_PROFILES);
-    const bool profileLayer = !tab || LayerForTab(TabCtrl_GetCurSel(tab)) == LAYER_PROFILE;
+    const int selectedTab = SelectedSettingsTab(hDlg);
+    const bool profileLayer = IsProfileIndex(selectedTab);
 
     const bool initializeSelectionsFromProfile = g_razerUiDevices.empty() &&
-        profileLayer && tab && TabCtrl_GetCurSel(tab) >= 0 && TabCtrl_GetCurSel(tab) < 5;
+        profileLayer && IsProfileIndex(selectedTab);
     std::set<std::wstring> pendingSelections;
     HWND list = GetDlgItem(hDlg, IDC_LIST_RAZER_DEVICES);
     if (list) {
@@ -3218,7 +3525,7 @@ static void UpdateRazerPanelLayout(HWND hDlg) {
         g_razerListUpdating = false;
         if (initializeSelectionsFromProfile) {
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-            LoadRazerSelectionsToUI(hDlg, g_Global.profiles[TabCtrl_GetCurSel(tab)]);
+            LoadRazerSelectionsToUI(hDlg, g_Global.profiles[selectedTab]);
         }
     }
 
@@ -3244,7 +3551,8 @@ static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
     const int profileCtrls[] = {
         IDC_GRP_RGB_DEVICES, IDC_GRP_MSI, IDC_GRP_RAZER, IDC_GRP_SOURCE,
         IDC_GRP_THRESHOLDS, IDC_FRAME_THERMAL_CONTENT, IDC_SEPARATOR_PROFILE,
-        IDC_EDIT_LABEL, IDC_CHK_ACTIVE_PROFILE, IDC_COMBO_DEVICE, IDC_COMBO_AREA,
+        IDC_EDIT_LABEL, IDC_CHK_ACTIVE_PROFILE, IDC_BTN_DELETE_PROFILE,
+        IDC_COMBO_DEVICE, IDC_COMBO_AREA,
         IDC_CHK_CONTROL_MSI, IDC_LIST_RAZER_DEVICES,
         IDC_CHK_USE_GENERAL_THERMAL, IDC_TAB_THERMAL_DEVICES,
         IDC_COMBO_DATA_SOURCE, IDC_SENSOR_ID, IDC_TEMP_LOW, IDC_TEMP_MED, IDC_TEMP_HIGH,
@@ -3255,8 +3563,14 @@ static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
     };
 
     const int shortcutCtrls[] = {
-        IDC_GRP_SHORTCUTS, IDC_LBL_TOGGLE, IDC_HK_TOGGLE, IDC_LBL_P1, IDC_HK_P1,
-        IDC_LBL_P2, IDC_HK_P2, IDC_LBL_P3, IDC_HK_P3, IDC_LBL_P4, IDC_HK_P4, IDC_LBL_P5, IDC_HK_P5, IDC_BTN_RESET_SHORTCUTS
+        IDC_GRP_SHORTCUTS, IDC_LBL_TOGGLE, IDC_HK_TOGGLE,
+        IDC_BTN_RESET_SHORTCUTS
+    };
+    const int shortcutProfileLabels[PROFILE_HOTKEY_COUNT] = {
+        IDC_LBL_P1, IDC_LBL_P2, IDC_LBL_P3, IDC_LBL_P4, IDC_LBL_P5
+    };
+    const int shortcutProfileInputs[PROFILE_HOTKEY_COUNT] = {
+        IDC_HK_P1, IDC_HK_P2, IDC_HK_P3, IDC_HK_P4, IDC_HK_P5
     };
 
     const int advancedCtrls[] = {
@@ -3278,6 +3592,12 @@ static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
         ShowWindow(h, layer == LAYER_PROFILE && (!isRazerControl || g_razerAnyDetected.load()) ? SW_SHOW : SW_HIDE);
     }
     for (int id : shortcutCtrls) { HWND h = GetDlgItem(hDlg, id); if (h) ShowWindow(h, layer == LAYER_SHORTCUTS ? SW_SHOW : SW_HIDE); }
+    const int visibleHotkeys = (std::min)(ProfileCount(), PROFILE_HOTKEY_COUNT);
+    for (int i = 0; i < PROFILE_HOTKEY_COUNT; ++i) {
+        const bool visible = layer == LAYER_SHORTCUTS && i < visibleHotkeys;
+        ShowWindow(GetDlgItem(hDlg, shortcutProfileLabels[i]), visible ? SW_SHOW : SW_HIDE);
+        ShowWindow(GetDlgItem(hDlg, shortcutProfileInputs[i]), visible ? SW_SHOW : SW_HIDE);
+    }
     for (int id : advancedCtrls) { HWND h = GetDlgItem(hDlg, id); if (h) ShowWindow(h, layer == LAYER_ADVANCED ? SW_SHOW : SW_HIDE); }
 }
 
@@ -3289,6 +3609,7 @@ static void ApplyDialogTranslations(HWND hDlg) {
     // Profile layer
     SetDlgItemTextW(hDlg, IDC_LBL_PROFILE_NAME, T(STR_LBL_PROFILE_NAME));
     SetDlgItemTextW(hDlg, IDC_CHK_ACTIVE_PROFILE, T(STR_CHK_ACTIVE));
+    SetDlgItemTextW(hDlg, IDC_BTN_DELETE_PROFILE, T(STR_BTN_DELETE_PROFILE));
     SetDlgItemTextW(hDlg, IDC_GRP_RGB_DEVICES, T(STR_GRP_RGB_DEVICES));
     SetDlgItemTextW(hDlg, IDC_GRP_MSI, T(STR_GRP_MSI));
     SetDlgItemTextW(hDlg, IDC_CHK_CONTROL_MSI, T(STR_CHK_CONTROL_MSI));
@@ -3327,7 +3648,7 @@ static void ApplyDialogTranslations(HWND hDlg) {
     // Shortcuts layer
     SetDlgItemTextW(hDlg, IDC_GRP_SHORTCUTS, T(STR_GRP_SHORTCUTS));
     SetDlgItemTextW(hDlg, IDC_LBL_TOGGLE, T(STR_LBL_TOGGLE));
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < PROFILE_HOTKEY_COUNT; i++) {
         wchar_t buf[64]; swprintf_s(buf, T(STR_LBL_ACT_PROFILE), i + 1);
         SetDlgItemTextW(hDlg, IDC_LBL_P1 + i * 2, buf); // labels are every other ID
     }
@@ -3339,19 +3660,26 @@ static void ApplyDialogTranslations(HWND hDlg) {
     SetDlgItemTextW(hDlg, IDOK, T(STR_BTN_SAVE));
     SetDlgItemTextW(hDlg, IDCANCEL, T(STR_BTN_CANCEL));
 
-    // Non-profile tab captions (profile tabs keep their user labels)
-    HWND hTab = GetDlgItem(hDlg, IDC_TAB_PROFILES);
-    if (hTab) {
+    // Fixed action captions; profile tabs keep their user labels.
+    HWND hActionTabs = GetDlgItem(hDlg, IDC_TAB_SETTINGS_ACTIONS);
+    if (hActionTabs) {
         TCITEMW tie = { 0 }; tie.mask = TCIF_TEXT;
-        tie.pszText = (LPWSTR)T(STR_TAB_SHORTCUTS); SendMessage(hTab, TCM_SETITEMW, 5, (LPARAM)&tie);
-        tie.pszText = (LPWSTR)T(STR_TAB_ADVANCED);  SendMessage(hTab, TCM_SETITEMW, 6, (LPARAM)&tie);
+        int actionIndex = 0;
+        if (CanAddProfile()) {
+            tie.pszText = const_cast<wchar_t*>(T(STR_TAB_NEW_PROFILE));
+            SendMessage(hActionTabs, TCM_SETITEMW, actionIndex++, (LPARAM)&tie);
+        }
+        tie.pszText = (LPWSTR)T(STR_TAB_SHORTCUTS);
+        SendMessage(hActionTabs, TCM_SETITEMW, actionIndex++, (LPARAM)&tie);
+        tie.pszText = (LPWSTR)T(STR_TAB_ADVANCED);
+        SendMessage(hActionTabs, TCM_SETITEMW, actionIndex, (LPARAM)&tie);
 
         // Re-localize profile tabs still using a factory default name ("Profile N"
         // / "Perfil N" in any language) so a live language change updates them too.
         // User-named profiles are left untouched. The language combo lives on the
         // Advanced tab, so no profile label is being edited when we get here.
         std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < static_cast<int>(g_Global.profiles.size()); i++) {
             Config& p = g_Global.profiles[i];
             bool isDefault = false;
             for (int l = 0; l < LANG_COUNT; l++) {
@@ -3360,7 +3688,9 @@ static void ApplyDialogTranslations(HWND hDlg) {
             }
             if (!isDefault) continue;
             swprintf_s(p.label, T(STR_DEFAULT_PROFILE), i + 1);
-            tie.pszText = p.label; SendMessage(hTab, TCM_SETITEMW, i, (LPARAM)&tie);
+            tie.pszText = p.label;
+            SendDlgItemMessageW(hDlg, IDC_TAB_PROFILES,
+                TCM_SETITEMW, i, (LPARAM)&tie);
         }
     }
 
@@ -3396,9 +3726,10 @@ static bool ValidateHotkeys(HWND hDlg) {
     keys[4] = (WORD)SendDlgItemMessage(hDlg, IDC_HK_P4, HKM_GETHOTKEY, 0, 0);
     keys[5] = (WORD)SendDlgItemMessage(hDlg, IDC_HK_P5, HKM_GETHOTKEY, 0, 0);
 
-    for (int i = 0; i < 6; i++) {
+    const int activeKeyCount = 1 + (std::min)(ProfileCount(), PROFILE_HOTKEY_COUNT);
+    for (int i = 0; i < activeKeyCount; i++) {
         if (LOBYTE(keys[i]) == 0) continue;
-        for (int j = i + 1; j < 6; j++) {
+        for (int j = i + 1; j < activeKeyCount; j++) {
             if (keys[i] == keys[j]) {
                 MessageBoxW(hDlg, T(STR_MSG_DUP_HOTKEY), T(STR_MSG_ERROR_TITLE), MB_ICONWARNING);
                 return false;
@@ -3428,6 +3759,42 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
     static GlobalConfig s_snapshot;
 
     switch (message) {
+    case WM_DRAWITEM: {
+        const auto draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+        if (!draw || draw->CtlID != IDC_BTN_DELETE_PROFILE) break;
+        const int savedDc = SaveDC(draw->hDC);
+
+        const bool enabled = (draw->itemState & ODS_DISABLED) == 0;
+        const bool pressed = (draw->itemState & ODS_SELECTED) != 0;
+        const COLORREF background = !enabled ? RGB(160, 160, 160)
+            : pressed ? RGB(145, 26, 26) : RGB(196, 43, 43);
+        HBRUSH fill = CreateSolidBrush(background);
+        FillRect(draw->hDC, &draw->rcItem, fill);
+        DeleteObject(fill);
+        FrameRect(draw->hDC, &draw->rcItem,
+            reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+
+        wchar_t text[64] = {};
+        GetWindowTextW(draw->hwndItem, text, static_cast<int>(std::size(text)));
+        const HFONT font = reinterpret_cast<HFONT>(SendMessageW(
+            draw->hwndItem, WM_GETFONT, 0, 0));
+        const HGDIOBJ oldFont = font ? SelectObject(draw->hDC, font) : nullptr;
+        SetBkMode(draw->hDC, TRANSPARENT);
+        SetTextColor(draw->hDC, enabled ? RGB(255, 255, 255) : RGB(235, 235, 235));
+        RECT textRect = draw->rcItem;
+        if (pressed) OffsetRect(&textRect, 1, 1);
+        DrawTextW(draw->hDC, text, -1, &textRect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (oldFont) SelectObject(draw->hDC, oldFont);
+        if ((draw->itemState & ODS_FOCUS) != 0) {
+            RECT focusRect = draw->rcItem;
+            InflateRect(&focusRect, -3, -3);
+            DrawFocusRect(draw->hDC, &focusRect);
+        }
+        if (savedDc != 0) RestoreDC(draw->hDC, savedDc);
+        return TRUE;
+    }
+
     case WM_CTLCOLOREDIT: {
         HDC hdc = (HDC)wParam;
         HWND hCtrl = (HWND)lParam;
@@ -3477,22 +3844,10 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         {
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
             s_snapshot = g_Global;
+            s_tempActiveIndex = g_Global.activeProfileIndex;
         }
-        s_tempActiveIndex = g_Global.activeProfileIndex;
 
-        HWND hTab = GetDlgItem(hDlg, IDC_TAB_PROFILES);
-        if (hTab) {
-            TabCtrl_DeleteAllItems(hTab);
-            TCITEMW tie = { 0 }; tie.mask = TCIF_TEXT;
-            for (int i = 0; i < 5; i++) {
-                tie.pszText = g_Global.profiles[i].label;
-                SendMessage(hTab, TCM_INSERTITEMW, i, (LPARAM)&tie);
-            }
-            tie.pszText = (LPWSTR)T(STR_TAB_SHORTCUTS);
-            SendMessage(hTab, TCM_INSERTITEMW, 5, (LPARAM)&tie);
-            tie.pszText = (LPWSTR)T(STR_TAB_ADVANCED);
-            SendMessage(hTab, TCM_INSERTITEMW, 6, (LPARAM)&tie);
-        }
+        RebuildProfileTabs(hDlg, s_tempActiveIndex);
 
         HWND hSensorUpdate = GetDlgItem(hDlg, IDC_COMBO_SENSOR_UPDATE);
         SendMessage(hSensorUpdate, CB_ADDSTRING, 0, (LPARAM)L"250 ms");
@@ -3535,8 +3890,8 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         LoadGlobalAdvancedToUI(hDlg);
         s_langSnapshot = g_Language.load();
 
-        s_currentTab = g_Global.activeProfileIndex;
-        if (hTab) TabCtrl_SetCurSel(hTab, s_currentTab);
+        s_currentTab = s_tempActiveIndex;
+        SelectSettingsTab(hDlg, s_currentTab);
 
         ShowSettingsLayer(hDlg, LayerForTab(s_currentTab));
         UpdateRazerPanelLayout(hDlg);
@@ -3544,6 +3899,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             LoadProfileToUI(hDlg, s_currentTab, s_tempActiveIndex);
             SetMsiHardwareControlsEnabled(hDlg, !g_Resetting_sdk.load());
         }
+        UpdateDeleteProfileButton(hDlg, s_currentTab);
 
         oldEditProc = (WNDPROC)SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_LOW), GWLP_WNDPROC, (LONG_PTR)ColorEditSubclassProc);
         SetWindowLongPtr(GetDlgItem(hDlg, IDC_HEX_MED), GWLP_WNDPROC, (LONG_PTR)ColorEditSubclassProc);
@@ -3558,6 +3914,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
     case WM_NOTIFY: {
         LPNMHDR pnm = (LPNMHDR)lParam;
         if ((pnm->idFrom == IDC_TAB_PROFILES ||
+            pnm->idFrom == IDC_TAB_SETTINGS_ACTIONS ||
             pnm->idFrom == IDC_TAB_THERMAL_DEVICES) &&
             pnm->code == NM_CUSTOMDRAW) {
             const auto draw = reinterpret_cast<const NMCUSTOMDRAW*>(lParam);
@@ -3580,7 +3937,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         }
         if (pnm->idFrom == IDC_TAB_THERMAL_DEVICES &&
             pnm->code == TCN_SELCHANGING && !g_thermalTabsUpdating &&
-            s_currentTab >= 0 && s_currentTab <= 4) {
+            IsProfileIndex(s_currentTab)) {
             if (IsDlgButtonChecked(hDlg, IDC_CHK_USE_GENERAL_THERMAL) == BST_CHECKED) {
                 SetWindowLongPtr(hDlg, DWLP_MSGRESULT, TRUE);
                 return TRUE;
@@ -3590,13 +3947,13 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         }
         if (pnm->idFrom == IDC_TAB_THERMAL_DEVICES &&
             pnm->code == TCN_SELCHANGE && !g_thermalTabsUpdating &&
-            s_currentTab >= 0 && s_currentTab <= 4) {
+            IsProfileIndex(s_currentTab)) {
             LoadThermalSchemeControls(hDlg, s_currentTab);
             return TRUE;
         }
         if (pnm->idFrom == IDC_LIST_RAZER_DEVICES &&
             pnm->code == LVN_ITEMCHANGED && !g_razerListUpdating &&
-            s_currentTab >= 0 && s_currentTab <= 4) {
+            IsProfileIndex(s_currentTab)) {
             const auto change = reinterpret_cast<const NMLISTVIEW*>(lParam);
             if ((change->uChanged & LVIF_STATE) != 0 &&
                 (change->uOldState & LVIS_STATEIMAGEMASK) !=
@@ -3605,21 +3962,56 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             }
             return TRUE;
         }
-        if (pnm->idFrom == IDC_TAB_PROFILES && pnm->code == TCN_SELCHANGE) {
-            int newTab = TabCtrl_GetCurSel(pnm->hwndFrom);
+        if ((pnm->idFrom == IDC_TAB_PROFILES ||
+            pnm->idFrom == IDC_TAB_SETTINGS_ACTIONS) &&
+            pnm->code == TCN_SELCHANGE) {
+            const int newTab = pnm->idFrom == IDC_TAB_PROFILES
+                ? TabCtrl_GetCurSel(pnm->hwndFrom)
+                : LogicalTabFromActionTab(TabCtrl_GetCurSel(pnm->hwndFrom));
+            if (newTab < 0) return TRUE;
 
             // Persist the tab we are leaving
-            if (s_currentTab >= 0 && s_currentTab <= 4) SaveUIToProfile(hDlg, s_currentTab);
-            else if (s_currentTab == 5) {
+            if (IsProfileIndex(s_currentTab)) SaveUIToProfile(hDlg, s_currentTab);
+            else if (s_currentTab == ShortcutsTabIndex()) {
                 if (!ValidateHotkeys(hDlg)) {
-                    TabCtrl_SetCurSel(pnm->hwndFrom, 5);
+                    SelectSettingsTab(hDlg, s_currentTab);
                     return TRUE;
                 }
                 SaveHotkeysFromUI(hDlg);
             }
-            else if (s_currentTab == 6) SaveGlobalAdvancedFromUI(hDlg);
+            else if (s_currentTab == AdvancedTabIndex()) SaveGlobalAdvancedFromUI(hDlg);
+
+            if (newTab == AddProfileTabIndex()) {
+                const int newIndex = ProfileCount();
+                if (newIndex >= MAX_PROFILE_COUNT) {
+                    wchar_t limitMessage[128] = {};
+                    swprintf_s(limitMessage, T(STR_MSG_PROFILE_LIMIT), MAX_PROFILE_COUNT);
+                    MessageBoxW(hDlg, limitMessage,
+                        T(STR_MSG_INFO_TITLE), MB_OK | MB_ICONINFORMATION);
+                    RebuildProfileTabs(hDlg, s_currentTab);
+                    return TRUE;
+                }
+                {
+                    std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+                    g_Global.profiles.push_back(CreateBlankProfile(
+                        g_Global, newIndex, g_Language.load()));
+                    s_snapshot.profiles.push_back(CreateBlankProfile(
+                        s_snapshot, newIndex, s_langSnapshot));
+                    SaveProfiles(s_snapshot);
+                }
+                s_currentTab = newIndex;
+                RebuildProfileTabs(hDlg, s_currentTab);
+                ShowSettingsLayer(hDlg, LAYER_PROFILE);
+                UpdateRazerPanelLayout(hDlg);
+                LoadProfileToUI(hDlg, s_currentTab, s_tempActiveIndex);
+                SetMsiHardwareControlsEnabled(hDlg, !g_Resetting_sdk.load());
+                UpdateDeleteProfileButton(hDlg, s_currentTab);
+                Log("[Settings] Profile created and saved immediately.");
+                return TRUE;
+            }
 
             s_currentTab = newTab;
+            SelectSettingsTab(hDlg, s_currentTab);
 
             ShowSettingsLayer(hDlg, LayerForTab(s_currentTab));
             UpdateRazerPanelLayout(hDlg);
@@ -3632,6 +4024,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                 PopulateAdvancedRazerDevices(hDlg);
                 UpdateAdvancedMsiDeviceLabel(hDlg);
             }
+            UpdateDeleteProfileButton(hDlg, s_currentTab);
         }
         break;
     }
@@ -3651,16 +4044,73 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             return TRUE;
         }
 
+        if (id == IDC_BTN_DELETE_PROFILE && code == BN_CLICKED) {
+            if (!IsProfileIndex(s_currentTab)) return TRUE;
+            int activeProfileIndex = 0;
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+                activeProfileIndex = g_Global.activeProfileIndex;
+            }
+            if (s_currentTab == activeProfileIndex ||
+                s_currentTab == s_tempActiveIndex) {
+                MessageBoxW(hDlg, T(STR_MSG_ACTIVE_PROFILE),
+                    T(STR_MSG_ERROR_TITLE), MB_OK | MB_ICONERROR);
+                return TRUE;
+            }
+            if (ProfileCount() <= 1) {
+                MessageBoxW(hDlg, T(STR_MSG_LAST_PROFILE),
+                    T(STR_MSG_INFO_TITLE), MB_OK | MB_ICONINFORMATION);
+                return TRUE;
+            }
+
+            wchar_t profileLabel[64] = {};
+            GetDlgItemTextW(hDlg, IDC_EDIT_LABEL, profileLabel,
+                static_cast<int>(std::size(profileLabel)));
+            if (profileLabel[0] == L'\0') {
+                std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+                wcscpy_s(profileLabel, g_Global.profiles[s_currentTab].label);
+            }
+            wchar_t confirmation[384] = {};
+            swprintf_s(confirmation, T(STR_MSG_DELETE_PROFILE), profileLabel);
+            if (MessageBoxW(hDlg, confirmation, T(STR_BTN_DELETE_PROFILE),
+                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+                return TRUE;
+            }
+
+            const int deletedIndex = s_currentTab;
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+                DeleteProfileAt(g_Global, deletedIndex, g_Language.load());
+                DeleteProfileAt(s_snapshot, deletedIndex, s_langSnapshot);
+                const int remainingCount = static_cast<int>(g_Global.profiles.size());
+                if (s_tempActiveIndex > deletedIndex) --s_tempActiveIndex;
+                else if (s_tempActiveIndex == deletedIndex) {
+                    s_tempActiveIndex = (std::min)(deletedIndex, remainingCount - 1);
+                }
+                s_currentTab = (std::min)(deletedIndex, remainingCount - 1);
+                SaveProfiles(s_snapshot);
+            }
+
+            RebuildProfileTabs(hDlg, s_currentTab);
+            ShowSettingsLayer(hDlg, LAYER_PROFILE);
+            UpdateRazerPanelLayout(hDlg);
+            LoadProfileToUI(hDlg, s_currentTab, s_tempActiveIndex);
+            SetMsiHardwareControlsEnabled(hDlg, !g_Resetting_sdk.load());
+            UpdateDeleteProfileButton(hDlg, s_currentTab);
+            Log("[Settings] Profile deleted and saved immediately.");
+            return TRUE;
+        }
+
         if (id == IDC_CHK_CONTROL_MSI && code == BN_CLICKED) {
             SetMsiHardwareControlsEnabled(hDlg, !g_Resetting_sdk.load());
-            if (s_currentTab >= 0 && s_currentTab <= 4) {
+            if (IsProfileIndex(s_currentTab)) {
                 RebuildThermalDeviceTabs(hDlg, s_currentTab, true);
             }
             return TRUE;
         }
 
         if (id == IDC_CHK_USE_GENERAL_THERMAL && code == BN_CLICKED) {
-            if (s_currentTab >= 0 && s_currentTab <= 4) {
+            if (IsProfileIndex(s_currentTab)) {
                 RebuildThermalDeviceTabs(hDlg, s_currentTab, true);
                 InvalidateRect(GetDlgItem(hDlg, IDC_TAB_THERMAL_DEVICES), nullptr, TRUE);
             }
@@ -3710,7 +4160,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             else if (id == IDC_EDIT_LABEL) {
                 wchar_t newLabel[64]; GetDlgItemTextW(hDlg, IDC_EDIT_LABEL, newLabel, 64);
                 HWND hTab = GetDlgItem(hDlg, IDC_TAB_PROFILES);
-                if (hTab && s_currentTab < 5) {
+                if (hTab && IsProfileIndex(s_currentTab)) {
                     TCITEMW tie = { 0 }; tie.mask = TCIF_TEXT; tie.pszText = newLabel;
                     SendMessage(hTab, TCM_SETITEMW, s_currentTab, (LPARAM)&tie);
                 }
@@ -3727,7 +4177,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
             g_Global.activeProfileIndex = s_tempActiveIndex;
 
-            if (s_currentTab <= 4) SaveUIToProfile(hDlg, s_currentTab);
+            if (IsProfileIndex(s_currentTab)) SaveUIToProfile(hDlg, s_currentTab);
             SaveHotkeysFromUI(hDlg);
             SaveGlobalAdvancedFromUI(hDlg);
 
@@ -3764,8 +4214,13 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         if (id == IDC_BTN_RESET_SHORTCUTS) {
             BYTE defMod = HOTKEYF_CONTROL | HOTKEYF_SHIFT | HOTKEYF_ALT;
             SendDlgItemMessage(hDlg, IDC_HK_TOGGLE, HKM_SETHOTKEY, MAKEWORD(0x4C, defMod), 0);
-            for (int i = 0; i < 5; i++)
-                SendDlgItemMessage(hDlg, IDC_HK_P1 + i, HKM_SETHOTKEY, MAKEWORD('1' + i, defMod), 0);
+            const int hotkeyControls[PROFILE_HOTKEY_COUNT] = {
+                IDC_HK_P1, IDC_HK_P2, IDC_HK_P3, IDC_HK_P4, IDC_HK_P5
+            };
+            for (int i = 0; i < PROFILE_HOTKEY_COUNT; i++) {
+                SendDlgItemMessage(hDlg, hotkeyControls[i], HKM_SETHOTKEY,
+                    MAKEWORD('1' + i, defMod), 0);
+            }
             return TRUE;
         }
 
@@ -3805,7 +4260,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         // a profile tab and the device list is empty because the snapshot wasn't
         // ready when the dialog opened, fill it now. Only touch the hardware combos
         // (never the user's other in-progress edits), and only when empty.
-        if (s_currentTab >= 0 && s_currentTab <= 4) {
+        if (IsProfileIndex(s_currentTab)) {
             HWND hDev = GetDlgItem(hDlg, IDC_COMBO_DEVICE);
             if (SendMessage(hDev, CB_GETCOUNT, 0, 0) == 0) {
                 PopulateDeviceList(hDlg);
@@ -3825,7 +4280,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             }
             SetMsiHardwareControlsEnabled(hDlg, !g_Resetting_sdk.load());
         }
-        else if (s_currentTab == 6) {
+        else if (s_currentTab == AdvancedTabIndex()) {
             PopulateMsiReleaseCombo(hDlg);
             UpdateAdvancedMsiDeviceLabel(hDlg);
         }
@@ -3834,9 +4289,9 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
     case WM_APP_RAZERREADY:
         UpdateRazerPanelLayout(hDlg);
-        if (s_currentTab == 6) PopulateAdvancedRazerDevices(hDlg);
+        if (s_currentTab == AdvancedTabIndex()) PopulateAdvancedRazerDevices(hDlg);
         ShowSettingsLayer(hDlg, LayerForTab(s_currentTab));
-        if (s_currentTab >= 0 && s_currentTab <= 4) {
+        if (IsProfileIndex(s_currentTab)) {
             RebuildThermalDeviceTabs(hDlg, s_currentTab, true);
         }
         return (INT_PTR)TRUE;
@@ -4002,9 +4457,20 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 
                 // Profile Submenu Creation
                 HMENU hProfileMenu = CreatePopupMenu();
-                for (int i = 0; i < 5; i++) {
-                    UINT flags = MF_STRING | (i == g_Global.activeProfileIndex ? MF_CHECKED : 0);
-                    AppendMenuW(hProfileMenu, flags, ID_TRAY_PROFILE_BASE + i, g_Global.profiles[i].label);
+                std::vector<std::wstring> profileLabels;
+                int activeProfile = 0;
+                {
+                    std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+                    profileLabels.reserve(g_Global.profiles.size());
+                    for (const Config& profile : g_Global.profiles) {
+                        profileLabels.emplace_back(profile.label);
+                    }
+                    activeProfile = g_Global.activeProfileIndex;
+                }
+                for (int i = 0; i < static_cast<int>(profileLabels.size()); i++) {
+                    UINT flags = MF_STRING | (i == activeProfile ? MF_CHECKED : 0);
+                    AppendMenuW(hProfileMenu, flags, ID_TRAY_PROFILE_BASE + i,
+                        profileLabels[i].c_str());
                 }
 
                 AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hProfileMenu, T(STR_TRAY_ACTIVE_PROFILE));
@@ -4030,7 +4496,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         if (LOWORD(wParam) == ID_TRAY_EXIT) { g_Running = false; PostQuitMessage(0); }
 
         // Handle Profile Switching via Tray
-        if (LOWORD(wParam) >= ID_TRAY_PROFILE_BASE && LOWORD(wParam) <= ID_TRAY_PROFILE_BASE + 4) {
+        if (LOWORD(wParam) >= ID_TRAY_PROFILE_BASE &&
+            LOWORD(wParam) < ID_TRAY_PROFILE_BASE + MAX_PROFILE_COUNT) {
             SwitchActiveProfile(hWnd, LOWORD(wParam) - ID_TRAY_PROFILE_BASE);
         }
 
