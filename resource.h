@@ -112,6 +112,7 @@
 #define IDC_LBL_P5                      3011
 #define IDC_HK_P5                       3012
 #define IDC_BTN_RESET_SHORTCUTS         3013
+#define IDC_SCROLL_HOTKEY_PROFILES      3014
 
 // About Dialog
 #define IDC_ABOUT_ICON                  4001

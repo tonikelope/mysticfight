@@ -145,7 +145,9 @@ const int   DEF_TEMP_HIGH = 90;
 
 const int   DEFAULT_PROFILE_COUNT = 5;
 const int   MAX_PROFILE_COUNT = 20;
-const int   PROFILE_HOTKEY_COUNT = 5;
+const int   PROFILE_HOTKEY_VISIBLE_ROWS = 5;
+const int   PROFILE_HOTKEY_ID_BASE = 101;
+const int   HOTKEY_SETTINGS_VERSION = 2;
 
 const wchar_t* DEF_COLOR_LOW = L"#00FF00"; // Green
 const wchar_t* DEF_COLOR_MED = L"#FFFF00"; // Yellow
@@ -360,11 +362,9 @@ struct Config {
 
 struct AppHotkeys {
     WORD toggleLEDs = 0;
-    WORD profile1 = 0;
-    WORD profile2 = 0;
-    WORD profile3 = 0;
-    WORD profile4 = 0;
-    WORD profile5 = 0;
+    // Kept index-aligned with GlobalConfig::profiles. Missing/new entries are
+    // deliberately unassigned (0), so creating a profile never claims a key.
+    std::vector<WORD> profiles;
 };
 
 struct RazerDeviceSettings {
@@ -944,7 +944,9 @@ static void SafeRegisterHotkey(HWND hWnd, int id, WORD hotkeyConfig) {
 static void RegisterAppHotkeys(HWND hWnd) {
     if (!hWnd) return;
     UnregisterHotKey(hWnd, 1);
-    for (int i = 101; i <= 105; i++) UnregisterHotKey(hWnd, i);
+    for (int i = 0; i < MAX_PROFILE_COUNT; ++i) {
+        UnregisterHotKey(hWnd, PROFILE_HOTKEY_ID_BASE + i);
+    }
 
     AppHotkeys hotkeys;
     int profileCount = 0;
@@ -954,13 +956,11 @@ static void RegisterAppHotkeys(HWND hWnd) {
         profileCount = static_cast<int>(g_Global.profiles.size());
     }
     SafeRegisterHotkey(hWnd, 1, hotkeys.toggleLEDs);
-    const WORD profileHotkeys[PROFILE_HOTKEY_COUNT] = {
-        hotkeys.profile1, hotkeys.profile2, hotkeys.profile3,
-        hotkeys.profile4, hotkeys.profile5
-    };
-    const int registeredProfiles = (std::min)(profileCount, PROFILE_HOTKEY_COUNT);
+    const int registeredProfiles = (std::min)(profileCount,
+        static_cast<int>(hotkeys.profiles.size()));
     for (int i = 0; i < registeredProfiles; ++i) {
-        SafeRegisterHotkey(hWnd, 101 + i, profileHotkeys[i]);
+        SafeRegisterHotkey(hWnd, PROFILE_HOTKEY_ID_BASE + i,
+            hotkeys.profiles[i]);
     }
 }
 
@@ -1417,6 +1417,31 @@ static void SaveProfiles(const GlobalConfig& config) {
         std::to_wstring(config.profiles.size()).c_str(), INI_FILE);
 }
 
+static void SaveHotkeys(const AppHotkeys& hotkeys, const int profileCount) {
+    WritePrivateProfileStringW(L"Hotkeys", L"Version",
+        std::to_wstring(HOTKEY_SETTINGS_VERSION).c_str(), INI_FILE);
+    WritePrivateProfileStringW(L"Hotkeys", L"Toggle",
+        std::to_wstring(hotkeys.toggleLEDs).c_str(), INI_FILE);
+
+    const int savedProfiles = (std::clamp)(profileCount, 0, MAX_PROFILE_COUNT);
+    for (int i = 0; i < savedProfiles; ++i) {
+        wchar_t key[32] = {};
+        swprintf_s(key, L"Profile%d", i + 1);
+        const WORD value = i < static_cast<int>(hotkeys.profiles.size())
+            ? hotkeys.profiles[i]
+            : 0;
+        WritePrivateProfileStringW(L"Hotkeys", key,
+            std::to_wstring(value).c_str(), INI_FILE);
+    }
+    // Profile deletion reindexes shortcuts immediately. Remove keys beyond the
+    // live profile count so a later addition cannot inherit a deleted binding.
+    for (int i = savedProfiles; i < MAX_PROFILE_COUNT; ++i) {
+        wchar_t key[32] = {};
+        swprintf_s(key, L"Profile%d", i + 1);
+        WritePrivateProfileStringW(L"Hotkeys", key, nullptr, INI_FILE);
+    }
+}
+
 static void SaveSettings() {
     std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
 
@@ -1452,12 +1477,7 @@ static void SaveSettings() {
             std::to_wstring(static_cast<int>(settings.releaseEffect)).c_str(), INI_FILE);
     }
 
-    WritePrivateProfileStringW(L"Hotkeys", L"Toggle", std::to_wstring(g_Global.hotkeys.toggleLEDs).c_str(), INI_FILE);
-    WritePrivateProfileStringW(L"Hotkeys", L"Profile1", std::to_wstring(g_Global.hotkeys.profile1).c_str(), INI_FILE);
-    WritePrivateProfileStringW(L"Hotkeys", L"Profile2", std::to_wstring(g_Global.hotkeys.profile2).c_str(), INI_FILE);
-    WritePrivateProfileStringW(L"Hotkeys", L"Profile3", std::to_wstring(g_Global.hotkeys.profile3).c_str(), INI_FILE);
-    WritePrivateProfileStringW(L"Hotkeys", L"Profile4", std::to_wstring(g_Global.hotkeys.profile4).c_str(), INI_FILE);
-    WritePrivateProfileStringW(L"Hotkeys", L"Profile5", std::to_wstring(g_Global.hotkeys.profile5).c_str(), INI_FILE);
+    SaveHotkeys(g_Global.hotkeys, static_cast<int>(g_Global.profiles.size()));
 }
 
 /**
@@ -1690,14 +1710,38 @@ static void LoadSettings() {
 
         needAutoSelect = g_cfg.generalThermal.sensorId.empty();
 
-        // Hotkey default values (Ctrl+Alt+Shift + Keys)
-        BYTE defMod = HOTKEYF_CONTROL | HOTKEYF_SHIFT | HOTKEYF_ALT;
-        g_Global.hotkeys.toggleLEDs = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Toggle", MAKEWORD(0x4C, defMod), INI_FILE);
-        g_Global.hotkeys.profile1 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile1", MAKEWORD('1', defMod), INI_FILE);
-        g_Global.hotkeys.profile2 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile2", MAKEWORD('2', defMod), INI_FILE);
-        g_Global.hotkeys.profile3 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile3", MAKEWORD('3', defMod), INI_FILE);
-        g_Global.hotkeys.profile4 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile4", MAKEWORD('4', defMod), INI_FILE);
-        g_Global.hotkeys.profile5 = (WORD)GetPrivateProfileIntW(L"Hotkeys", L"Profile5", MAKEWORD('5', defMod), INI_FILE);
+        // Every shortcut is opt-in. Existing Profile1..ProfileN values migrate
+        // unchanged; absent entries and newly created profiles remain blank.
+        g_Global.hotkeys.toggleLEDs = static_cast<WORD>(
+            GetPrivateProfileIntW(L"Hotkeys", L"Toggle", 0, INI_FILE));
+        g_Global.hotkeys.profiles.assign(g_Global.profiles.size(), 0);
+        for (int i = 0; i < static_cast<int>(g_Global.profiles.size()); ++i) {
+            wchar_t key[32] = {};
+            swprintf_s(key, L"Profile%d", i + 1);
+            g_Global.hotkeys.profiles[i] = static_cast<WORD>(
+                GetPrivateProfileIntW(L"Hotkeys", key, 0, INI_FILE));
+        }
+        // v3.12 and earlier wrote built-in Ctrl+Alt+Shift defaults to disk.
+        // Migrate only those exact legacy values to the new opt-in blank state;
+        // any shortcut the user customized remains untouched.
+        const int hotkeyVersion = GetPrivateProfileIntW(
+            L"Hotkeys", L"Version", 0, INI_FILE);
+        if (hotkeyVersion < HOTKEY_SETTINGS_VERSION) {
+            const BYTE legacyModifiers = HOTKEYF_CONTROL |
+                HOTKEYF_SHIFT | HOTKEYF_ALT;
+            if (g_Global.hotkeys.toggleLEDs ==
+                MAKEWORD(0x4C, legacyModifiers)) {
+                g_Global.hotkeys.toggleLEDs = 0;
+            }
+            const int legacyProfiles = (std::min)(5,
+                static_cast<int>(g_Global.hotkeys.profiles.size()));
+            for (int i = 0; i < legacyProfiles; ++i) {
+                if (g_Global.hotkeys.profiles[i] ==
+                    MAKEWORD('1' + i, legacyModifiers)) {
+                    g_Global.hotkeys.profiles[i] = 0;
+                }
+            }
+        }
     }
 
     // HTTP must NOT run while g_cfgMutex is held (it would block the sensor thread).
@@ -3342,6 +3386,10 @@ static bool DeleteProfileAt(GlobalConfig& config, const int index,
     }
     const bool deletedActive = config.activeProfileIndex == index;
     config.profiles.erase(config.profiles.begin() + index);
+    if (index < static_cast<int>(config.hotkeys.profiles.size())) {
+        config.hotkeys.profiles.erase(config.hotkeys.profiles.begin() + index);
+    }
+    config.hotkeys.profiles.resize(config.profiles.size(), 0);
     if (config.activeProfileIndex > index) --config.activeProfileIndex;
     else if (deletedActive) {
         config.activeProfileIndex = (std::min)(index,
@@ -3544,6 +3592,67 @@ static void UpdateRazerPanelLayout(HWND hDlg) {
     }
 }
 
+static constexpr int PROFILE_HOTKEY_LABEL_IDS[PROFILE_HOTKEY_VISIBLE_ROWS] = {
+    IDC_LBL_P1, IDC_LBL_P2, IDC_LBL_P3, IDC_LBL_P4, IDC_LBL_P5
+};
+static constexpr int PROFILE_HOTKEY_CONTROL_IDS[PROFILE_HOTKEY_VISIBLE_ROWS] = {
+    IDC_HK_P1, IDC_HK_P2, IDC_HK_P3, IDC_HK_P4, IDC_HK_P5
+};
+static std::vector<WORD> g_settingsProfileHotkeys;
+static int g_settingsHotkeyOffset = 0;
+
+static void CaptureVisibleProfileHotkeys(HWND hDlg) {
+    for (int slot = 0; slot < PROFILE_HOTKEY_VISIBLE_ROWS; ++slot) {
+        const int profileIndex = g_settingsHotkeyOffset + slot;
+        if (profileIndex >= static_cast<int>(g_settingsProfileHotkeys.size())) break;
+        g_settingsProfileHotkeys[profileIndex] = static_cast<WORD>(
+            SendDlgItemMessageW(hDlg, PROFILE_HOTKEY_CONTROL_IDS[slot],
+                HKM_GETHOTKEY, 0, 0));
+    }
+}
+
+static void RefreshProfileHotkeyControls(HWND hDlg, const bool captureVisible) {
+    if (captureVisible) CaptureVisibleProfileHotkeys(hDlg);
+
+    const int profileCount = ProfileCount();
+    g_settingsProfileHotkeys.resize(profileCount, 0);
+    const int maxOffset = (std::max)(0,
+        profileCount - PROFILE_HOTKEY_VISIBLE_ROWS);
+    g_settingsHotkeyOffset = (std::clamp)(g_settingsHotkeyOffset, 0, maxOffset);
+
+    SCROLLINFO scrollInfo = { sizeof(scrollInfo) };
+    scrollInfo.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    scrollInfo.nMin = 0;
+    scrollInfo.nMax = (std::max)(0, profileCount - 1);
+    scrollInfo.nPage = PROFILE_HOTKEY_VISIBLE_ROWS;
+    scrollInfo.nPos = g_settingsHotkeyOffset;
+    SetScrollInfo(GetDlgItem(hDlg, IDC_SCROLL_HOTKEY_PROFILES),
+        SB_CTL, &scrollInfo, TRUE);
+
+    for (int slot = 0; slot < PROFILE_HOTKEY_VISIBLE_ROWS; ++slot) {
+        const int profileIndex = g_settingsHotkeyOffset + slot;
+        wchar_t label[96] = {};
+        const WORD hotkey = profileIndex < profileCount
+            ? g_settingsProfileHotkeys[profileIndex]
+            : 0;
+        if (profileIndex < profileCount) {
+            swprintf_s(label, T(STR_LBL_ACT_PROFILE), profileIndex + 1);
+        }
+        SetDlgItemTextW(hDlg, PROFILE_HOTKEY_LABEL_IDS[slot], label);
+        SendDlgItemMessageW(hDlg, PROFILE_HOTKEY_CONTROL_IDS[slot],
+            HKM_SETHOTKEY, hotkey, 0);
+    }
+}
+
+static void ScrollProfileHotkeys(HWND hDlg, const int requestedOffset) {
+    CaptureVisibleProfileHotkeys(hDlg);
+    const int maxOffset = (std::max)(0,
+        static_cast<int>(g_settingsProfileHotkeys.size()) -
+        PROFILE_HOTKEY_VISIBLE_ROWS);
+    g_settingsHotkeyOffset = (std::clamp)(requestedOffset, 0, maxOffset);
+    RefreshProfileHotkeyControls(hDlg, false);
+}
+
 /**
  * Swaps UI visibility between the Profile, Shortcuts and Advanced layers
  */
@@ -3566,12 +3675,6 @@ static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
         IDC_GRP_SHORTCUTS, IDC_LBL_TOGGLE, IDC_HK_TOGGLE,
         IDC_BTN_RESET_SHORTCUTS
     };
-    const int shortcutProfileLabels[PROFILE_HOTKEY_COUNT] = {
-        IDC_LBL_P1, IDC_LBL_P2, IDC_LBL_P3, IDC_LBL_P4, IDC_LBL_P5
-    };
-    const int shortcutProfileInputs[PROFILE_HOTKEY_COUNT] = {
-        IDC_HK_P1, IDC_HK_P2, IDC_HK_P3, IDC_HK_P4, IDC_HK_P5
-    };
 
     const int advancedCtrls[] = {
         IDC_GRP_ADVANCED, IDC_GRP_LIGHTING_CONTROLLERS, IDC_GRP_ADV_RAZER_CONTROLLER,
@@ -3592,12 +3695,22 @@ static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
         ShowWindow(h, layer == LAYER_PROFILE && (!isRazerControl || g_razerAnyDetected.load()) ? SW_SHOW : SW_HIDE);
     }
     for (int id : shortcutCtrls) { HWND h = GetDlgItem(hDlg, id); if (h) ShowWindow(h, layer == LAYER_SHORTCUTS ? SW_SHOW : SW_HIDE); }
-    const int visibleHotkeys = (std::min)(ProfileCount(), PROFILE_HOTKEY_COUNT);
-    for (int i = 0; i < PROFILE_HOTKEY_COUNT; ++i) {
+    if (layer == LAYER_SHORTCUTS) RefreshProfileHotkeyControls(hDlg, false);
+    const int visibleHotkeys = (std::max)(0, (std::min)(
+        PROFILE_HOTKEY_VISIBLE_ROWS,
+        static_cast<int>(g_settingsProfileHotkeys.size()) -
+        g_settingsHotkeyOffset));
+    for (int i = 0; i < PROFILE_HOTKEY_VISIBLE_ROWS; ++i) {
         const bool visible = layer == LAYER_SHORTCUTS && i < visibleHotkeys;
-        ShowWindow(GetDlgItem(hDlg, shortcutProfileLabels[i]), visible ? SW_SHOW : SW_HIDE);
-        ShowWindow(GetDlgItem(hDlg, shortcutProfileInputs[i]), visible ? SW_SHOW : SW_HIDE);
+        ShowWindow(GetDlgItem(hDlg, PROFILE_HOTKEY_LABEL_IDS[i]),
+            visible ? SW_SHOW : SW_HIDE);
+        ShowWindow(GetDlgItem(hDlg, PROFILE_HOTKEY_CONTROL_IDS[i]),
+            visible ? SW_SHOW : SW_HIDE);
     }
+    ShowWindow(GetDlgItem(hDlg, IDC_SCROLL_HOTKEY_PROFILES),
+        layer == LAYER_SHORTCUTS &&
+        static_cast<int>(g_settingsProfileHotkeys.size()) >
+        PROFILE_HOTKEY_VISIBLE_ROWS ? SW_SHOW : SW_HIDE);
     for (int id : advancedCtrls) { HWND h = GetDlgItem(hDlg, id); if (h) ShowWindow(h, layer == LAYER_ADVANCED ? SW_SHOW : SW_HIDE); }
 }
 
@@ -3648,10 +3761,7 @@ static void ApplyDialogTranslations(HWND hDlg) {
     // Shortcuts layer
     SetDlgItemTextW(hDlg, IDC_GRP_SHORTCUTS, T(STR_GRP_SHORTCUTS));
     SetDlgItemTextW(hDlg, IDC_LBL_TOGGLE, T(STR_LBL_TOGGLE));
-    for (int i = 0; i < PROFILE_HOTKEY_COUNT; i++) {
-        wchar_t buf[64]; swprintf_s(buf, T(STR_LBL_ACT_PROFILE), i + 1);
-        SetDlgItemTextW(hDlg, IDC_LBL_P1 + i * 2, buf); // labels are every other ID
-    }
+    RefreshProfileHotkeyControls(hDlg, false);
     SetDlgItemTextW(hDlg, IDC_BTN_RESET_SHORTCUTS, T(STR_BTN_RESET_HOTKEYS));
 
     // Bottom bar
@@ -3718,18 +3828,17 @@ static void ApplyDialogTranslations(HWND hDlg) {
 }
 
 static bool ValidateHotkeys(HWND hDlg) {
-    WORD keys[6];
-    keys[0] = (WORD)SendDlgItemMessage(hDlg, IDC_HK_TOGGLE, HKM_GETHOTKEY, 0, 0);
-    keys[1] = (WORD)SendDlgItemMessage(hDlg, IDC_HK_P1, HKM_GETHOTKEY, 0, 0);
-    keys[2] = (WORD)SendDlgItemMessage(hDlg, IDC_HK_P2, HKM_GETHOTKEY, 0, 0);
-    keys[3] = (WORD)SendDlgItemMessage(hDlg, IDC_HK_P3, HKM_GETHOTKEY, 0, 0);
-    keys[4] = (WORD)SendDlgItemMessage(hDlg, IDC_HK_P4, HKM_GETHOTKEY, 0, 0);
-    keys[5] = (WORD)SendDlgItemMessage(hDlg, IDC_HK_P5, HKM_GETHOTKEY, 0, 0);
+    CaptureVisibleProfileHotkeys(hDlg);
+    std::vector<WORD> keys;
+    keys.reserve(g_settingsProfileHotkeys.size() + 1);
+    keys.push_back(static_cast<WORD>(SendDlgItemMessageW(
+        hDlg, IDC_HK_TOGGLE, HKM_GETHOTKEY, 0, 0)));
+    keys.insert(keys.end(), g_settingsProfileHotkeys.begin(),
+        g_settingsProfileHotkeys.end());
 
-    const int activeKeyCount = 1 + (std::min)(ProfileCount(), PROFILE_HOTKEY_COUNT);
-    for (int i = 0; i < activeKeyCount; i++) {
+    for (int i = 0; i < static_cast<int>(keys.size()); ++i) {
         if (LOBYTE(keys[i]) == 0) continue;
-        for (int j = i + 1; j < activeKeyCount; j++) {
+        for (int j = i + 1; j < static_cast<int>(keys.size()); ++j) {
             if (keys[i] == keys[j]) {
                 MessageBoxW(hDlg, T(STR_MSG_DUP_HOTKEY), T(STR_MSG_ERROR_TITLE), MB_ICONWARNING);
                 return false;
@@ -3740,12 +3849,11 @@ static bool ValidateHotkeys(HWND hDlg) {
 }
 
 static void SaveHotkeysFromUI(HWND hDlg) {
-    g_Global.hotkeys.toggleLEDs = (WORD)SendDlgItemMessage(hDlg, IDC_HK_TOGGLE, HKM_GETHOTKEY, 0, 0);
-    g_Global.hotkeys.profile1 = (WORD)SendDlgItemMessage(hDlg, IDC_HK_P1, HKM_GETHOTKEY, 0, 0);
-    g_Global.hotkeys.profile2 = (WORD)SendDlgItemMessage(hDlg, IDC_HK_P2, HKM_GETHOTKEY, 0, 0);
-    g_Global.hotkeys.profile3 = (WORD)SendDlgItemMessage(hDlg, IDC_HK_P3, HKM_GETHOTKEY, 0, 0);
-    g_Global.hotkeys.profile4 = (WORD)SendDlgItemMessage(hDlg, IDC_HK_P4, HKM_GETHOTKEY, 0, 0);
-    g_Global.hotkeys.profile5 = (WORD)SendDlgItemMessage(hDlg, IDC_HK_P5, HKM_GETHOTKEY, 0, 0);
+    CaptureVisibleProfileHotkeys(hDlg);
+    g_Global.hotkeys.toggleLEDs = static_cast<WORD>(SendDlgItemMessageW(
+        hDlg, IDC_HK_TOGGLE, HKM_GETHOTKEY, 0, 0));
+    g_Global.hotkeys.profiles = g_settingsProfileHotkeys;
+    g_Global.hotkeys.profiles.resize(g_Global.profiles.size(), 0);
 }
 
 /**
@@ -3828,7 +3936,9 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         HWND hMainWnd = GetParent(hDlg);
         if (hMainWnd) {
             UnregisterHotKey(hMainWnd, 1);
-            for (int i = 101; i <= 105; i++) UnregisterHotKey(hMainWnd, i);
+            for (int i = 0; i < MAX_PROFILE_COUNT; ++i) {
+                UnregisterHotKey(hMainWnd, PROFILE_HOTKEY_ID_BASE + i);
+            }
         }
 
         RECT rcDlg; GetWindowRect(hDlg, &rcDlg);
@@ -3877,12 +3987,12 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
         PopulateDeviceList(hDlg);
 
-        SendDlgItemMessage(hDlg, IDC_HK_TOGGLE, HKM_SETHOTKEY, g_Global.hotkeys.toggleLEDs, 0);
-        SendDlgItemMessage(hDlg, IDC_HK_P1, HKM_SETHOTKEY, g_Global.hotkeys.profile1, 0);
-        SendDlgItemMessage(hDlg, IDC_HK_P2, HKM_SETHOTKEY, g_Global.hotkeys.profile2, 0);
-        SendDlgItemMessage(hDlg, IDC_HK_P3, HKM_SETHOTKEY, g_Global.hotkeys.profile3, 0);
-        SendDlgItemMessage(hDlg, IDC_HK_P4, HKM_SETHOTKEY, g_Global.hotkeys.profile4, 0);
-        SendDlgItemMessage(hDlg, IDC_HK_P5, HKM_SETHOTKEY, g_Global.hotkeys.profile5, 0);
+        SendDlgItemMessageW(hDlg, IDC_HK_TOGGLE, HKM_SETHOTKEY,
+            s_snapshot.hotkeys.toggleLEDs, 0);
+        g_settingsProfileHotkeys = s_snapshot.hotkeys.profiles;
+        g_settingsProfileHotkeys.resize(s_snapshot.profiles.size(), 0);
+        g_settingsHotkeyOffset = 0;
+        RefreshProfileHotkeyControls(hDlg, false);
 
         // Apply translations (also fills the smoothing combo), then load the
         // global advanced + language selections. Snapshot language for Cancel.
@@ -3995,9 +4105,17 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                     std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
                     g_Global.profiles.push_back(CreateBlankProfile(
                         g_Global, newIndex, g_Language.load()));
+                    g_Global.hotkeys.profiles.resize(
+                        g_Global.profiles.size(), 0);
                     s_snapshot.profiles.push_back(CreateBlankProfile(
                         s_snapshot, newIndex, s_langSnapshot));
+                    s_snapshot.hotkeys.profiles.resize(
+                        s_snapshot.profiles.size(), 0);
+                    g_settingsProfileHotkeys.resize(
+                        g_Global.profiles.size(), 0);
                     SaveProfiles(s_snapshot);
+                    SaveHotkeys(s_snapshot.hotkeys,
+                        static_cast<int>(s_snapshot.profiles.size()));
                 }
                 s_currentTab = newIndex;
                 RebuildProfileTabs(hDlg, s_currentTab);
@@ -4028,6 +4146,42 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         }
         break;
     }
+
+    case WM_VSCROLL:
+        if (reinterpret_cast<HWND>(lParam) ==
+            GetDlgItem(hDlg, IDC_SCROLL_HOTKEY_PROFILES)) {
+            int requestedOffset = g_settingsHotkeyOffset;
+            switch (LOWORD(wParam)) {
+            case SB_LINEUP: requestedOffset--; break;
+            case SB_LINEDOWN: requestedOffset++; break;
+            case SB_PAGEUP: requestedOffset -= PROFILE_HOTKEY_VISIBLE_ROWS; break;
+            case SB_PAGEDOWN: requestedOffset += PROFILE_HOTKEY_VISIBLE_ROWS; break;
+            case SB_THUMBPOSITION:
+            case SB_THUMBTRACK: {
+                SCROLLINFO scrollInfo = { sizeof(scrollInfo) };
+                scrollInfo.fMask = SIF_TRACKPOS;
+                GetScrollInfo(GetDlgItem(hDlg, IDC_SCROLL_HOTKEY_PROFILES),
+                    SB_CTL, &scrollInfo);
+                requestedOffset = scrollInfo.nTrackPos;
+                break;
+            }
+            default: return TRUE;
+            }
+            ScrollProfileHotkeys(hDlg, requestedOffset);
+            return TRUE;
+        }
+        break;
+
+    case WM_MOUSEWHEEL:
+        if (s_currentTab == ShortcutsTabIndex()) {
+            const int wheelSteps = GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
+            if (wheelSteps != 0) {
+                ScrollProfileHotkeys(hDlg,
+                    g_settingsHotkeyOffset - wheelSteps);
+            }
+            return TRUE;
+        }
+        break;
 
     case WM_COMMAND: {
         int id = LOWORD(wParam);
@@ -4088,7 +4242,15 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                     s_tempActiveIndex = (std::min)(deletedIndex, remainingCount - 1);
                 }
                 s_currentTab = (std::min)(deletedIndex, remainingCount - 1);
+                if (deletedIndex < static_cast<int>(
+                    g_settingsProfileHotkeys.size())) {
+                    g_settingsProfileHotkeys.erase(
+                        g_settingsProfileHotkeys.begin() + deletedIndex);
+                }
+                g_settingsProfileHotkeys.resize(remainingCount, 0);
                 SaveProfiles(s_snapshot);
+                SaveHotkeys(s_snapshot.hotkeys,
+                    static_cast<int>(s_snapshot.profiles.size()));
             }
 
             RebuildProfileTabs(hDlg, s_currentTab);
@@ -4212,15 +4374,11 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         }
 
         if (id == IDC_BTN_RESET_SHORTCUTS) {
-            BYTE defMod = HOTKEYF_CONTROL | HOTKEYF_SHIFT | HOTKEYF_ALT;
-            SendDlgItemMessage(hDlg, IDC_HK_TOGGLE, HKM_SETHOTKEY, MAKEWORD(0x4C, defMod), 0);
-            const int hotkeyControls[PROFILE_HOTKEY_COUNT] = {
-                IDC_HK_P1, IDC_HK_P2, IDC_HK_P3, IDC_HK_P4, IDC_HK_P5
-            };
-            for (int i = 0; i < PROFILE_HOTKEY_COUNT; i++) {
-                SendDlgItemMessage(hDlg, hotkeyControls[i], HKM_SETHOTKEY,
-                    MAKEWORD('1' + i, defMod), 0);
-            }
+            SendDlgItemMessageW(hDlg, IDC_HK_TOGGLE,
+                HKM_SETHOTKEY, 0, 0);
+            std::fill(g_settingsProfileHotkeys.begin(),
+                g_settingsProfileHotkeys.end(), 0);
+            RefreshProfileHotkeyControls(hDlg, false);
             return TRUE;
         }
 
@@ -4412,7 +4570,9 @@ static void FinalCleanup(HWND hWnd) {
         g_hIconColor = NULL;
 
         UnregisterHotKey(hWnd, 1);
-        for (int i = 101; i <= 105; i++) UnregisterHotKey(hWnd, i);
+        for (int i = 0; i < MAX_PROFILE_COUNT; ++i) {
+            UnregisterHotKey(hWnd, PROFILE_HOTKEY_ID_BASE + i);
+        }
         Log("[MysticFight] Global Hot Keys Unregistered");
     }
 
@@ -4439,8 +4599,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         if (wParam == 1) {
             ToggleLights(hWnd);
         }
-        else if (wParam >= 101 && wParam <= 105) {
-            SwitchActiveProfile(hWnd, (int)wParam - 101);
+        else if (wParam >= PROFILE_HOTKEY_ID_BASE &&
+            wParam < PROFILE_HOTKEY_ID_BASE + MAX_PROFILE_COUNT) {
+            SwitchActiveProfile(hWnd,
+                static_cast<int>(wParam) - PROFILE_HOTKEY_ID_BASE);
         }
         break;
 
