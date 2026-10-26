@@ -96,7 +96,7 @@ Spectrum Cycling hand-off.
 Profiles may share the backward-compatible General data source, sensor and
 threshold/colour scheme, or assign an independent scheme to each selected
 physical Razer device. LibreHardwareMonitor is downloaded and parsed only once
-per polling cycle qhile every runtime reads its assigned sensor from that coherent
+per polling cycle while every runtime reads its assigned sensor from that coherent
 snapshot and keeps its own interpolation and FPS deadlines. Once its visible
 colour settles, that device receives no repeated frame writes.
 
