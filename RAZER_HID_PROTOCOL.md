@@ -1,3 +1,5 @@
+<div align="justify">
+
 # Razer HID protocol scope
 
 Research snapshot: 2026-10-25.
@@ -134,3 +136,5 @@ release command.
 Not implemented: firmware, bootloader, EEPROM, macros, keyboard polling,
 arbitrary persistent lighting, driver replacement, services, or automatic
 hardware-write tests.
+
+</div>
