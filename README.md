@@ -15,14 +15,14 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 
 ## Features
 * **Real-time Monitoring:** Temperature tracking via HTTP.
-* **VERY Lightweight:** No heavy dashboards; just a simple tray app that stays out of your way.
+* **VERY Lightweight:** No heavy dashboards, just a simple tray app that stays out of your way.
 * **Customizable Device and LED area:** Choose the one you prefer. <i>Please note that MSI Mystic Light SDK may not recognise all areas available on your device (you will have to wait for MSI to update the public SDK)</i>.
 * **Independent controllers per profile:** Control the MSI motherboard and any individually selected compatible Razer device. New profiles select no Razer device by default.
 * **Native Razer HID support:** Direct Windows HID control with no Synapse, Chroma Runtime, OpenRGB, extra service, or kernel driver. The validated models are Ornata V3, Ornata V3 X, Ornata V3 Tenkeyless and Tartarus Pro (exact PIDs below).
 * **True multi-device Razer control:** Every compatible physical Razer HID device is shown by its reported product name and PID, and tracked internally by a stable device key. Profiles can independently select none, one, or several supported devices. Models outside the explicit compatibility table are omitted from Settings and never receive commands.
 * **General or per-device thermal schemes:** Every profile has a General scheme, enabled for all selected controllers by default for full backward compatibility. Each scheme includes its data source, sensor, temperature thresholds and colours. Disable the General option to configure those values independently in the MSI and per-device Razer tabs. Unselecting a controller hides its tab without deleting its saved scheme.
 * **Configurable device hand-off:** When a profile stops using an MSI or Razer device, MysticFight exits normally, or Windows commits a shutdown/restart, Advanced settings can leave it powered off or return it to an autonomous animated effect (an exact MSI SDK-advertised style, or Razer Spectrum Cycling). The default is lights off, and MysticFight never hands off a device it did not successfully control first.
-* **Independent refresh rates:** MSI and every selected, supported Razer device can independently use 15, 20, or 25 FPS while consuming its assigned sensor. The Razer scheduler keeps separate smoothing and write deadlines per physical device, so different sensors, colour schemes and FPS values do not interfere. FPS limits transition speed; stable colours generate no repeated lighting writes or high-frequency rendering.
+* **Independent refresh rates:** MSI and every selected, supported Razer device can independently use 15, 20, or 25 FPS while consuming its assigned sensor. The Razer scheduler keeps separate smoothing and write deadlines per physical device, so different sensors, colour schemes and FPS values do not interfere. FPS limits transition speed: stable colours generate no repeated lighting writes or high-frequency rendering.
 * **Customizable Data Source and Temperature Sensor:** LibreHardwareMonitor and its selected temperature sensor can be shared through General or assigned independently to each selected controller. The LibreHardwareMonitor server URL remains one global Advanced setting.
 * **Customizable Temperature and Colors Thresholds:** RMS interpolation with adaptive colour-transition smoothing, shared through General or overridden per selected controller.
 * **5 profiles settings:** You can set a custom global shortcut keys to change between profiles.
@@ -58,7 +58,7 @@ For this tool to work, you MUST have the following installed/running:
 | Razer Ornata V3 Tenkeyless | `0x02A3` | 8 zones |
 | Razer Tartarus Pro | `0x0244` | 21 zones |
 
-Compatibility means temperature-driven uniform colour plus the configurable Off/Spectrum release behaviour; it does not imply support for every feature exposed by the device. Other Razer models are deliberately omitted from Settings and are never written to until their complete command recipe, transport interface and lighting geometry have been validated.
+Compatibility means temperature-driven uniform colour plus the configurable Off/Spectrum release behaviour. It does not imply support for every feature exposed by the device. Other Razer models are deliberately omitted from Settings and are never written to until their complete command recipe, transport interface and lighting geometry have been validated.
 
 This table is the currently implemented and validated scope, not a permanent limitation of MysticFight or Razer hardware. More Razer models can be added through explicit per-PID profiles after their required commands, HID interface, feature-report length and lighting geometry have been verified. Until such a profile exists, the model stays outside the UI and cannot receive commands.
 
