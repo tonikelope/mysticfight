@@ -2279,8 +2279,17 @@ static void UpdateThermalSchemeLayout(HWND hDlg, const bool useSharedScheme) {
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     }
 
-    ShowWindow(GetDlgItem(hDlg, IDC_TAB_THERMAL_DEVICES),
-        useSharedScheme ? SW_HIDE : SW_SHOW);
+    HWND tab = GetDlgItem(hDlg, IDC_TAB_THERMAL_DEVICES);
+    if (useSharedScheme) {
+        ShowWindow(tab, SW_HIDE);
+    }
+    else {
+        // Restoring visibility alone is not sufficient for this themed tab
+        // control after it has been hidden. Bring it back to the top of the
+        // sibling Z order so the surrounding group boxes cannot paint over it.
+        SetWindowPos(tab, HWND_TOP, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
 }
 
 static ThermalScheme ThermalSchemeForUiTargetLocked(Config& profile,
