@@ -173,7 +173,7 @@ enum StrId {
     STR_GRP_SOURCE,
     STR_GRP_THRESHOLDS, STR_CHK_USE_GENERAL_THERMAL,
     STR_LBL_LOW, STR_LBL_MED, STR_LBL_HIGH, STR_LBL_COLOR_HEX,
-    STR_BTN_RESET_DEFAULTS,
+    STR_BTN_RESET_SCHEME, STR_BTN_RESET_DEFAULTS,
     // Advanced layer
     STR_GRP_ADVANCED, STR_GRP_LIGHTING_CONTROLLERS,
     STR_LBL_ADV_SENSOR, STR_LBL_ADV_LED, STR_LBL_ADV_RAZER, STR_LBL_ADV_SMOOTH,
@@ -214,7 +214,7 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Data Source",
         L"Temperature Thresholds and Colors", L"Use general scheme for all devices",
         L"LOW:", L"MEDIUM:", L"HIGH:", L"Color (hex):",
-        L"Reset Defaults",
+        L"Reset scheme", L"Reset Defaults",
         L"Shared Thermal Engine", L"Controllers", L"Sensor Update:", L"MSI device", L"FPS:", L"Smoothing:",
         L"On release:", L"Lights off", L"Spectrum Cycling",
         L"Data Sources", L"LibreHardwareMonitor",
@@ -240,7 +240,7 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Origen de datos",
         L"Umbrales de temperatura y colores", L"Usar esquema general para todos los dispositivos",
         L"BAJA:", L"MEDIA:", L"ALTA:", L"Color (hex):",
-        L"Restaurar valores",
+        L"Restaurar esquema", L"Restaurar valores",
         L"Motor térmico compartido", L"Controladoras", L"Actualización sensor:", L"Dispositivo MSI", L"FPS:", L"Suavizado:",
         L"Al liberar:", L"Apagar luces", L"Spectrum Cycling",
         L"Orígenes de datos", L"LibreHardwareMonitor",
@@ -2901,6 +2901,21 @@ HICON CreateGrayscaleIcon(HICON hIcon) {
 
 WNDPROC oldEditProc;
 static COLORREF g_CustomColors[16] = { 0 };
+static HFONT g_selectedTabFont = nullptr;
+
+static void CreateSelectedTabFont(HWND hDlg) {
+    if (g_selectedTabFont) {
+        DeleteObject(g_selectedTabFont);
+        g_selectedTabFont = nullptr;
+    }
+    const HFONT dialogFont = reinterpret_cast<HFONT>(
+        SendMessageW(hDlg, WM_GETFONT, 0, 0));
+    LOGFONTW font = {};
+    if (dialogFont && GetObjectW(dialogFont, sizeof(font), &font) == sizeof(font)) {
+        font.lfWeight = FW_BOLD;
+        g_selectedTabFont = CreateFontIndirectW(&font);
+    }
+}
 
 /**
  * Subclass for Color Edit boxes to trigger standard Color Picker
@@ -3098,7 +3113,7 @@ static void ApplyDialogTranslations(HWND hDlg) {
     SetDlgItemTextW(hDlg, IDC_LBL_HEX1, T(STR_LBL_COLOR_HEX));
     SetDlgItemTextW(hDlg, IDC_LBL_HEX2, T(STR_LBL_COLOR_HEX));
     SetDlgItemTextW(hDlg, IDC_LBL_HEX3, T(STR_LBL_COLOR_HEX));
-    SetDlgItemTextW(hDlg, IDC_BTN_RESET, T(STR_BTN_RESET_DEFAULTS));
+    SetDlgItemTextW(hDlg, IDC_BTN_RESET, T(STR_BTN_RESET_SCHEME));
 
     // Advanced layer
     SetDlgItemTextW(hDlg, IDC_GRP_ADVANCED, T(STR_GRP_ADVANCED));
@@ -3262,6 +3277,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         SetWindowPos(hDlg, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE);
 
         LoadSettings();
+        CreateSelectedTabFont(hDlg);
 
         {
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
@@ -3346,6 +3362,27 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
     case WM_NOTIFY: {
         LPNMHDR pnm = (LPNMHDR)lParam;
+        if ((pnm->idFrom == IDC_TAB_PROFILES ||
+            pnm->idFrom == IDC_TAB_THERMAL_DEVICES) &&
+            pnm->code == NM_CUSTOMDRAW) {
+            const auto draw = reinterpret_cast<const NMCUSTOMDRAW*>(lParam);
+            LRESULT result = CDRF_DODEFAULT;
+            if (draw->dwDrawStage == CDDS_PREPAINT) {
+                result = CDRF_NOTIFYITEMDRAW;
+            }
+            else if (draw->dwDrawStage == CDDS_ITEMPREPAINT) {
+                const int selected = TabCtrl_GetCurSel(pnm->hwndFrom);
+                const bool isSelected = static_cast<int>(draw->dwItemSpec) == selected;
+                const HFONT font = isSelected && g_selectedTabFont
+                    ? g_selectedTabFont
+                    : reinterpret_cast<HFONT>(SendMessageW(
+                        pnm->hwndFrom, WM_GETFONT, 0, 0));
+                if (font) SelectObject(draw->hdc, font);
+                result = CDRF_NEWFONT;
+            }
+            SetWindowLongPtr(hDlg, DWLP_MSGRESULT, result);
+            return TRUE;
+        }
         if (pnm->idFrom == IDC_TAB_THERMAL_DEVICES &&
             pnm->code == TCN_SELCHANGING && !g_thermalTabsUpdating &&
             s_currentTab >= 0 && s_currentTab <= 4) {
@@ -3621,6 +3658,10 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         if (hBrushLow) { DeleteObject(hBrushLow); hBrushLow = NULL; }
         if (hBrushMed) { DeleteObject(hBrushMed); hBrushMed = NULL; }
         if (hBrushHigh) { DeleteObject(hBrushHigh); hBrushHigh = NULL; }
+        if (g_selectedTabFont) {
+            DeleteObject(g_selectedTabFont);
+            g_selectedTabFont = nullptr;
+        }
         ClearComboHeapData(GetDlgItem(hDlg, IDC_SENSOR_ID));
         ClearComboHeapData(GetDlgItem(hDlg, IDC_COMBO_DEVICE));
         ClearComboHeapData(GetDlgItem(hDlg, IDC_COMBO_MSI_RELEASE));
