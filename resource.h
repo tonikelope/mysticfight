@@ -68,6 +68,7 @@
 #define IDC_GRP_RAZER                   2206
 #define IDC_GRP_LIGHTING_CONTROLLERS    2207
 #define IDC_GRP_ADV_RAZER_CONTROLLER    2208
+#define IDC_GRP_THERMAL_CONTENT         2209
 
 // Profile Labels (Static text needs IDs to be hidden)
 #define IDC_LBL_PROFILE_NAME            2300

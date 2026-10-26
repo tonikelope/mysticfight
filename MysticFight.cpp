@@ -2080,6 +2080,8 @@ static void RebuildThermalDeviceTabs(HWND hDlg, const int profileIndex,
     // theme-dependent and can suppress its painting after a checkbox toggle.
     EnableWindow(tab, TRUE);
     ShowWindow(tab, SW_SHOW);
+    SetWindowPos(tab, HWND_TOP, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     SendMessageW(tab, WM_SETREDRAW, TRUE, 0);
     RedrawWindow(tab, nullptr, nullptr,
         RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW | RDW_ALLCHILDREN);
@@ -3035,6 +3037,7 @@ static void UpdateRazerPanelLayout(HWND hDlg) {
 static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
     const int profileCtrls[] = {
         IDC_GRP_MSI, IDC_GRP_RAZER, IDC_GRP_SOURCE, IDC_GRP_THRESHOLDS,
+        IDC_GRP_THERMAL_CONTENT,
         IDC_EDIT_LABEL, IDC_CHK_ACTIVE_PROFILE, IDC_COMBO_DEVICE, IDC_COMBO_AREA,
         IDC_CHK_CONTROL_MSI, IDC_LIST_RAZER_DEVICES,
         IDC_CHK_USE_GENERAL_THERMAL, IDC_TAB_THERMAL_DEVICES,
