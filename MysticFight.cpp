@@ -2062,11 +2062,20 @@ static void RebuildThermalDeviceTabs(HWND hDlg, const int profileIndex,
             selectedIndex = i;
         }
     }
-    if (IsDlgButtonChecked(hDlg, IDC_CHK_USE_GENERAL_THERMAL) == BST_CHECKED) {
+    const bool useGeneral = IsDlgButtonChecked(hDlg,
+        IDC_CHK_USE_GENERAL_THERMAL) == BST_CHECKED;
+    if (useGeneral) {
         selectedIndex = 0;
     }
     else if (selectedIndex < 0 && !g_thermalUiTargets.empty()) selectedIndex = 0;
     if (selectedIndex >= 0) TabCtrl_SetCurSel(tab, selectedIndex);
+    // The native tab control has no supported per-item disabled state. Disable
+    // the complete selector while General owns every controller, then re-enable
+    // and repaint it immediately when independent schemes are requested. The
+    // General scheme fields remain separate controls and stay fully editable.
+    EnableWindow(tab, useGeneral ? FALSE : TRUE);
+    RedrawWindow(tab, nullptr, nullptr,
+        RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
     g_thermalUiProfileIndex = profileIndex;
     g_thermalTabsUpdating = false;
     LoadThermalSchemeControls(hDlg, profileIndex);
@@ -3319,21 +3328,6 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
     case WM_NOTIFY: {
         LPNMHDR pnm = (LPNMHDR)lParam;
-        if (pnm->idFrom == IDC_TAB_THERMAL_DEVICES && pnm->code == NM_CUSTOMDRAW) {
-            const auto draw = reinterpret_cast<const NMCUSTOMDRAW*>(lParam);
-            LRESULT result = CDRF_DODEFAULT;
-            if (draw->dwDrawStage == CDDS_PREPAINT) {
-                result = CDRF_NOTIFYITEMDRAW;
-            }
-            else if (draw->dwDrawStage == CDDS_ITEMPREPAINT &&
-                IsDlgButtonChecked(hDlg, IDC_CHK_USE_GENERAL_THERMAL) == BST_CHECKED &&
-                draw->dwItemSpec > 0) {
-                SetTextColor(draw->hdc, GetSysColor(COLOR_GRAYTEXT));
-                result = CDRF_NEWFONT;
-            }
-            SetWindowLongPtr(hDlg, DWLP_MSGRESULT, result);
-            return TRUE;
-        }
         if (pnm->idFrom == IDC_TAB_THERMAL_DEVICES &&
             pnm->code == TCN_SELCHANGING && !g_thermalTabsUpdating &&
             s_currentTab >= 0 && s_currentTab <= 4) {
