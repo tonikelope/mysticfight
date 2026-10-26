@@ -2025,8 +2025,12 @@ static void RebuildThermalDeviceTabs(HWND hDlg, const int profileIndex,
         SaveThermalSchemeControls(hDlg, profileIndex);
     }
 
+    const bool useGeneral = IsDlgButtonChecked(hDlg,
+        IDC_CHK_USE_GENERAL_THERMAL) == BST_CHECKED;
     std::vector<ThermalUiTarget> targets;
-    targets.push_back({ ThermalUiTargetKind::General, L"", L"General" });
+    if (useGeneral) {
+        targets.push_back({ ThermalUiTargetKind::General, L"", L"General" });
+    }
     if (IsDlgButtonChecked(hDlg, IDC_CHK_CONTROL_MSI) == BST_CHECKED) {
         targets.push_back({ ThermalUiTargetKind::Msi, L"", L"MSI" });
     }
@@ -2066,8 +2070,6 @@ static void RebuildThermalDeviceTabs(HWND hDlg, const int profileIndex,
             selectedIndex = i;
         }
     }
-    const bool useGeneral = IsDlgButtonChecked(hDlg,
-        IDC_CHK_USE_GENERAL_THERMAL) == BST_CHECKED;
     if (useGeneral) {
         selectedIndex = 0;
     }
@@ -2078,8 +2080,6 @@ static void RebuildThermalDeviceTabs(HWND hDlg, const int profileIndex,
     // theme-dependent and can suppress its painting after a checkbox toggle.
     EnableWindow(tab, TRUE);
     ShowWindow(tab, SW_SHOW);
-    SetWindowPos(tab, HWND_TOP, 0, 0, 0, 0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     SendMessageW(tab, WM_SETREDRAW, TRUE, 0);
     RedrawWindow(tab, nullptr, nullptr,
         RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW | RDW_ALLCHILDREN);
