@@ -3526,6 +3526,52 @@ static int SelectedSettingsTab(HWND hDlg) {
         : -1;
 }
 
+// Keep the fixed Shortcuts/Advanced strip flush with the dialog's right
+// margin and give every remaining pixel to the independently scrolling
+// profile strip. Measuring the native tab items after insertion keeps the
+// layout correct for both languages and for the dialog's current DPI.
+static void LayoutSettingsTopTabs(HWND hDlg) {
+    HWND profileTabs = GetDlgItem(hDlg, IDC_TAB_PROFILES);
+    HWND actionTabs = GetDlgItem(hDlg, IDC_TAB_SETTINGS_ACTIONS);
+    if (!profileTabs || !actionTabs) return;
+
+    RECT dialogClient = {};
+    RECT profileRect = {};
+    RECT actionRect = {};
+    if (!GetClientRect(hDlg, &dialogClient) ||
+        !GetWindowRect(profileTabs, &profileRect) ||
+        !GetWindowRect(actionTabs, &actionRect)) {
+        return;
+    }
+    MapWindowPoints(HWND_DESKTOP, hDlg,
+        reinterpret_cast<POINT*>(&profileRect), 2);
+    MapWindowPoints(HWND_DESKTOP, hDlg,
+        reinterpret_cast<POINT*>(&actionRect), 2);
+
+    const int actionCount = TabCtrl_GetItemCount(actionTabs);
+    RECT lastActionItem = {};
+    if (actionCount <= 0 ||
+        !TabCtrl_GetItemRect(actionTabs, actionCount - 1, &lastActionItem)) {
+        return;
+    }
+
+    const int rightMargin = static_cast<int>(
+        (std::max)(0L, dialogClient.right - actionRect.right));
+    const int gap = static_cast<int>(
+        (std::max)(0L, actionRect.left - profileRect.right));
+    const int borderPadding = (std::max)(2, GetSystemMetrics(SM_CXEDGE) * 2);
+    const int actionWidth = lastActionItem.right + borderPadding;
+    const int actionLeft = dialogClient.right - rightMargin - actionWidth;
+    const int profileWidth = actionLeft - gap - profileRect.left;
+    if (profileWidth <= 0 || actionWidth <= 0) return;
+
+    const UINT flags = SWP_NOACTIVATE | SWP_NOZORDER;
+    SetWindowPos(profileTabs, nullptr, profileRect.left, profileRect.top,
+        profileWidth, profileRect.bottom - profileRect.top, flags);
+    SetWindowPos(actionTabs, nullptr, actionLeft, actionRect.top,
+        actionWidth, actionRect.bottom - actionRect.top, flags);
+}
+
 static void RebuildProfileTabs(HWND hDlg, int selectedTab) {
     HWND profileTabs = GetDlgItem(hDlg, IDC_TAB_PROFILES);
     HWND actionTabs = GetDlgItem(hDlg, IDC_TAB_SETTINGS_ACTIONS);
@@ -3559,6 +3605,7 @@ static void RebuildProfileTabs(HWND hDlg, int selectedTab) {
     TabCtrl_InsertItem(actionTabs, 0, &item);
     item.pszText = const_cast<wchar_t*>(T(STR_TAB_ADVANCED));
     TabCtrl_InsertItem(actionTabs, 1, &item);
+    LayoutSettingsTopTabs(hDlg);
 
     const int tabCount = static_cast<int>(labels.size()) +
         (canAddProfile ? 3 : 2);
@@ -3895,6 +3942,7 @@ static void ApplyDialogTranslations(HWND hDlg) {
             SendDlgItemMessageW(hDlg, IDC_TAB_PROFILES,
                 TCM_SETITEMW, i, (LPARAM)&tie);
         }
+        LayoutSettingsTopTabs(hDlg);
     }
 
     // Smoothing combo values are words -> translate (preserving selection)
