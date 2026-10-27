@@ -5686,7 +5686,11 @@ static void EngineThread(HWND hWnd) {
     ULONGLONG nextFrameTime = 0;
     ULONGLONG lastAcknowledgedGeneration = 0;
     DWORD targetR = 0, targetG = 0, targetB = 0;
-    bool firstRunLoop = true;
+    // A full output refresh (startup, OFF -> ON, profile/target change or SDK
+    // recovery) must begin at the current thermal colour. Smoothing is only for
+    // subsequent temperature changes; otherwise MSI visibly fades up from black
+    // while Razer already applies its first thermal frame directly.
+    bool firstThermalFrame = true;
     bool colorTransitionActive = true;
 
     while (g_Running) {
@@ -5935,6 +5939,7 @@ static void EngineThread(HWND hWnd) {
             if (rawTemp >= 0.0f) {
                 if (g_pendingStyleChange.exchange(false)) {
                     forceLEDRefresh();
+                    firstThermalFrame = true;
                     colorTransitionActive = true;
                 }
 
@@ -5945,9 +5950,9 @@ static void EngineThread(HWND hWnd) {
                         targetR, targetG, targetB);
                     colorTransitionActive = true;
 
-                    if (firstRunLoop) {
+                    if (firstThermalFrame) {
                         currR = (float)targetR; currG = (float)targetG; currB = (float)targetB;
-                        firstRunLoop = false;
+                        firstThermalFrame = false;
                     }
                 }
 
