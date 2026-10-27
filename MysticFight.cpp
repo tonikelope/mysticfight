@@ -5362,46 +5362,7 @@ static std::wstring FindMsiReleaseStyle(const std::wstring& deviceType,
     return {};
 }
 
-static int ProbeSdkOutput(const Config& cfg, bool* outputApplied) {
-    if (outputApplied) *outputApplied = false;
-    if (!g_LedsEnabled.load()) {
-        const int result = SdkSetStyle(cfg.targetDevice, cfg.targetLedIndex, L"Off");
-        if (outputApplied && result == MLAPI_OK) *outputApplied = true;
-        return result;
-    }
-
-    if (g_activeSource.load() == DataSource::Searching) {
-        int result = SdkSetStyle(cfg.targetDevice, cfg.targetLedIndex, L"Breath");
-        if (outputApplied && result == MLAPI_OK) *outputApplied = true;
-        if (result == MLAPI_OK) {
-            result = SdkSetColor(cfg.targetDevice, cfg.targetLedIndex, 255, 255, 255);
-            if (outputApplied && result == MLAPI_OK) *outputApplied = true;
-        }
-        return result;
-    }
-
-    int result = SdkSetStyle(cfg.targetDevice, cfg.targetLedIndex, L"Steady");
-    if (outputApplied && result == MLAPI_OK) *outputApplied = true;
-    if (result == MLAPI_OK) {
-        DWORD probeR = lastR.load();
-        DWORD probeG = lastG.load();
-        DWORD probeB = lastB.load();
-        if (probeR > 255 || probeG > 255 || probeB > 255) {
-            const ThermalScheme& startupScheme = cfg.useGeneralThermal
-                ? cfg.generalThermal : cfg.msiThermal;
-            probeR = GetRValue(startupScheme.colorLow);
-            probeG = GetGValue(startupScheme.colorLow);
-            probeB = GetBValue(startupScheme.colorLow);
-        }
-        result = SdkSetColor(cfg.targetDevice, cfg.targetLedIndex, probeR, probeG, probeB);
-        if (outputApplied && result == MLAPI_OK) *outputApplied = true;
-    }
-    return result;
-}
-
-static bool StartAndValidateSdk(const Config& cfg, bool validateOutput,
-    bool* outputApplied = nullptr) {
-    if (outputApplied) *outputApplied = false;
+static bool StartAndValidateSdk() {
     if (!StartSdkHost()) return false;
 
     SdkIpcRequest request = {};
@@ -5427,19 +5388,11 @@ static bool StartAndValidateSdk(const Config& cfg, bool validateOutput,
     }
 
     PublishHardwareSnapshot(*response);
-    if (validateOutput) {
-        result = ProbeSdkOutput(cfg, outputApplied);
-        if (result != MLAPI_OK) {
-            LogSDKError("SDK output validation", result);
-            TerminateSdkHost("output validation failed");
-            return false;
-        }
-    }
-
     g_lastSdkHeartbeatLog = GetTickCount64();
-    Log(validateOutput
-        ? "[SDK Supervisor] SDK Online; enumeration and LED output validated."
-        : "[SDK Supervisor] SDK Online; enumeration validated (MSI output disabled by profile)." );
+    // Do not issue a provisional lighting command here. The render loop applies
+    // the current requested state exactly once and SafeSDKCall validates that
+    // real output with the same deadlines, failure threshold and recovery path.
+    Log("[SDK Supervisor] SDK Online; initialization and enumeration validated.");
     return true;
 }
 
@@ -5645,12 +5598,6 @@ static void EngineThread(HWND hWnd) {
         return;
     }
 
-    Config startupConfig;
-    {
-        std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-        startupConfig = CopyMsiRuntimeConfig(g_cfg);
-    }
-
     bool msiControlledSinceRelease = false;
     std::wstring msiControlledDevice;
     DWORD msiControlledLedIndex = 0;
@@ -5664,10 +5611,7 @@ static void EngineThread(HWND hWnd) {
         msiReleaseFallbackLogged = false;
     };
 
-    bool startupOutputApplied = false;
-    bool sdkReady = StartAndValidateSdk(startupConfig, startupConfig.controlMsi,
-        &startupOutputApplied);
-    if (startupOutputApplied) markMsiControlled(startupConfig);
+    bool sdkReady = StartAndValidateSdk();
     if (sdkReady) {
         g_sdkFailCount = 0;
         g_sdkSuccessStreak = 0;
@@ -5679,7 +5623,7 @@ static void EngineThread(HWND hWnd) {
     }
     else {
         SetEvent(g_hHwReadyEvent); // unblock first-run settings while recovery proceeds
-        BeginSdkRecovery("startup initialization, enumeration, or output probe failed");
+        BeginSdkRecovery("startup initialization or enumeration failed");
     }
 
     int lastProcessedVersion = -1;
@@ -5747,18 +5691,10 @@ static void EngineThread(HWND hWnd) {
                     Log("[SDK Supervisor] Connecting isolated SDK host...");
                     PostMessage(hWnd, WM_APP_STATUS, 2, 0);
 
-                    const bool sameControlledTarget = msiControlledSinceRelease &&
-                        cfgLocal.controlMsi && msiControlledDevice == cfgLocal.targetDevice &&
-                        msiControlledLedIndex == static_cast<DWORD>(cfgLocal.targetLedIndex);
-                    // If a different old target still needs releasing, reconnect
-                    // without writing the new one first. The normal loop releases
-                    // the old target before it starts controlling the new target.
-                    const bool validateOutput = cfgLocal.controlMsi &&
-                        (!msiControlledSinceRelease || sameControlledTarget);
-                    bool recoveryOutputApplied = false;
-                    const bool recoveryReady = StartAndValidateSdk(
-                        cfgLocal, validateOutput, &recoveryOutputApplied);
-                    if (recoveryOutputApplied) markMsiControlled(cfgLocal);
+                    // Reconnect and enumerate without touching the LEDs. The
+                    // normal loop first releases any previous target and then
+                    // applies the current requested state exactly once.
+                    const bool recoveryReady = StartAndValidateSdk();
                     if (recoveryReady) {
                         sdkReady = true;
                         g_Resetting_sdk = false;
