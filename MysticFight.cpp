@@ -501,6 +501,9 @@ std::atomic<int> g_httpConnectionDrops{ 0 };
 std::atomic<bool> g_SettingsOpen{ false };
 std::atomic<bool> g_AboutOpen{ false };
 std::atomic<bool> g_pendingStyleChange{ true };
+// Searching is also the initial discovery state. Only a confirmed loss after
+// a working HTTP source may request MSI's white breathing fallback.
+std::atomic<bool> g_msiSearchFallbackActive{ false };
 std::atomic<int> g_ConfigVersion{ 0 };
 // Desired LED state and its diagnostic generation are one logical value.
 // Guard them together so the engine never acknowledges a mixed snapshot.
@@ -3099,7 +3102,8 @@ static TemperatureSnapshot GetTemperaturesFast(int& sampledConfigVersion) {
             if (g_httpConnectionDrops >= 2) {
                 Log("[MysticFight] Connection lost. Triggering SEARCH mode.");
                 g_activeSource = DataSource::Searching;
-                g_pendingStyleChange = true; // Trigger white fallback
+                g_msiSearchFallbackActive = true;
+                g_pendingStyleChange = true;
                 g_httpConnectionDrops = 0;
                 SetEvent(g_hSensorEvent);
             }
@@ -3137,6 +3141,7 @@ static TemperatureSnapshot GetTemperaturesFast(int& sampledConfigVersion) {
         if (sampledConfigVersion != g_ConfigVersion.load()) return {};
         if (g_activeSource == DataSource::Searching) {
             g_activeSource = DataSource::HTTP;
+            g_msiSearchFallbackActive = false;
             g_pendingStyleChange = true;
             sourceDetected = true;
         }
@@ -3264,12 +3269,17 @@ static void SwitchActiveProfile(HWND hWnd, int index) {
     {
         std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
         if (index < 0 || index >= static_cast<int>(g_Global.profiles.size())) return;
+        if (index == g_Global.activeProfileIndex) return;
         g_Global.activeProfileIndex = index;
         wcscpy_s(profileLabel, g_Global.profiles[index].label);
         g_ConfigVersion++;
-        g_lastDataSourceSearchRetry = 0;
-        g_activeSource = DataSource::Searching;
-        ClearTemperatureSnapshot();
+        // A profile change is not a data-source failure. Preserve the latest
+        // immutable sample so a shared sensor can render immediately; if the
+        // new sensor is different, the workers hold the current output until
+        // SensorThread publishes its version-checked sample.
+        if (g_activeSource.load() == DataSource::Searching) {
+            g_lastDataSourceSearchRetry = 0;
+        }
         g_pendingStyleChange = true;
     }
 
@@ -5633,6 +5643,8 @@ static void EngineThread(HWND hWnd) {
     DWORD msiControlledLedIndex = 0;
     ULONGLONG msiNextReleaseAttempt = 0;
     bool msiReleaseFallbackLogged = false;
+    enum class MsiOutputMode { Unknown, Off, Search, Steady };
+    MsiOutputMode msiOutputMode = MsiOutputMode::Unknown;
     auto markMsiControlled = [&](const Config& config) {
         msiControlledSinceRelease = true;
         msiControlledDevice = config.targetDevice;
@@ -5731,6 +5743,7 @@ static void EngineThread(HWND hWnd) {
                         g_resetCounter = 0;
                         g_sdkFailCount = 0;
                         g_sdkSuccessStreak = 0;
+                        msiOutputMode = MsiOutputMode::Unknown;
                         g_pendingStyleChange = true;
                         forceLEDRefresh();
                         colorTransitionActive = true;
@@ -5807,6 +5820,7 @@ static void EngineThread(HWND hWnd) {
                     msiControlledSinceRelease = false;
                     msiControlledDevice.clear();
                     msiNextReleaseAttempt = 0;
+                    msiOutputMode = MsiOutputMode::Unknown;
                     forceLEDRefresh();
                     g_pendingStyleChange = true;
                 }
@@ -5846,8 +5860,9 @@ static void EngineThread(HWND hWnd) {
         // OFF is an explicit user command and must win even while LHM is being
         // rediscovered. Previously the Searching branch masked it indefinitely.
         if (!g_LedsEnabled) {
-            bool styleChange = g_pendingStyleChange.exchange(false);
-            if (lastR != RGB_LEDS_OFF || styleChange) {
+            g_pendingStyleChange.exchange(false);
+            if (lastR != RGB_LEDS_OFF ||
+                msiOutputMode != MsiOutputMode::Off) {
                 LedRequestSnapshot request = CaptureLedRequest();
                 if (request.enabled) {
                     g_pendingStyleChange = true;
@@ -5856,6 +5871,7 @@ static void EngineThread(HWND hWnd) {
                     SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Off"),
                     "SetLedStyle (Off)")) {
                     markMsiControlled(cfgLocal);
+                    msiOutputMode = MsiOutputMode::Off;
                     lastR = RGB_LEDS_OFF;
                     if (!AcknowledgeLedRequest(lastAcknowledgedGeneration, request)) {
                         g_pendingStyleChange = true;
@@ -5867,24 +5883,40 @@ static void EngineThread(HWND hWnd) {
             }
         }
         else if (g_activeSource == DataSource::Searching) {
-            if (g_pendingStyleChange.exchange(false)) {
+            if (!g_msiSearchFallbackActive.load()) {
+                // Startup discovery is not a lighting command. Hold the
+                // existing hardware state until the first valid sample rather
+                // than flashing a provisional white frame.
+                g_pendingStyleChange.exchange(false);
+            }
+            else if (g_pendingStyleChange.exchange(false)) {
                 LedRequestSnapshot request = CaptureLedRequest();
                 if (!request.enabled) {
                     g_pendingStyleChange = true;
                 }
                 else {
-                    bool applied = SafeSDKCall(
-                        SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Breath"),
-                        "SetLedStyle (Search)");
-                    if (applied) markMsiControlled(cfgLocal);
-                    if (applied) {
+                    bool applied = true;
+                    bool styleChanged = false;
+                    if (msiOutputMode != MsiOutputMode::Search) {
+                        applied = SafeSDKCall(
+                            SdkSetStyle(cfgLocal.targetDevice,
+                                cfgLocal.targetLedIndex, L"Breath"),
+                            "SetLedStyle (Search)");
+                        if (applied) {
+                            markMsiControlled(cfgLocal);
+                            msiOutputMode = MsiOutputMode::Search;
+                            styleChanged = true;
+                        }
+                    }
+                    if (applied && (styleChanged || lastR != 255 ||
+                        lastG != 255 || lastB != 255)) {
                         applied = SafeSDKCall(
                             SdkSetColor(cfgLocal.targetDevice, cfgLocal.targetLedIndex, 255, 255, 255),
                             "SetLedColor (Search)");
                         if (applied) markMsiControlled(cfgLocal);
                     }
                     if (applied) {
-                        lastR = RGB_LED_REFRESH;
+                        lastR = 255; lastG = 255; lastB = 255;
                         if (!AcknowledgeLedRequest(lastAcknowledgedGeneration, request)) {
                             g_pendingStyleChange = true;
                         }
@@ -5941,18 +5973,24 @@ static void EngineThread(HWND hWnd) {
                     currB = static_cast<float>(targetB);
                     colorTransitionActive = false;
                 }
-                if (sendR != lastR || sendG != lastG || sendB != lastB) {
+                const bool steadyStyleRequired =
+                    msiOutputMode != MsiOutputMode::Steady;
+                if (steadyStyleRequired || sendR != lastR ||
+                    sendG != lastG || sendB != lastB) {
                     LedRequestSnapshot request = CaptureLedRequest();
                     if (!request.enabled) {
                         g_pendingStyleChange = true;
                     }
                     else {
                         bool applied = true;
-                        if (lastR == RGB_LEDS_OFF || lastR == RGB_LED_REFRESH) {
+                        if (steadyStyleRequired) {
                             applied = SafeSDKCall(
                                 SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Steady"),
                                 "SetLedStyle (Steady)");
-                            if (applied) markMsiControlled(cfgLocal);
+                            if (applied) {
+                                markMsiControlled(cfgLocal);
+                                msiOutputMode = MsiOutputMode::Steady;
+                            }
                         }
                         if (applied) {
                             applied = SafeSDKCall(
