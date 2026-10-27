@@ -100,7 +100,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define ID_TRAY_PROFILE_START   5000 
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v3.17";
+const wchar_t* APP_VERSION = L"v3.18";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -217,7 +217,7 @@ enum StrId {
 static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
     // ---- English (LANG_EN) ----
     {
-        L"New profile", L"Shortcuts", L"Advanced",
+        L"+", L"Shortcuts", L"Advanced",
         L"Profile Label:", L"Set as Active Profile", L"Delete profile", L"RGB Devices",
         L"MSI Hardware Control", L"Control MSI motherboard",
         L"Device:", L"Area:", L"Razer devices",
@@ -248,7 +248,7 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
     },
     // ---- Spanish (LANG_ES) ----
     {
-        L"Nuevo perfil", L"Atajos", L"Avanzado",
+        L"+", L"Atajos", L"Avanzado",
         L"Etiqueta del perfil:", L"Establecer como perfil activo", L"Borrar perfil", L"Dispositivos RGB",
         L"Control de hardware MSI", L"Controlar placa base MSI",
         L"Dispositivo:", L"Área:", L"Dispositivos Razer",
@@ -610,17 +610,18 @@ static int ShortcutsTabIndex() {
 static int AdvancedTabIndex() { return ShortcutsTabIndex() + 1; }
 
 // The top navigation is rendered as two adjacent tab controls: the profile
-// strip can overflow, while the action strip stays permanently visible.
-// These helpers keep the rest of Settings working with one logical index.
-static int SettingsActionTabCount() { return CanAddProfile() ? 3 : 2; }
+// strip contains the profiles plus the add tab and can overflow, while the
+// Shortcuts/Advanced action strip stays permanently visible. These helpers
+// keep the rest of Settings working with one logical index.
+static int SettingsActionTabCount() { return 2; }
 
 static int LogicalTabFromActionTab(const int actionTab) {
     if (actionTab < 0 || actionTab >= SettingsActionTabCount()) return -1;
-    return ProfileCount() + actionTab;
+    return ShortcutsTabIndex() + actionTab;
 }
 
 static int ActionTabFromLogicalTab(const int logicalTab) {
-    const int actionTab = logicalTab - ProfileCount();
+    const int actionTab = logicalTab - ShortcutsTabIndex();
     return actionTab >= 0 && actionTab < SettingsActionTabCount()
         ? actionTab
         : -1;
@@ -3340,18 +3341,32 @@ HICON CreateGrayscaleIcon(HICON hIcon) {
 WNDPROC oldEditProc;
 static COLORREF g_CustomColors[16] = { 0 };
 static HFONT g_selectedTabFont = nullptr;
+static HFONT g_addProfileTabFont = nullptr;
 
-static void CreateSelectedTabFont(HWND hDlg) {
+static void CreateSettingsTabFonts(HWND hDlg) {
     if (g_selectedTabFont) {
         DeleteObject(g_selectedTabFont);
         g_selectedTabFont = nullptr;
+    }
+    if (g_addProfileTabFont) {
+        DeleteObject(g_addProfileTabFont);
+        g_addProfileTabFont = nullptr;
     }
     const HFONT dialogFont = reinterpret_cast<HFONT>(
         SendMessageW(hDlg, WM_GETFONT, 0, 0));
     LOGFONTW font = {};
     if (dialogFont && GetObjectW(dialogFont, sizeof(font), &font) == sizeof(font)) {
-        font.lfWeight = FW_BOLD;
-        g_selectedTabFont = CreateFontIndirectW(&font);
+        LOGFONTW selectedFont = font;
+        selectedFont.lfWeight = FW_BOLD;
+        g_selectedTabFont = CreateFontIndirectW(&selectedFont);
+
+        // Firefox-style compact add tab: keep the native tab visuals and hit
+        // testing while making the language-neutral plus clearly prominent.
+        // Windows still owns the text layout, so the glyph remains centred.
+        LOGFONTW addProfileFont = font;
+        addProfileFont.lfHeight = MulDiv(addProfileFont.lfHeight, 3, 2);
+        addProfileFont.lfWeight = FW_SEMIBOLD;
+        g_addProfileTabFont = CreateFontIndirectW(&addProfileFont);
     }
 }
 
@@ -3464,7 +3479,9 @@ static void SelectSettingsTab(HWND hDlg, const int selectedTab,
     HWND actionTabs = GetDlgItem(hDlg, IDC_TAB_SETTINGS_ACTIONS);
     if (!profileTabs || !actionTabs) return;
 
-    if (IsProfileIndex(selectedTab)) {
+    const bool isAddProfileTab = selectedTab >= 0 &&
+        selectedTab == AddProfileTabIndex();
+    if (IsProfileIndex(selectedTab) || isAddProfileTab) {
         // Starting at the first tab and then selecting the target makes the
         // native control reveal the target at the right-hand edge instead of
         // leaving it alone at the left after a complete rebuild.
@@ -3487,7 +3504,11 @@ static void SelectSettingsTab(HWND hDlg, const int selectedTab,
 static int SelectedSettingsTab(HWND hDlg) {
     HWND profileTabs = GetDlgItem(hDlg, IDC_TAB_PROFILES);
     const int profileTab = profileTabs ? TabCtrl_GetCurSel(profileTabs) : -1;
-    if (IsProfileIndex(profileTab)) return profileTab;
+    const bool isAddProfileTab = profileTab >= 0 &&
+        profileTab == AddProfileTabIndex();
+    if (IsProfileIndex(profileTab) || isAddProfileTab) {
+        return profileTab;
+    }
 
     HWND actionTabs = GetDlgItem(hDlg, IDC_TAB_SETTINGS_ACTIONS);
     return actionTabs
@@ -3520,15 +3541,14 @@ static void RebuildProfileTabs(HWND hDlg, int selectedTab) {
         TabCtrl_InsertItem(profileTabs, i, &item);
     }
     const bool canAddProfile = static_cast<int>(labels.size()) < MAX_PROFILE_COUNT;
-    int actionIndex = 0;
     if (canAddProfile) {
         item.pszText = const_cast<wchar_t*>(T(STR_TAB_NEW_PROFILE));
-        TabCtrl_InsertItem(actionTabs, actionIndex++, &item);
+        TabCtrl_InsertItem(profileTabs, static_cast<int>(labels.size()), &item);
     }
     item.pszText = const_cast<wchar_t*>(T(STR_TAB_SHORTCUTS));
-    TabCtrl_InsertItem(actionTabs, actionIndex++, &item);
+    TabCtrl_InsertItem(actionTabs, 0, &item);
     item.pszText = const_cast<wchar_t*>(T(STR_TAB_ADVANCED));
-    TabCtrl_InsertItem(actionTabs, actionIndex, &item);
+    TabCtrl_InsertItem(actionTabs, 1, &item);
 
     const int tabCount = static_cast<int>(labels.size()) +
         (canAddProfile ? 3 : 2);
@@ -3832,19 +3852,20 @@ static void ApplyDialogTranslations(HWND hDlg) {
     SetDlgItemTextW(hDlg, IDOK, T(STR_BTN_SAVE));
     SetDlgItemTextW(hDlg, IDCANCEL, T(STR_BTN_CANCEL));
 
-    // Fixed action captions; profile tabs keep their user labels.
+    // The add tab belongs to the profile strip; the fixed action strip only
+    // contains Shortcuts and Advanced. Profile tabs keep their user labels.
+    HWND hProfileTabs = GetDlgItem(hDlg, IDC_TAB_PROFILES);
     HWND hActionTabs = GetDlgItem(hDlg, IDC_TAB_SETTINGS_ACTIONS);
+    TCITEMW tie = { 0 }; tie.mask = TCIF_TEXT;
+    if (hProfileTabs && CanAddProfile()) {
+        tie.pszText = const_cast<wchar_t*>(T(STR_TAB_NEW_PROFILE));
+        SendMessage(hProfileTabs, TCM_SETITEMW, ProfileCount(), (LPARAM)&tie);
+    }
     if (hActionTabs) {
-        TCITEMW tie = { 0 }; tie.mask = TCIF_TEXT;
-        int actionIndex = 0;
-        if (CanAddProfile()) {
-            tie.pszText = const_cast<wchar_t*>(T(STR_TAB_NEW_PROFILE));
-            SendMessage(hActionTabs, TCM_SETITEMW, actionIndex++, (LPARAM)&tie);
-        }
         tie.pszText = (LPWSTR)T(STR_TAB_SHORTCUTS);
-        SendMessage(hActionTabs, TCM_SETITEMW, actionIndex++, (LPARAM)&tie);
+        SendMessage(hActionTabs, TCM_SETITEMW, 0, (LPARAM)&tie);
         tie.pszText = (LPWSTR)T(STR_TAB_ADVANCED);
-        SendMessage(hActionTabs, TCM_SETITEMW, actionIndex, (LPARAM)&tie);
+        SendMessage(hActionTabs, TCM_SETITEMW, 1, (LPARAM)&tie);
 
         // Re-localize profile tabs still using a factory default name ("Profile N"
         // / "Perfil N" in any language) so a live language change updates them too.
@@ -4011,7 +4032,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         SetWindowPos(hDlg, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE);
 
         LoadSettings();
-        CreateSelectedTabFont(hDlg);
+        CreateSettingsTabFonts(hDlg);
 
         {
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
@@ -4097,10 +4118,15 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             else if (draw->dwDrawStage == CDDS_ITEMPREPAINT) {
                 const int selected = TabCtrl_GetCurSel(pnm->hwndFrom);
                 const bool isSelected = static_cast<int>(draw->dwItemSpec) == selected;
-                const HFONT font = isSelected && g_selectedTabFont
-                    ? g_selectedTabFont
-                    : reinterpret_cast<HFONT>(SendMessageW(
-                        pnm->hwndFrom, WM_GETFONT, 0, 0));
+                const bool isAddProfileTab = pnm->idFrom == IDC_TAB_PROFILES &&
+                    CanAddProfile() &&
+                    static_cast<int>(draw->dwItemSpec) == ProfileCount();
+                const HFONT font = isAddProfileTab && g_addProfileTabFont
+                    ? g_addProfileTabFont
+                    : isSelected && g_selectedTabFont
+                        ? g_selectedTabFont
+                        : reinterpret_cast<HFONT>(SendMessageW(
+                            pnm->hwndFrom, WM_GETFONT, 0, 0));
                 if (font) SelectObject(draw->hdc, font);
                 result = CDRF_NEWFONT;
             }
@@ -4531,6 +4557,10 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         if (g_selectedTabFont) {
             DeleteObject(g_selectedTabFont);
             g_selectedTabFont = nullptr;
+        }
+        if (g_addProfileTabFont) {
+            DeleteObject(g_addProfileTabFont);
+            g_addProfileTabFont = nullptr;
         }
         ClearComboHeapData(GetDlgItem(hDlg, IDC_SENSOR_ID));
         ClearComboHeapData(GetDlgItem(hDlg, IDC_COMBO_DEVICE));
