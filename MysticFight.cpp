@@ -192,6 +192,7 @@ enum StrId {
     STR_GRP_LANGUAGE, STR_LBL_LANGUAGE,
     // Shortcuts layer
     STR_GRP_SHORTCUTS, STR_LBL_TOGGLE, STR_LBL_ACT_PROFILE, STR_BTN_RESET_HOTKEYS,
+    STR_LBL_HOTKEY_CAPTURE,
     // Bottom bar
     STR_CHK_STARTUP, STR_CHK_NOTIFICATIONS, STR_BTN_SAVE, STR_BTN_CANCEL,
     // Smoothing combo
@@ -233,6 +234,7 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Data Sources", L"LibreHardwareMonitor",
         L"Language", L"Language:",
         L"Global Hotkeys Configuration", L"Toggle ON/OFF:", L"Activate Profile %d:", L"Reset Hotkeys",
+        L"CAPTURE MODE ACTIVE",
         L"Run on Windows startup", L"Show notifications", L"Save", L"Cancel",
         L"Disabled", L"Slow", L"Normal", L"Fast",
         L"LHM Not Found (Port 8085)", L"Configured sensor unavailable", L"Unknown Area",
@@ -264,6 +266,7 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Orígenes de datos", L"LibreHardwareMonitor",
         L"Idioma", L"Idioma:",
         L"Configuración de atajos globales", L"Activar/Desactivar:", L"Activar perfil %d:", L"Restaurar atajos",
+        L"MODO CAPTURA ACTIVADO",
         L"Ejecutar al inicio de Windows", L"Mostrar notificaciones", L"Guardar", L"Cancelar",
         L"Desactivado", L"Lento", L"Normal", L"Rápido",
         L"LHM no encontrado (Puerto 8085)", L"Sensor configurado no disponible", L"Área desconocida",
@@ -963,7 +966,14 @@ static void SafeRegisterHotkey(HWND hWnd, int id, WORD hotkeyConfig) {
     UINT vk = LOBYTE(hotkeyConfig);
     if (vk == 0) return;
     UINT mod = GetModifiersFromHotkey(hotkeyConfig);
-    RegisterHotKey(hWnd, id, mod | MOD_NOREPEAT, vk);
+    if (!RegisterHotKey(hWnd, id, mod | MOD_NOREPEAT, vk)) {
+        const DWORD error = GetLastError();
+        char message[192];
+        snprintf(message, sizeof(message),
+            "[Hotkeys] RegisterHotKey failed id=%d vk=0x%02X modifiers=0x%X error=%lu",
+            id, vk, mod, error);
+        Log(message);
+    }
 }
 
 static void RegisterAppHotkeys(HWND hWnd) {
@@ -3748,6 +3758,63 @@ static constexpr int PROFILE_HOTKEY_CONTROL_IDS[PROFILE_HOTKEY_VISIBLE_ROWS] = {
 };
 static std::vector<WORD> g_settingsProfileHotkeys;
 static int g_settingsHotkeyOffset = 0;
+static HWND g_settingsHotkeyCaptureEditor = nullptr; // UI thread only
+
+static bool IsSettingsHotkeyEditor(HWND hDlg, HWND hWnd) {
+    if (!hWnd) return false;
+    if (hWnd == GetDlgItem(hDlg, IDC_HK_TOGGLE)) return true;
+    for (const int id : PROFILE_HOTKEY_CONTROL_IDS) {
+        if (hWnd == GetDlgItem(hDlg, id)) return true;
+    }
+    return false;
+}
+
+static void SetSettingsHotkeyCaptureIndicator(HWND hDlg, HWND editor) {
+    g_settingsHotkeyCaptureEditor = editor;
+    HWND indicator = GetDlgItem(hDlg, IDC_LBL_HOTKEY_CAPTURE);
+    if (indicator) ShowWindow(indicator, editor ? SW_SHOW : SW_HIDE);
+}
+
+static LRESULT CALLBACK SettingsHotkeySubclassProc(HWND hWnd, UINT message,
+    WPARAM wParam, LPARAM lParam, UINT_PTR subclassId, DWORD_PTR referenceData) {
+    HWND hDlg = reinterpret_cast<HWND>(referenceData);
+    switch (message) {
+    case WM_SETFOCUS:
+        SetSettingsHotkeyCaptureIndicator(hDlg, hWnd);
+        break;
+    case WM_KILLFOCUS:
+        if (g_settingsHotkeyCaptureEditor == hWnd) {
+            SetSettingsHotkeyCaptureIndicator(hDlg, nullptr);
+        }
+        break;
+    case WM_NCDESTROY:
+        if (g_settingsHotkeyCaptureEditor == hWnd) {
+            SetSettingsHotkeyCaptureIndicator(hDlg, nullptr);
+        }
+        RemoveWindowSubclass(hWnd, SettingsHotkeySubclassProc, subclassId);
+        break;
+    }
+    return DefSubclassProc(hWnd, message, wParam, lParam);
+}
+
+static void InstallSettingsHotkeySubclasses(HWND hDlg) {
+    SetWindowSubclass(GetDlgItem(hDlg, IDC_HK_TOGGLE),
+        SettingsHotkeySubclassProc, 1, reinterpret_cast<DWORD_PTR>(hDlg));
+    for (const int id : PROFILE_HOTKEY_CONTROL_IDS) {
+        SetWindowSubclass(GetDlgItem(hDlg, id), SettingsHotkeySubclassProc,
+            1, reinterpret_cast<DWORD_PTR>(hDlg));
+    }
+}
+
+static void RemoveSettingsHotkeySubclasses(HWND hDlg) {
+    RemoveWindowSubclass(GetDlgItem(hDlg, IDC_HK_TOGGLE),
+        SettingsHotkeySubclassProc, 1);
+    for (const int id : PROFILE_HOTKEY_CONTROL_IDS) {
+        RemoveWindowSubclass(GetDlgItem(hDlg, id),
+            SettingsHotkeySubclassProc, 1);
+    }
+    SetSettingsHotkeyCaptureIndicator(hDlg, nullptr);
+}
 
 static void CaptureVisibleProfileHotkeys(HWND hDlg) {
     for (int slot = 0; slot < PROFILE_HOTKEY_VISIBLE_ROWS; ++slot) {
@@ -3848,29 +3915,52 @@ static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
         IDC_GRP_LANGUAGE, IDC_LBL_LANGUAGE, IDC_COMBO_LANGUAGE
     };
 
+    const bool showShortcuts = layer == LAYER_SHORTCUTS;
+
+    // A native HOTKEY_CLASS control captures every ordinary key while it owns
+    // the keyboard focus. Hiding it is not a sufficient focus transition: a
+    // hidden child can retain focus and keep consuming keys such as Print
+    // Screen. Move focus to the visible tab strip before disabling/hiding the
+    // editors. This also guarantees that entering Shortcuts never starts
+    // capture until the user explicitly focuses one of its editor boxes.
+    if (!showShortcuts && IsSettingsHotkeyEditor(hDlg, GetFocus())) {
+        const int focusTarget = layer == LAYER_PROFILE
+            ? IDC_TAB_PROFILES : IDC_TAB_SETTINGS_ACTIONS;
+        SetFocus(GetDlgItem(hDlg, focusTarget));
+    }
+    if (!showShortcuts) SetSettingsHotkeyCaptureIndicator(hDlg, nullptr);
+
     for (int id : profileCtrls) {
         HWND h = GetDlgItem(hDlg, id);
         if (!h) continue;
         const bool isRazerControl = id == IDC_GRP_RAZER || id == IDC_LIST_RAZER_DEVICES;
         ShowWindow(h, layer == LAYER_PROFILE && (!isRazerControl || g_razerAnyDetected.load()) ? SW_SHOW : SW_HIDE);
     }
-    for (int id : shortcutCtrls) { HWND h = GetDlgItem(hDlg, id); if (h) ShowWindow(h, layer == LAYER_SHORTCUTS ? SW_SHOW : SW_HIDE); }
-    if (layer == LAYER_SHORTCUTS) RefreshProfileHotkeyControls(hDlg, false);
+    for (int id : shortcutCtrls) {
+        HWND h = GetDlgItem(hDlg, id);
+        if (!h) continue;
+        if (id == IDC_HK_TOGGLE) EnableWindow(h, showShortcuts);
+        ShowWindow(h, showShortcuts ? SW_SHOW : SW_HIDE);
+    }
+    if (showShortcuts) RefreshProfileHotkeyControls(hDlg, false);
     const int visibleHotkeys = (std::max)(0, (std::min)(
         PROFILE_HOTKEY_VISIBLE_ROWS,
         static_cast<int>(g_settingsProfileHotkeys.size()) -
         g_settingsHotkeyOffset));
     for (int i = 0; i < PROFILE_HOTKEY_VISIBLE_ROWS; ++i) {
-        const bool visible = layer == LAYER_SHORTCUTS && i < visibleHotkeys;
+        const bool visible = showShortcuts && i < visibleHotkeys;
         ShowWindow(GetDlgItem(hDlg, PROFILE_HOTKEY_LABEL_IDS[i]),
             visible ? SW_SHOW : SW_HIDE);
-        ShowWindow(GetDlgItem(hDlg, PROFILE_HOTKEY_CONTROL_IDS[i]),
-            visible ? SW_SHOW : SW_HIDE);
+        HWND editor = GetDlgItem(hDlg, PROFILE_HOTKEY_CONTROL_IDS[i]);
+        EnableWindow(editor, visible);
+        ShowWindow(editor, visible ? SW_SHOW : SW_HIDE);
     }
     ShowWindow(GetDlgItem(hDlg, IDC_SCROLL_HOTKEY_PROFILES),
-        layer == LAYER_SHORTCUTS &&
+        showShortcuts &&
         static_cast<int>(g_settingsProfileHotkeys.size()) >
         PROFILE_HOTKEY_VISIBLE_ROWS ? SW_SHOW : SW_HIDE);
+    ShowWindow(GetDlgItem(hDlg, IDC_LBL_HOTKEY_CAPTURE),
+        showShortcuts && g_settingsHotkeyCaptureEditor ? SW_SHOW : SW_HIDE);
     for (int id : advancedCtrls) { HWND h = GetDlgItem(hDlg, id); if (h) ShowWindow(h, layer == LAYER_ADVANCED ? SW_SHOW : SW_HIDE); }
 }
 
@@ -3921,6 +4011,8 @@ static void ApplyDialogTranslations(HWND hDlg) {
     // Shortcuts layer
     SetDlgItemTextW(hDlg, IDC_GRP_SHORTCUTS, T(STR_GRP_SHORTCUTS));
     SetDlgItemTextW(hDlg, IDC_LBL_TOGGLE, T(STR_LBL_TOGGLE));
+    SetDlgItemTextW(hDlg, IDC_LBL_HOTKEY_CAPTURE,
+        T(STR_LBL_HOTKEY_CAPTURE));
     RefreshProfileHotkeyControls(hDlg, false);
     SetDlgItemTextW(hDlg, IDC_BTN_RESET_SHORTCUTS, T(STR_BTN_RESET_HOTKEYS));
 
@@ -4112,6 +4204,12 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
         LoadSettings();
         CreateSettingsTabFonts(hDlg);
+        if (g_selectedTabFont) {
+            SendDlgItemMessageW(hDlg, IDC_LBL_HOTKEY_CAPTURE, WM_SETFONT,
+                reinterpret_cast<WPARAM>(g_selectedTabFont), TRUE);
+        }
+        g_settingsHotkeyCaptureEditor = nullptr;
+        InstallSettingsHotkeySubclasses(hDlg);
 
         {
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
@@ -4353,6 +4451,18 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
     case WM_COMMAND: {
         int id = LOWORD(wParam);
         int code = HIWORD(wParam);
+
+        HWND commandControl = reinterpret_cast<HWND>(lParam);
+        if (code == EN_CHANGE && commandControl &&
+            commandControl == g_settingsHotkeyCaptureEditor &&
+            IsSettingsHotkeyEditor(hDlg, commandControl)) {
+            // A complete combination was captured. End capture immediately so
+            // subsequent keys cannot silently replace it until the user focuses
+            // a hotkey box again.
+            SetSettingsHotkeyCaptureIndicator(hDlg, nullptr);
+            SetFocus(GetDlgItem(hDlg, IDC_TAB_SETTINGS_ACTIONS));
+            return TRUE;
+        }
 
         if (id == IDC_CHK_ACTIVE_PROFILE && code == BN_CLICKED) {
             if (IsDlgButtonChecked(hDlg, IDC_CHK_ACTIVE_PROFILE)) {
@@ -4628,6 +4738,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         return (INT_PTR)TRUE;
 
     case WM_DESTROY:
+        RemoveSettingsHotkeySubclasses(hDlg);
         g_hSettingsDlg = NULL;
         RegisterAppHotkeys(GetParent(hDlg));
         if (hBrushLow) { DeleteObject(hBrushLow); hBrushLow = NULL; }
@@ -4767,6 +4878,10 @@ static void ShowLetsDanceNotification(HWND hWnd);
 static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_HOTKEY:
+        // Settings owns shortcut editing. Ignore even an already-queued
+        // WM_HOTKEY while it is open; WM_INITDIALOG also unregisters every
+        // configured hotkey so no new notifications should be generated.
+        if (g_SettingsOpen.load()) return 0;
         if (wParam == 1) {
             ToggleLights(hWnd);
         }
@@ -4775,7 +4890,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             SwitchActiveProfile(hWnd,
                 static_cast<int>(wParam) - PROFILE_HOTKEY_ID_BASE);
         }
-        break;
+        return 0;
 
     case WM_TRAYICON:
         if (lParam == WM_RBUTTONUP) {
