@@ -100,7 +100,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define ID_TRAY_PROFILE_START   5000 
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v3.21";
+const wchar_t* APP_VERSION = L"v3.22";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -3917,12 +3917,10 @@ static void ShowSettingsLayer(HWND hDlg, DlgLayer layer) {
 
     const bool showShortcuts = layer == LAYER_SHORTCUTS;
 
-    // A native HOTKEY_CLASS control captures every ordinary key while it owns
-    // the keyboard focus. Hiding it is not a sufficient focus transition: a
-    // hidden child can retain focus and keep consuming keys such as Print
-    // Screen. Move focus to the visible tab strip before disabling/hiding the
-    // editors. This also guarantees that entering Shortcuts never starts
-    // capture until the user explicitly focuses one of its editor boxes.
+    // A native HOTKEY_CLASS control captures ordinary keys while it owns the
+    // keyboard focus. Move focus to the visible tab strip before disabling and
+    // hiding the editors, so shortcut capture cannot remain active on another
+    // Settings layer. Entering Shortcuts itself never focuses an editor.
     if (!showShortcuts && IsSettingsHotkeyEditor(hDlg, GetFocus())) {
         const int focusTarget = layer == LAYER_PROFILE
             ? IDC_TAB_PROFILES : IDC_TAB_SETTINGS_ACTIONS;
