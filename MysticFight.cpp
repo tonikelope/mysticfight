@@ -124,9 +124,6 @@ const DWORD     SDK_SHUTDOWN_TIMEOUT_MS = 750;
 const ULONGLONG SDK_HEARTBEAT_ACTIVE_INTERVAL_MS = 60000;
 const ULONGLONG SDK_HEARTBEAT_OFF_INTERVAL_MS = 300000;
 const ULONGLONG SDK_HEARTBEAT_LOG_INTERVAL_MS = 600000;
-const ULONGLONG SDK_INITIAL_OUTPUT_SETTLE_MS = 500;
-const ULONGLONG SDK_OUTPUT_VERIFY_DELAY_MS = 250;
-const int       SDK_OUTPUT_VERIFY_MAX_ATTEMPTS = 3;
 const ULONGLONG HTTP_FAST_TIMEOUT = 1000;           // UI-blocking timeout
 const ULONGLONG HTTP_NORMAL_TIMEOUT = 60000;        // Background network timeout
 const int       HEX_COLOR_LEN = 7;                  // Format: #RRGGBB
@@ -404,8 +401,6 @@ typedef int (*LPMLAPI_Initialize)();
 typedef int (*LPMLAPI_GetDeviceInfo)(SAFEARRAY** pDevType, SAFEARRAY** pLedCount);
 typedef int (*LPMLAPI_GetDeviceNameEx)(BSTR type, DWORD index, BSTR* pDevName);
 typedef int (*LPMLAPI_GetLedInfo)(BSTR, DWORD, BSTR*, SAFEARRAY**);
-typedef int (*LPMLAPI_GetLedColor)(BSTR type, DWORD index, DWORD* R, DWORD* G, DWORD* B);
-typedef int (*LPMLAPI_GetLedStyle)(BSTR type, DWORD index, BSTR* style);
 typedef int (*LPMLAPI_SetLedColor)(BSTR type, DWORD index, DWORD R, DWORD G, DWORD B);
 typedef int (*LPMLAPI_SetLedStyle)(BSTR type, DWORD index, BSTR style);
 typedef int (*LPMLAPI_SetLedSpeed)(BSTR type, DWORD index, DWORD level);
@@ -415,7 +410,7 @@ typedef int (*LPMLAPI_Release)();
 // with --sdk-host; only that child loads and calls the vendor DLL. Fixed-size
 // packets keep the protocol simple and deterministic across anonymous pipes.
 const DWORD SDK_IPC_MAGIC = 0x4D465344; // "MFSD"
-const DWORD SDK_IPC_VERSION = 5;
+const DWORD SDK_IPC_VERSION = 4;
 const int SDK_IPC_TIMEOUT = -10001;
 const int SDK_IPC_BROKEN = -10002;
 const int SDK_HOST_LOAD_FAILED = -10003;
@@ -429,8 +424,7 @@ enum class SdkCommand : DWORD {
     SetStyle = 2,
     SetColor = 3,
     Heartbeat = 4,
-    Shutdown = 5,
-    GetState = 6
+    Shutdown = 5
 };
 
 struct SdkIpcRequest {
@@ -468,24 +462,11 @@ struct SdkIpcResponse {
     int result;
     int initializeResult;
     int deviceInfoResult;
-    DWORD r, g, b;
-    wchar_t style[128];
     DWORD deviceCount;
     SdkIpcDevice devices[SDK_IPC_MAX_DEVICES];
 };
 
-const DWORD SDK_IPC_RESPONSE_HEADER_SIZE = static_cast<DWORD>(offsetof(SdkIpcResponse, r));
-const DWORD SDK_IPC_STATE_RESPONSE_SIZE = static_cast<DWORD>(offsetof(SdkIpcResponse, devices));
-static_assert(SDK_IPC_RESPONSE_HEADER_SIZE < SDK_IPC_STATE_RESPONSE_SIZE);
-static_assert(SDK_IPC_STATE_RESPONSE_SIZE < sizeof(SdkIpcResponse));
-
-static DWORD SdkResponseSize(SdkCommand command) {
-    if (command == SdkCommand::Initialize) {
-        return static_cast<DWORD>(sizeof(SdkIpcResponse));
-    }
-    if (command == SdkCommand::GetState) return SDK_IPC_STATE_RESPONSE_SIZE;
-    return SDK_IPC_RESPONSE_HEADER_SIZE;
-}
+const DWORD SDK_IPC_RESPONSE_HEADER_SIZE = static_cast<DWORD>(offsetof(SdkIpcResponse, devices));
 
 
 // ============================================================================
@@ -611,8 +592,6 @@ LPMLAPI_SetLedSpeed     lpMLAPI_SetLedSpeed = nullptr;
 LPMLAPI_Release         lpMLAPI_Release = nullptr;
 LPMLAPI_GetDeviceNameEx lpMLAPI_GetDeviceNameEx = nullptr;
 LPMLAPI_GetLedInfo      lpMLAPI_GetLedInfo = nullptr;
-LPMLAPI_GetLedColor     lpMLAPI_GetLedColor = nullptr;
-LPMLAPI_GetLedStyle     lpMLAPI_GetLedStyle = nullptr;
 
 // Helper Accessor Macro for Thread Safety
 inline Config& GetCfgSafe() { return g_Global.profiles[g_Global.activeProfileIndex]; }
@@ -5047,12 +5026,9 @@ static bool BindMSISDK(HMODULE hLib) {
     lpMLAPI_Release = (LPMLAPI_Release)GetProcAddress(hLib, "MLAPI_Release");
     lpMLAPI_GetDeviceNameEx = (LPMLAPI_GetDeviceNameEx)GetProcAddress(hLib, "MLAPI_GetDeviceNameEx");
     lpMLAPI_GetLedInfo = (LPMLAPI_GetLedInfo)GetProcAddress(hLib, "MLAPI_GetLedInfo");
-    lpMLAPI_GetLedColor = (LPMLAPI_GetLedColor)GetProcAddress(hLib, "MLAPI_GetLedColor");
-    lpMLAPI_GetLedStyle = (LPMLAPI_GetLedStyle)GetProcAddress(hLib, "MLAPI_GetLedStyle");
 
     if (!lpMLAPI_Initialize || !lpMLAPI_GetDeviceInfo || !lpMLAPI_SetLedColor ||
-        !lpMLAPI_SetLedStyle || !lpMLAPI_GetLedColor || !lpMLAPI_GetLedStyle ||
-        !lpMLAPI_Release) {
+        !lpMLAPI_SetLedStyle || !lpMLAPI_Release) {
         Log("[MysticFight] Error: Critical MSI SDK functions missing.");
         return false;
     }
@@ -5066,7 +5042,6 @@ static const char* SdkCommandName(SdkCommand command) {
     case SdkCommand::SetColor: return "SetColor";
     case SdkCommand::Heartbeat: return "Heartbeat";
     case SdkCommand::Shutdown: return "Shutdown";
-    case SdkCommand::GetState: return "GetState";
     default: return "Unknown";
     }
 }
@@ -5256,8 +5231,7 @@ static int SendSdkCommand(SdkIpcRequest& request, SdkIpcResponse* responseOut, D
     request.version = SDK_IPC_VERSION;
     request.sequence = ++g_sdkSequence;
     const char* opName = SdkCommandName(request.command);
-    bool traceEveryCall = request.command != SdkCommand::SetColor &&
-        request.command != SdkCommand::Heartbeat && request.command != SdkCommand::GetState;
+    bool traceEveryCall = request.command != SdkCommand::SetColor && request.command != SdkCommand::Heartbeat;
 
     if (traceEveryCall) {
         char begin[192];
@@ -5273,7 +5247,9 @@ static int SendSdkCommand(SdkIpcRequest& request, SdkIpcResponse* responseOut, D
         return SDK_IPC_BROKEN;
     }
 
-    const DWORD expectedBytes = SdkResponseSize(request.command);
+    DWORD expectedBytes = request.command == SdkCommand::Initialize
+        ? static_cast<DWORD>(sizeof(SdkIpcResponse))
+        : SDK_IPC_RESPONSE_HEADER_SIZE;
     // Reuse one per-thread buffer. The snapshot payload is large, but render
     // commands only clear/read the compact header and do no heap allocation.
     static thread_local SdkIpcResponse response;
@@ -5319,7 +5295,7 @@ static int SendSdkCommand(SdkIpcRequest& request, SdkIpcResponse* responseOut, D
     }
 
     if (responseOut) {
-        ZeroMemory(responseOut, expectedBytes);
+        ZeroMemory(responseOut, sizeof(*responseOut));
         memcpy(responseOut, &response, expectedBytes);
     }
     return response.result;
@@ -5372,7 +5348,9 @@ static int SdkHostMain(HANDLE requestRead, HANDLE responseWrite) {
         SdkIpcRequest request = {};
         if (!PipeReadExact(requestRead, &request, sizeof(request))) break;
 
-        const DWORD responseBytes = SdkResponseSize(request.command);
+        DWORD responseBytes = request.command == SdkCommand::Initialize
+            ? static_cast<DWORD>(sizeof(SdkIpcResponse))
+            : SDK_IPC_RESPONSE_HEADER_SIZE;
         ZeroMemory(&response, responseBytes);
         response.magic = SDK_IPC_MAGIC;
         response.version = SDK_IPC_VERSION;
@@ -5419,26 +5397,6 @@ static int SdkHostMain(HANDLE requestRead, HANDLE responseWrite) {
                 if (response.result == MLAPI_OK && (!types || !counts)) response.result = MLAPI_ERROR;
                 if (types) SafeArrayDestroy(types);
                 if (counts) SafeArrayDestroy(counts);
-                break;
-            }
-            case SdkCommand::GetState: {
-                if (!initialized) {
-                    response.result = MLAPI_NOT_INITIALIZED;
-                    break;
-                }
-
-                BSTR style = nullptr;
-                response.result = lpMLAPI_GetLedStyle(
-                    _bstr_t(request.device), request.ledIndex, &style);
-                if (response.result == MLAPI_OK && style) {
-                    wcsncpy_s(response.style, style, _TRUNCATE);
-                }
-                if (style) SysFreeString(style);
-                if (response.result == MLAPI_OK && request.r != 0) {
-                    response.result = lpMLAPI_GetLedColor(
-                        _bstr_t(request.device), request.ledIndex,
-                        &response.r, &response.g, &response.b);
-                }
                 break;
             }
             case SdkCommand::Shutdown:
@@ -5502,43 +5460,6 @@ static int SdkSetColor(const wchar_t* device, DWORD ledIndex, DWORD r, DWORD g, 
     request.g = g;
     request.b = b;
     return SendSdkCommand(request, nullptr, timeout);
-}
-
-struct MsiOutputState {
-    std::wstring style;
-    DWORD r = 0;
-    DWORD g = 0;
-    DWORD b = 0;
-};
-
-static int SdkGetState(const wchar_t* device, DWORD ledIndex,
-    bool includeColor, MsiOutputState& state) {
-    SdkIpcRequest request = {};
-    request.command = SdkCommand::GetState;
-    wcsncpy_s(request.device, device, _TRUNCATE);
-    request.ledIndex = ledIndex;
-    request.r = includeColor ? 1 : 0;
-
-    static thread_local auto response = std::make_unique<SdkIpcResponse>();
-    ZeroMemory(response.get(), SDK_IPC_STATE_RESPONSE_SIZE);
-    const int result = SendSdkCommand(request, response.get(), SDK_RENDER_TIMEOUT_MS);
-    if (result == MLAPI_OK) {
-        state.style = response->style;
-        state.r = response->r;
-        state.g = response->g;
-        state.b = response->b;
-    }
-    return result;
-}
-
-static bool MsiOutputMatches(const MsiOutputState& actual,
-    const wchar_t* expectedStyle, bool compareColor,
-    DWORD expectedR, DWORD expectedG, DWORD expectedB) {
-    if (NormalizeMsiStyleName(actual.style) != NormalizeMsiStyleName(expectedStyle)) {
-        return false;
-    }
-    return !compareColor || (actual.r == expectedR && actual.g == expectedG &&
-        actual.b == expectedB);
 }
 
 static int SdkHeartbeat() {
@@ -5648,6 +5569,7 @@ static bool StartAndValidateSdk() {
     SdkIpcRequest request = {};
     request.command = SdkCommand::Initialize;
     auto response = std::make_unique<SdkIpcResponse>();
+    ZeroMemory(response.get(), sizeof(*response));
     int result = SendSdkCommand(request, response.get(), SDK_INIT_TIMEOUT_MS);
     if (result != MLAPI_OK) {
         if (result <= SDK_IPC_TIMEOUT) {
@@ -5668,9 +5590,8 @@ static bool StartAndValidateSdk() {
 
     PublishHardwareSnapshot(*response);
     g_lastSdkHeartbeatLog = GetTickCount64();
-    // Do not issue a provisional lighting command here. The render loop waits
-    // for the controller's bounded post-initialize settling window, applies the
-    // requested state and validates the first output through SDK read-back.
+    // Do not issue a provisional lighting command here. The render loop owns
+    // every output write and applies only a real sensor-derived state.
     Log("[SDK Supervisor] SDK Online; initialization and enumeration validated.");
     return true;
 }
@@ -5884,9 +5805,14 @@ static void EngineThread(HWND hWnd) {
     bool msiReleaseFallbackLogged = false;
     enum class MsiOutputMode { Unknown, Off, Search, Steady };
     MsiOutputMode msiOutputMode = MsiOutputMode::Unknown;
-    bool msiInitialOutputNeedsVerification = true;
-    ULONGLONG msiOutputNotBefore = 0;
-    int msiOutputVerifyAttempts = 0;
+    // Before v3.17 the cold-start path applied MSI output twice. Some MSI
+    // controllers acknowledge the first post-initialize write before it reaches
+    // the LEDs, so keep exactly two identical thermal passes at startup. The
+    // passes use the real sensor-derived colour; the provisional white Search
+    // output remains disabled by g_msiSearchFallbackActive.
+    int startupThermalPassesRemaining = 2;
+    const int startupConfigVersion = g_ConfigVersion.load();
+    const ULONGLONG startupLedGeneration = CaptureLedRequest().generation;
     auto markMsiControlled = [&](const Config& config) {
         msiControlledSinceRelease = true;
         msiControlledDevice = config.targetDevice;
@@ -5897,7 +5823,6 @@ static void EngineThread(HWND hWnd) {
 
     bool sdkReady = StartAndValidateSdk();
     if (sdkReady) {
-        msiOutputNotBefore = GetTickCount64() + SDK_INITIAL_OUTPUT_SETTLE_MS;
         g_sdkFailCount = 0;
         g_sdkSuccessStreak = 0;
         g_resetCounter = 0;
@@ -5921,82 +5846,6 @@ static void EngineThread(HWND hWnd) {
     // while Razer already applies its first thermal frame directly.
     bool firstThermalFrame = true;
     bool colorTransitionActive = true;
-
-    enum class MsiVerificationResult { Verified, Retry, Obsolete };
-    auto verifyInitialMsiOutput = [&](const Config& config, int appliedConfigVersion,
-        const LedRequestSnapshot& request, const wchar_t* expectedStyle,
-        bool compareColor, DWORD expectedR, DWORD expectedG, DWORD expectedB) {
-        const ULONGLONG verifyAt = GetTickCount64() + SDK_OUTPUT_VERIFY_DELAY_MS;
-        while (g_Running && GetTickCount64() < verifyAt) {
-            EngineWaitUntil(verifyAt);
-            if (!IsLedRequestCurrent(request) ||
-                appliedConfigVersion != g_ConfigVersion.load()) {
-                g_pendingStyleChange = true;
-                return MsiVerificationResult::Obsolete;
-            }
-        }
-        if (!g_Running || !IsLedRequestCurrent(request) ||
-            appliedConfigVersion != g_ConfigVersion.load()) {
-            g_pendingStyleChange = true;
-            return MsiVerificationResult::Obsolete;
-        }
-
-        MsiOutputState actual;
-        if (!SafeSDKCall(SdkGetState(config.targetDevice,
-            static_cast<DWORD>(config.targetLedIndex), compareColor, actual),
-            "GetLedState (initial output verification)")) {
-            g_pendingStyleChange = true;
-            return MsiVerificationResult::Retry;
-        }
-        if (!IsLedRequestCurrent(request) ||
-            appliedConfigVersion != g_ConfigVersion.load()) {
-            g_pendingStyleChange = true;
-            return MsiVerificationResult::Obsolete;
-        }
-
-        if (MsiOutputMatches(actual, expectedStyle, compareColor,
-            expectedR, expectedG, expectedB)) {
-            char message[256] = {};
-            if (compareColor) {
-                snprintf(message, sizeof(message),
-                    "[SDK Supervisor] MSI initial output verified: style=%ls color=#%02lX%02lX%02lX",
-                    actual.style.c_str(), actual.r, actual.g, actual.b);
-            }
-            else {
-                snprintf(message, sizeof(message),
-                    "[SDK Supervisor] MSI initial output verified: style=%ls",
-                    actual.style.c_str());
-            }
-            Log(message);
-            msiInitialOutputNeedsVerification = false;
-            msiOutputVerifyAttempts = 0;
-            return MsiVerificationResult::Verified;
-        }
-
-        ++msiOutputVerifyAttempts;
-        char message[384] = {};
-        if (compareColor) {
-            snprintf(message, sizeof(message),
-                "[SDK Supervisor] MSI initial output mismatch attempt=%d/%d; "
-                "expected=%ls #%02lX%02lX%02lX observed=%ls #%02lX%02lX%02lX",
-                msiOutputVerifyAttempts, SDK_OUTPUT_VERIFY_MAX_ATTEMPTS,
-                expectedStyle, expectedR, expectedG, expectedB,
-                actual.style.c_str(), actual.r, actual.g, actual.b);
-        }
-        else {
-            snprintf(message, sizeof(message),
-                "[SDK Supervisor] MSI initial output mismatch attempt=%d/%d; "
-                "expected-style=%ls observed-style=%ls",
-                msiOutputVerifyAttempts, SDK_OUTPUT_VERIFY_MAX_ATTEMPTS,
-                expectedStyle, actual.style.c_str());
-        }
-        Log(message);
-        g_pendingStyleChange = true;
-        if (msiOutputVerifyAttempts >= SDK_OUTPUT_VERIFY_MAX_ATTEMPTS) {
-            BeginSdkRecovery("MSI initial output read-back mismatch");
-        }
-        return MsiVerificationResult::Retry;
-    };
 
     while (g_Running) {
         Config cfgLocal;
@@ -6054,7 +5903,7 @@ static void EngineThread(HWND hWnd) {
 
                     // Reconnect and enumerate without touching the LEDs. The
                     // normal loop first releases any previous target and then
-                    // applies and verifies the current requested state.
+                    // applies the current requested state through its usual path.
                     const bool recoveryReady = StartAndValidateSdk();
                     if (recoveryReady) {
                         sdkReady = true;
@@ -6063,9 +5912,6 @@ static void EngineThread(HWND hWnd) {
                         g_sdkFailCount = 0;
                         g_sdkSuccessStreak = 0;
                         msiOutputMode = MsiOutputMode::Unknown;
-                        msiInitialOutputNeedsVerification = true;
-                        msiOutputNotBefore = GetTickCount64() + SDK_INITIAL_OUTPUT_SETTLE_MS;
-                        msiOutputVerifyAttempts = 0;
                         g_pendingStyleChange = true;
                         forceLEDRefresh();
                         colorTransitionActive = true;
@@ -6162,6 +6008,7 @@ static void EngineThread(HWND hWnd) {
         // Per-profile output ownership: keep MSI enumeration/health available
         // for Settings, but issue no lighting command while MSI control is off.
         if (!cfgLocal.controlMsi) {
+            startupThermalPassesRemaining = 0;
             currentTime = GetTickCount64();
             if (currentTime - g_lastSdkProgress >= SDK_HEARTBEAT_OFF_INTERVAL_MS) {
                 if (SafeSDKCall(SdkHeartbeat(), "SDK heartbeat (MSI output disabled)") &&
@@ -6179,19 +6026,10 @@ static void EngineThread(HWND hWnd) {
             continue;
         }
 
-        // The MSI SDK can acknowledge its first post-initialize write before
-        // the controller is ready to materialize it. Delay only that first
-        // enabled output; normal colour transitions keep their existing timing.
-        currentTime = GetTickCount64();
-        if (msiInitialOutputNeedsVerification && g_LedsEnabled.load() &&
-            currentTime < msiOutputNotBefore) {
-            EngineWaitUntil(msiOutputNotBefore);
-            continue;
-        }
-
         // OFF is an explicit user command and must win even while LHM is being
         // rediscovered. Previously the Searching branch masked it indefinitely.
         if (!g_LedsEnabled) {
+            startupThermalPassesRemaining = 0;
             g_pendingStyleChange.exchange(false);
             if (lastR != RGB_LEDS_OFF ||
                 msiOutputMode != MsiOutputMode::Off) {
@@ -6236,9 +6074,7 @@ static void EngineThread(HWND hWnd) {
                             "SetLedStyle (Search)");
                         if (applied) {
                             markMsiControlled(cfgLocal);
-                            if (!msiInitialOutputNeedsVerification) {
-                                msiOutputMode = MsiOutputMode::Search;
-                            }
+                            msiOutputMode = MsiOutputMode::Search;
                             styleChanged = true;
                         }
                     }
@@ -6250,18 +6086,9 @@ static void EngineThread(HWND hWnd) {
                         if (applied) markMsiControlled(cfgLocal);
                     }
                     if (applied) {
-                        bool stateConfirmed = true;
-                        if (msiInitialOutputNeedsVerification) {
-                            stateConfirmed = verifyInitialMsiOutput(cfgLocal,
-                                configVersion, request, L"Breath", false, 255, 255, 255) ==
-                                MsiVerificationResult::Verified;
-                        }
-                        if (stateConfirmed) {
-                            msiOutputMode = MsiOutputMode::Search;
-                            lastR = 255; lastG = 255; lastB = 255;
-                            if (!AcknowledgeLedRequest(lastAcknowledgedGeneration, request)) {
-                                g_pendingStyleChange = true;
-                            }
+                        lastR = 255; lastG = 255; lastB = 255;
+                        if (!AcknowledgeLedRequest(lastAcknowledgedGeneration, request)) {
+                            g_pendingStyleChange = true;
                         }
                     }
                     else if (!g_Resetting_sdk) {
@@ -6321,7 +6148,12 @@ static void EngineThread(HWND hWnd) {
                 if (steadyStyleRequired || sendR != lastR ||
                     sendG != lastG || sendB != lastB) {
                     LedRequestSnapshot request = CaptureLedRequest();
+                    if (request.generation != startupLedGeneration ||
+                        configVersion != startupConfigVersion) {
+                        startupThermalPassesRemaining = 0;
+                    }
                     if (!request.enabled) {
+                        startupThermalPassesRemaining = 0;
                         g_pendingStyleChange = true;
                     }
                     else {
@@ -6332,9 +6164,7 @@ static void EngineThread(HWND hWnd) {
                                 "SetLedStyle (Steady)");
                             if (applied) {
                                 markMsiControlled(cfgLocal);
-                                if (!msiInitialOutputNeedsVerification) {
-                                    msiOutputMode = MsiOutputMode::Steady;
-                                }
+                                msiOutputMode = MsiOutputMode::Steady;
                             }
                         }
                         if (applied) {
@@ -6344,15 +6174,31 @@ static void EngineThread(HWND hWnd) {
                             if (applied) markMsiControlled(cfgLocal);
                         }
                         if (applied) {
-                            bool stateConfirmed = true;
-                            if (msiInitialOutputNeedsVerification) {
-                                stateConfirmed = verifyInitialMsiOutput(cfgLocal,
-                                    configVersion, request, L"Steady", true,
-                                    sendR, sendG, sendB) ==
-                                    MsiVerificationResult::Verified;
+                            if (startupThermalPassesRemaining > 1) {
+                                --startupThermalPassesRemaining;
+                                // Do not acknowledge/cache the first pass. Force
+                                // the normal thermal path to issue the same
+                                // Steady + colour pair once more, then return to
+                                // the event-driven idle behaviour.
+                                msiOutputMode = MsiOutputMode::Unknown;
+                                g_pendingStyleChange = true;
+                                char message[224] = {};
+                                snprintf(message, sizeof(message),
+                                    "[SDK Supervisor] MSI startup output pass 1/2 accepted: "
+                                    "style=Steady color=#%02lX%02lX%02lX",
+                                    sendR, sendG, sendB);
+                                Log(message);
                             }
-                            if (stateConfirmed) {
-                                msiOutputMode = MsiOutputMode::Steady;
+                            else {
+                                if (startupThermalPassesRemaining == 1) {
+                                    startupThermalPassesRemaining = 0;
+                                    char message[224] = {};
+                                    snprintf(message, sizeof(message),
+                                        "[SDK Supervisor] MSI startup output pass 2/2 accepted: "
+                                        "style=Steady color=#%02lX%02lX%02lX",
+                                        sendR, sendG, sendB);
+                                    Log(message);
+                                }
                                 lastR = sendR; lastG = sendG; lastB = sendB;
                                 if (!AcknowledgeLedRequest(lastAcknowledgedGeneration, request)) {
                                     g_pendingStyleChange = true;
@@ -6377,67 +6223,7 @@ static void EngineThread(HWND hWnd) {
             ? SDK_HEARTBEAT_ACTIVE_INTERVAL_MS
             : SDK_HEARTBEAT_OFF_INTERVAL_MS;
         if (!g_Resetting_sdk && currentTime - g_lastSdkProgress >= heartbeatInterval) {
-            bool heartbeatOk = false;
-            bool outputDrifted = false;
-            if (msiControlledSinceRelease && msiOutputMode != MsiOutputMode::Unknown) {
-                const LedRequestSnapshot heartbeatRequest = CaptureLedRequest();
-                MsiOutputState actual;
-                const bool includeColor = msiOutputMode == MsiOutputMode::Steady;
-                heartbeatOk = SafeSDKCall(SdkGetState(msiControlledDevice.c_str(),
-                    msiControlledLedIndex, includeColor, actual),
-                    "GetLedState (SDK heartbeat)");
-                if (heartbeatOk && configVersion == g_ConfigVersion.load() &&
-                    IsLedRequestCurrent(heartbeatRequest)) {
-                    const wchar_t* expectedStyle = L"Off";
-                    bool compareColor = false;
-                    DWORD expectedR = 0, expectedG = 0, expectedB = 0;
-                    if (msiOutputMode == MsiOutputMode::Search) {
-                        expectedStyle = L"Breath";
-                        expectedR = expectedG = expectedB = 255;
-                    }
-                    else if (msiOutputMode == MsiOutputMode::Steady) {
-                        expectedStyle = L"Steady";
-                        compareColor = true;
-                        expectedR = lastR.load();
-                        expectedG = lastG.load();
-                        expectedB = lastB.load();
-                    }
-
-                    if (!MsiOutputMatches(actual, expectedStyle, compareColor,
-                        expectedR, expectedG, expectedB)) {
-                        char message[384] = {};
-                        if (compareColor) {
-                            snprintf(message, sizeof(message),
-                                "[SDK Supervisor] MSI output drift detected; "
-                                "expected=%ls #%02lX%02lX%02lX observed=%ls #%02lX%02lX%02lX",
-                                expectedStyle, expectedR, expectedG, expectedB,
-                                actual.style.c_str(), actual.r, actual.g, actual.b);
-                        }
-                        else {
-                            snprintf(message, sizeof(message),
-                                "[SDK Supervisor] MSI output drift detected; "
-                                "expected-style=%ls observed-style=%ls",
-                                expectedStyle, actual.style.c_str());
-                        }
-                        Log(message);
-                        if (NormalizeMsiStyleName(actual.style) !=
-                            NormalizeMsiStyleName(expectedStyle)) {
-                            msiOutputMode = MsiOutputMode::Unknown;
-                        }
-                        forceLEDRefresh();
-                        firstThermalFrame = true;
-                        colorTransitionActive = true;
-                        nextFrameTime = 0;
-                        g_pendingStyleChange = true;
-                        outputDrifted = true;
-                    }
-                }
-            }
-            else {
-                heartbeatOk = SafeSDKCall(SdkHeartbeat(), "SDK heartbeat");
-            }
-
-            if (heartbeatOk && !outputDrifted &&
+            if (SafeSDKCall(SdkHeartbeat(), "SDK heartbeat") &&
                 currentTime - g_lastSdkHeartbeatLog >= SDK_HEARTBEAT_LOG_INTERVAL_MS) {
                 char message[160];
                 snprintf(message, sizeof(message), "[SDK Supervisor] HEARTBEAT ok pid=%lu",
