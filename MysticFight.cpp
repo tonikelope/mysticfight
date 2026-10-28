@@ -5505,7 +5505,7 @@ static int SdkSetColor(const wchar_t* device, DWORD ledIndex, DWORD r, DWORD g, 
     return SendSdkCommand(request, nullptr, timeout);
 }
 
-static int SdkApplyMsiReleaseStyle(const wchar_t* device, DWORD ledIndex,
+static int SdkApplyMsiExitReleaseStyle(const wchar_t* device, DWORD ledIndex,
     const wchar_t* style, DWORD timeout = SDK_RENDER_TIMEOUT_MS) {
     if (wcscmp(style, L"Off") == 0) {
         // Some MSI controllers restore their last colour when cold-started even
@@ -6041,7 +6041,7 @@ static void EngineThread(HWND hWnd) {
                     }
                 }
 
-                const bool released = SafeSDKCall(SdkApplyMsiReleaseStyle(
+                const bool released = SafeSDKCall(SdkSetStyle(
                     msiControlledDevice.c_str(), msiControlledLedIndex, releaseStyle.c_str()),
                     "Apply MSI release style");
                 if (released) {
@@ -6102,7 +6102,7 @@ static void EngineThread(HWND hWnd) {
                     g_pendingStyleChange = true;
                 }
                 else if (SafeSDKCall(
-                    SdkApplyMsiReleaseStyle(
+                    SdkSetStyle(
                         cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Off"),
                     "Apply MSI Off")) {
                     markMsiControlled(cfgLocal);
@@ -6369,7 +6369,7 @@ static void EngineThread(HWND hWnd) {
                 }
             }
         }
-        const int result = SdkApplyMsiReleaseStyle(msiControlledDevice.c_str(),
+        const int result = SdkApplyMsiExitReleaseStyle(msiControlledDevice.c_str(),
             msiControlledLedIndex, releaseStyle.c_str(), SDK_SHUTDOWN_TIMEOUT_MS);
         if (result == MLAPI_OK) {
             char message[256] = {};
