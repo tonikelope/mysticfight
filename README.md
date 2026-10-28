@@ -42,6 +42,7 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * MSI profile changes retain the last valid sensor snapshot, while profile and settings changes retain the current output mode. They update the colour directly without pretending that LibreHardwareMonitor was lost or reapplying `Steady` to an unchanged target. Startup waits for the first valid sample and applies two identical real-colour passes; it never emits a provisional white frame. White breathing remains reserved for a confirmed loss of an already working data source.
 * After 60 seconds without SDK progress while active, the MSI heartbeat performs a non-lighting device query. While MSI output is not controlled, the same health check uses the existing 5-minute interval. Successful heartbeat logs remain throttled to one every 10 minutes.
 * Razer performs read-only device detection and any throttled KVM reopen attempt on a 5-second deadline. Detection itself never sends a lighting command.
+* During a committed Windows shutdown or restart, the window keeps `WM_ENDSESSION` active for at most four seconds while the existing MSI and Razer workers finish their configured release attempts. The UI thread never calls either hardware transport directly.
   
 ## ⚠️ Requirements
 For this tool to work, you MUST have the following installed/running:

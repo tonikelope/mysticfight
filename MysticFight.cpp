@@ -121,6 +121,7 @@ const ULONGLONG RESET_SDK_RETRY_DELAY_MS = 1000;
 const DWORD     SDK_RENDER_TIMEOUT_MS = 5000;         // Maximum time for a render command in the isolated SDK host
 const DWORD     SDK_INIT_TIMEOUT_MS = 15000;          // Initialize + enumerate timeout
 const DWORD     SDK_SHUTDOWN_TIMEOUT_MS = 750;
+const DWORD     WINDOWS_SHUTDOWN_RELEASE_WAIT_MS = 4000;
 const ULONGLONG SDK_HEARTBEAT_ACTIVE_INTERVAL_MS = 60000;
 const ULONGLONG SDK_HEARTBEAT_OFF_INTERVAL_MS = 300000;
 const ULONGLONG SDK_HEARTBEAT_LOG_INTERVAL_MS = 600000;
@@ -531,6 +532,8 @@ HANDLE g_hMutex = NULL;
 HANDLE g_hEngineEvent = NULL;   // wakes the LED engine thread on state/config changes
 HANDLE g_hHwReadyEvent = NULL;  // signaled once the engine has enumerated hardware
 HANDLE g_hRazerEvent = NULL;    // wakes the independent Razer HID worker
+HANDLE g_hMsiReleaseDoneEvent = NULL;   // MSI release attempt completed during worker shutdown
+HANDLE g_hRazerReleaseDoneEvent = NULL; // Razer release attempts completed during worker shutdown
 HWND   g_hSettingsDlg = NULL;   // the open settings dialog, or NULL (UI thread only)
 
 // Hardware SDK State
@@ -4839,11 +4842,47 @@ static void FinalCleanup(HWND hWnd) {
 
     // Worker synchronization events are intentionally not closed here. During
     // shutdown a worker may still be wedged in a bounded external call and could
-    // reference them; the OS reclaims all four handles on process exit.
+    // reference them; the OS reclaims the handles on process exit.
 
     if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); g_hMutex = NULL; }
 
     Log("[MysticFight] Cleaning finished.");
+}
+
+static void WakeWorkersForWindowsShutdown() {
+    g_Running = false;
+    if (g_hSensorEvent) SetEvent(g_hSensorEvent);
+    if (g_hEngineEvent) SetEvent(g_hEngineEvent);
+    if (g_hRazerEvent) SetEvent(g_hRazerEvent);
+}
+
+static void WaitForDeviceReleaseOnWindowsShutdown() {
+    HANDLE releaseEvents[2] = {};
+    DWORD releaseEventCount = 0;
+    if (g_hMsiReleaseDoneEvent) {
+        releaseEvents[releaseEventCount++] = g_hMsiReleaseDoneEvent;
+    }
+    if (g_hRazerReleaseDoneEvent) {
+        releaseEvents[releaseEventCount++] = g_hRazerReleaseDoneEvent;
+    }
+    if (releaseEventCount == 0) return;
+
+    Log("[MysticFight] Waiting for device release before ending the Windows session...");
+    const DWORD result = WaitForMultipleObjects(releaseEventCount, releaseEvents, TRUE,
+        WINDOWS_SHUTDOWN_RELEASE_WAIT_MS);
+    if (result == WAIT_OBJECT_0) {
+        Log("[MysticFight] Windows shutdown device release completed.");
+    }
+    else if (result == WAIT_TIMEOUT) {
+        Log("[MysticFight] Windows shutdown device release deadline exceeded.");
+    }
+    else {
+        char message[192] = {};
+        snprintf(message, sizeof(message),
+            "[MysticFight] Could not wait for Windows shutdown device release (Error: %lu).",
+            GetLastError());
+        Log(message);
+    }
 }
 
 // Defined later; used by the WM_APP_LETSDANCE handler below.
@@ -4997,9 +5036,13 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         if (wParam) { // the session is actually ending
             if (!g_windows_shutdown) {
                 Log("[MysticFight] Windows Shutdown detected...");
-                // The workers still perform their bounded configured release
-                // before closing the HID handles and isolated MSI SDK host.
-                g_windows_shutdown = true; g_Running = false;
+                g_windows_shutdown = true;
+                // Windows is allowed to terminate a background application as
+                // soon as this handler returns. Keep WM_ENDSESSION active only
+                // for the bounded device-release phase; the workers remain the
+                // sole owners of MSI IPC and Razer HID.
+                WakeWorkersForWindowsShutdown();
+                WaitForDeviceReleaseOnWindowsShutdown();
             }
             PostQuitMessage(0);
         }
@@ -5794,6 +5837,7 @@ static void EngineThread(HWND hWnd) {
             static_cast<unsigned long>(coHr));
         Log(message);
         if (g_hHwReadyEvent) SetEvent(g_hHwReadyEvent);
+        if (g_hMsiReleaseDoneEvent) SetEvent(g_hMsiReleaseDoneEvent);
         PostMessage(hWnd, WM_APP_FATAL, 1, 0);
         return;
     }
@@ -6315,6 +6359,9 @@ static void EngineThread(HWND hWnd) {
         }
         else LogSDKError("SetLedStyle (MSI release on exit)", result);
     }
+    // Signal as soon as the configured lighting release has completed. Host
+    // teardown can continue independently after WM_ENDSESSION is unblocked.
+    if (g_hMsiReleaseDoneEvent) SetEvent(g_hMsiReleaseDoneEvent);
     ShutdownSdkHost();
 
     Log("[MysticFight] Engine thread BYE BYE");
@@ -6934,6 +6981,7 @@ static void RazerThread(HWND hWnd) {
         }
     }
     for (auto& [key, runtime] : runtimes) runtime->controller.Close();
+    if (g_hRazerReleaseDoneEvent) SetEvent(g_hRazerReleaseDoneEvent);
 }
 // ============================================================================
 // MAIN ENTRY POINT
@@ -7013,6 +7061,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
             g_hEngineEvent  = CreateEventW(NULL, FALSE, FALSE, NULL); // auto-reset
             g_hRazerEvent   = CreateEventW(NULL, FALSE, FALSE, NULL); // auto-reset
             g_hHwReadyEvent = CreateEventW(NULL, TRUE,  FALSE, NULL); // manual-reset
+            g_hMsiReleaseDoneEvent = CreateEventW(NULL, TRUE, FALSE, NULL); // manual-reset
+            g_hRazerReleaseDoneEvent = CreateEventW(NULL, TRUE, FALSE, NULL); // manual-reset
 
             sThread = std::thread(SensorThread);
             eThread = std::thread(EngineThread, hWnd);

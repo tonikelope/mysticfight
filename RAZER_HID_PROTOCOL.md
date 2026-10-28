@@ -103,8 +103,10 @@ colour settles, that device receives no repeated frame writes.
 A release command is sent only to a compatible device that MysticFight
 successfully controlled, when a new active profile no longer selects it or the
 application exits. A committed Windows shutdown/restart uses the same bounded
-release path before the HID handles are closed. Mere detection never sends a
-release command.
+release path before the HID handles are closed. The hidden window keeps
+`WM_ENDSESSION` active for at most four seconds while the MSI and Razer workers
+finish their release attempts; it does not send HID commands itself. Mere
+detection never sends a release command.
 
 ## Timing and safety decisions
 
