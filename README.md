@@ -29,7 +29,7 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * **Opt-in global shortcuts:** Every profile and the lights toggle can have an independent global shortcut. All shortcuts start unassigned, including newly created profiles.
 * **Focused shortcut capture:** Global shortcuts are suspended while Settings is open. A clear capture indicator appears only while a shortcut box has focus, and capture ends as soon as a combination is accepted so later keystrokes cannot silently replace it.
 * **SDK auto-reset:** Automatic reset mechanism for the Mystic Light service in case of failure.
-* **Reliable MSI cold-start output:** MysticFight waits for the first valid sensor sample, selects the real thermal `Steady` state once and reinforces only its identical colour once. This preserves the cold-start nudge without reapplying the style and visibly resetting controllers that already accepted it. Normal rendering, profile changes and OFF/ON operations retain their event-driven single-write behaviour.
+* **Deterministic MSI cold-start output:** MysticFight waits for the first valid sensor sample, selects the real thermal `Steady` state once and sends its sensor-derived colour once. Normal rendering, profile changes and OFF/ON operations retain their event-driven single-write behaviour.
   <p align="center"><img src="docs/assets/mf_settings.png" width="500" /></p>
 
 ### Timing and idle behaviour
@@ -39,10 +39,10 @@ Fortunately, while Mystic Light "client" is a mess, people who programmed the **
 * The configured 15, 20, or 25 FPS is the maximum colour-transition cadence (approximately 66, 50, or 40 ms per step), not a continuous device-write rate. Smoothing continues at that cadence until the visible RGB reaches its target.
 * Each Razer device maintains its own interpolation state. Two selected devices can therefore follow different thermal thresholds and colours without coupling their frame schedules.
 * Once a colour is stable, MSI and Razer stop high-frequency rendering and send no repeated lighting command. A sensor/source change, configuration change, device deadline, retry, or shutdown wakes the relevant worker immediately.
-* MSI profile changes retain the last valid sensor snapshot, while profile and settings changes retain the current output mode. They update the colour directly without pretending that LibreHardwareMonitor was lost or reapplying `Steady` to an unchanged target. Startup waits for the first valid sample, selects `Steady` once and repeats only the same colour; it never emits a provisional white frame. White breathing remains reserved for a confirmed loss of an already working data source.
+* MSI profile changes retain the last valid sensor snapshot, while profile and settings changes retain the current output mode. They update the colour directly without pretending that LibreHardwareMonitor was lost or reapplying `Steady` to an unchanged target. Startup waits for the first valid sample, selects `Steady` once and sends the thermal colour once; it never emits a provisional white frame. White breathing remains reserved for a confirmed loss of an already working data source.
 * After 60 seconds without SDK progress while active, the MSI heartbeat performs a non-lighting device query. While MSI output is not controlled, the same health check uses the existing 5-minute interval. Successful heartbeat logs remain throttled to one every 10 minutes.
 * Razer performs read-only device detection and any throttled KVM reopen attempt on a 5-second deadline. Detection itself never sends a lighting command.
-* During a committed Windows shutdown or restart, the window keeps `WM_ENDSESSION` active for at most four seconds while the existing MSI and Razer workers finish their configured release attempts. The UI thread never calls either hardware transport directly.
+* During a committed Windows shutdown or restart, the window keeps `WM_ENDSESSION` active for at most four seconds while the existing MSI and Razer workers finish their configured release attempts. MSI completion includes the bounded `MLAPI_Release`/SDK-host shutdown, so Windows cannot terminate the process between the release style and the API hand-off. The UI thread never calls either hardware transport directly.
   
 ## ⚠️ Requirements
 For this tool to work, you MUST have the following installed/running:
