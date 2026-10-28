@@ -5505,25 +5505,6 @@ static int SdkSetColor(const wchar_t* device, DWORD ledIndex, DWORD r, DWORD g, 
     return SendSdkCommand(request, nullptr, timeout);
 }
 
-static int SdkApplyMsiExitReleaseStyle(const wchar_t* device, DWORD ledIndex,
-    const wchar_t* style, DWORD timeout = SDK_RENDER_TIMEOUT_MS) {
-    if (wcscmp(style, L"Off") == 0) {
-        // Some MSI controllers restore their last colour when cold-started even
-        // after accepting the volatile Off style. Prime that retained colour
-        // with black first, then still issue the documented literal Off style.
-        // If the optional pre-clear fails, Off remains the authoritative release
-        // command and its result is returned to the existing recovery logic.
-        const int blackResult = SdkSetColor(device, ledIndex, 0, 0, 0, timeout);
-        if (blackResult == MLAPI_OK) {
-            Log("[MysticFight] MSI Off release pre-cleared to #000000.");
-        }
-        else {
-            LogSDKError("SetLedColor (MSI Off pre-clear)", blackResult);
-        }
-    }
-    return SdkSetStyle(device, ledIndex, style, timeout);
-}
-
 static int SdkHeartbeat() {
     SdkIpcRequest request = {};
     request.command = SdkCommand::Heartbeat;
@@ -5868,12 +5849,11 @@ static void EngineThread(HWND hWnd) {
     bool msiReleaseFallbackLogged = false;
     enum class MsiOutputMode { Unknown, Off, Search, Steady };
     MsiOutputMode msiOutputMode = MsiOutputMode::Unknown;
-    // Before v3.17 the cold-start path applied MSI output twice. Some MSI
-    // controllers acknowledge the first post-initialize write before it reaches
-    // the LEDs, so keep exactly two identical thermal passes at startup. The
-    // passes use the real sensor-derived colour; the provisional white Search
-    // output remains disabled by g_msiSearchFallbackActive.
-    int startupThermalPassesRemaining = 2;
+    // Some MSI controllers acknowledge the first post-initialize output before
+    // it reaches the LEDs. Select Steady exactly once, then reinforce only the
+    // same sensor-derived colour. Reapplying Steady is visibly disruptive on
+    // controllers that already accepted the first write.
+    int startupColorWritesRemaining = 2;
     const int startupConfigVersion = g_ConfigVersion.load();
     const ULONGLONG startupLedGeneration = CaptureLedRequest().generation;
     auto markMsiControlled = [&](const Config& config) {
@@ -6072,7 +6052,7 @@ static void EngineThread(HWND hWnd) {
         // Per-profile output ownership: keep MSI enumeration/health available
         // for Settings, but issue no lighting command while MSI control is off.
         if (!cfgLocal.controlMsi) {
-            startupThermalPassesRemaining = 0;
+            startupColorWritesRemaining = 0;
             currentTime = GetTickCount64();
             if (currentTime - g_lastSdkProgress >= SDK_HEARTBEAT_OFF_INTERVAL_MS) {
                 if (SafeSDKCall(SdkHeartbeat(), "SDK heartbeat (MSI output disabled)") &&
@@ -6093,7 +6073,7 @@ static void EngineThread(HWND hWnd) {
         // OFF is an explicit user command and must win even while LHM is being
         // rediscovered. Previously the Searching branch masked it indefinitely.
         if (!g_LedsEnabled) {
-            startupThermalPassesRemaining = 0;
+            startupColorWritesRemaining = 0;
             g_pendingStyleChange.exchange(false);
             if (lastR != RGB_LEDS_OFF ||
                 msiOutputMode != MsiOutputMode::Off) {
@@ -6215,10 +6195,10 @@ static void EngineThread(HWND hWnd) {
                     LedRequestSnapshot request = CaptureLedRequest();
                     if (request.generation != startupLedGeneration ||
                         configVersion != startupConfigVersion) {
-                        startupThermalPassesRemaining = 0;
+                        startupColorWritesRemaining = 0;
                     }
                     if (!request.enabled) {
-                        startupThermalPassesRemaining = 0;
+                        startupColorWritesRemaining = 0;
                         g_pendingStyleChange = true;
                     }
                     else {
@@ -6239,28 +6219,28 @@ static void EngineThread(HWND hWnd) {
                             if (applied) markMsiControlled(cfgLocal);
                         }
                         if (applied) {
-                            if (startupThermalPassesRemaining > 1) {
-                                --startupThermalPassesRemaining;
-                                // Do not acknowledge/cache the first pass. Force
-                                // the normal thermal path to issue the same
-                                // Steady + colour pair once more, then return to
-                                // the event-driven idle behaviour.
-                                msiOutputMode = MsiOutputMode::Unknown;
+                            if (startupColorWritesRemaining > 1) {
+                                --startupColorWritesRemaining;
+                                // Keep the confirmed Steady mode but do not cache
+                                // the first colour yet. The next thermal pass can
+                                // therefore reinforce only SetColor without the
+                                // visible reset caused by a second SetStyle.
                                 g_pendingStyleChange = true;
-                                char message[224] = {};
+                                char message[256] = {};
                                 snprintf(message, sizeof(message),
-                                    "[SDK Supervisor] MSI startup output pass 1/2 accepted: "
-                                    "style=Steady color=#%02lX%02lX%02lX",
+                                    "[SDK Supervisor] MSI startup output accepted: "
+                                    "style=Steady color=#%02lX%02lX%02lX; "
+                                    "scheduling color-only reinforcement",
                                     sendR, sendG, sendB);
                                 Log(message);
                             }
                             else {
-                                if (startupThermalPassesRemaining == 1) {
-                                    startupThermalPassesRemaining = 0;
+                                if (startupColorWritesRemaining == 1) {
+                                    startupColorWritesRemaining = 0;
                                     char message[224] = {};
                                     snprintf(message, sizeof(message),
-                                        "[SDK Supervisor] MSI startup output pass 2/2 accepted: "
-                                        "style=Steady color=#%02lX%02lX%02lX",
+                                        "[SDK Supervisor] MSI startup color-only reinforcement accepted: "
+                                        "color=#%02lX%02lX%02lX",
                                         sendR, sendG, sendB);
                                     Log(message);
                                 }
@@ -6369,7 +6349,7 @@ static void EngineThread(HWND hWnd) {
                 }
             }
         }
-        const int result = SdkApplyMsiExitReleaseStyle(msiControlledDevice.c_str(),
+        const int result = SdkSetStyle(msiControlledDevice.c_str(),
             msiControlledLedIndex, releaseStyle.c_str(), SDK_SHUTDOWN_TIMEOUT_MS);
         if (result == MLAPI_OK) {
             char message[256] = {};
