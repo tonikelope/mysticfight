@@ -100,7 +100,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define ID_TRAY_PROFILE_START   5000 
 
 // Application Metadata
-const wchar_t* APP_VERSION = L"v3.28";
+const wchar_t* APP_VERSION = L"v3.29";
 const wchar_t* LOG_FILENAME = L"debug.log";
 const wchar_t* INI_FILE = L".\\config.ini";
 const wchar_t* TASK_NAME = L"MysticFight";
@@ -492,7 +492,11 @@ _COM_SMARTPTR_TYPEDEF(ILogonTrigger, __uuidof(ILogonTrigger));
 // GLOBAL STATE VARIABLES
 // ============================================================================
 
+// g_Global is the editable/persisted model used by Settings. Worker threads
+// consume only g_RuntimeGlobal, which changes atomically on Save/profile switch.
+// This prevents tab navigation from leaking uncommitted draft values to RGB.
 GlobalConfig g_Global;
+GlobalConfig g_RuntimeGlobal;
 std::recursive_mutex g_cfgMutex;
 
 // Atomic Logic Flags
@@ -599,6 +603,9 @@ LPMLAPI_GetLedInfo      lpMLAPI_GetLedInfo = nullptr;
 // Helper Accessor Macro for Thread Safety
 inline Config& GetCfgSafe() { return g_Global.profiles[g_Global.activeProfileIndex]; }
 #define g_cfg GetCfgSafe()
+inline const Config& GetRuntimeCfgSafe() {
+    return g_RuntimeGlobal.profiles[g_RuntimeGlobal.activeProfileIndex];
+}
 
 static int ProfileCount() {
     std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
@@ -1201,6 +1208,158 @@ static std::set<std::wstring> ParseRazerDeviceIds(const wchar_t* value) {
         start = end + 1;
     }
     return result;
+}
+
+struct RuntimeConfigChanges {
+    bool sensorInputs = false;
+    bool sensorTiming = false;
+    bool msi = false;
+    bool razer = false;
+
+    bool Any() const {
+        return sensorInputs || sensorTiming || msi || razer;
+    }
+};
+
+static bool SameThermalScheme(const ThermalScheme& left,
+    const ThermalScheme& right) {
+    return left.dataSource == right.dataSource &&
+        left.sensorId == right.sensorId &&
+        left.tempLow == right.tempLow &&
+        left.tempMed == right.tempMed &&
+        left.tempHigh == right.tempHigh &&
+        left.colorLow == right.colorLow &&
+        left.colorMed == right.colorMed &&
+        left.colorHigh == right.colorHigh;
+}
+
+static bool SameThermalInput(const ThermalScheme& left,
+    const ThermalScheme& right) {
+    return left.dataSource == right.dataSource &&
+        left.sensorId == right.sensorId;
+}
+
+static const Config* ActiveRuntimeProfile(const GlobalConfig& config) {
+    if (config.activeProfileIndex < 0 ||
+        config.activeProfileIndex >= static_cast<int>(config.profiles.size())) {
+        return nullptr;
+    }
+    return &config.profiles[config.activeProfileIndex];
+}
+
+static const ThermalScheme& MsiRuntimeScheme(const Config& config) {
+    return config.useGeneralThermal ? config.generalThermal : config.msiThermal;
+}
+
+static const ThermalScheme& RazerRuntimeScheme(const Config& config,
+    const std::wstring& deviceKey) {
+    if (config.useGeneralThermal) return config.generalThermal;
+    const auto scheme = config.razerThermals.find(deviceKey);
+    return scheme != config.razerThermals.end()
+        ? scheme->second : config.generalThermal;
+}
+
+static RazerDeviceSettings RazerRuntimeSettings(const GlobalConfig& config,
+    const std::wstring& deviceKey) {
+    const auto settings = config.razerDeviceSettings.find(deviceKey);
+    return settings != config.razerDeviceSettings.end()
+        ? settings->second : RazerDeviceSettings{};
+}
+
+static bool SameRazerDeviceSettings(const RazerDeviceSettings& left,
+    const RazerDeviceSettings& right) {
+    return left.refreshFPS == right.refreshFPS &&
+        left.releaseEffect == right.releaseEffect;
+}
+
+static bool SameRazerSettingsMaps(
+    const std::map<std::wstring, RazerDeviceSettings>& left,
+    const std::map<std::wstring, RazerDeviceSettings>& right) {
+    if (left.size() != right.size()) return false;
+    for (const auto& [deviceKey, settings] : left) {
+        const auto other = right.find(deviceKey);
+        if (other == right.end() ||
+            !SameRazerDeviceSettings(settings, other->second)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static RuntimeConfigChanges CompareRuntimeConfig(const GlobalConfig& before,
+    const GlobalConfig& after) {
+    RuntimeConfigChanges changes;
+    changes.sensorTiming = before.sensorUpdateMS != after.sensorUpdateMS;
+    changes.sensorInputs = wcscmp(before.lhmServerUrl, after.lhmServerUrl) != 0;
+
+    const Config* oldProfile = ActiveRuntimeProfile(before);
+    const Config* newProfile = ActiveRuntimeProfile(after);
+    if (!oldProfile || !newProfile) {
+        changes.sensorInputs = true;
+        changes.msi = true;
+        changes.razer = true;
+        return changes;
+    }
+
+    if (oldProfile->controlMsi != newProfile->controlMsi) {
+        changes.msi = true;
+        changes.sensorInputs = true;
+    }
+    if (oldProfile->controlMsi || newProfile->controlMsi) {
+        const ThermalScheme& oldScheme = MsiRuntimeScheme(*oldProfile);
+        const ThermalScheme& newScheme = MsiRuntimeScheme(*newProfile);
+        changes.msi = changes.msi ||
+            wcscmp(oldProfile->targetDevice, newProfile->targetDevice) != 0 ||
+            oldProfile->targetLedIndex != newProfile->targetLedIndex ||
+            !SameThermalScheme(oldScheme, newScheme) ||
+            before.ledRefreshFPS != after.ledRefreshFPS ||
+            before.smoothingFactor != after.smoothingFactor ||
+            before.msiReleaseEffect != after.msiReleaseEffect ||
+            before.msiReleaseStyle != after.msiReleaseStyle;
+        changes.sensorInputs = changes.sensorInputs ||
+            !SameThermalInput(oldScheme, newScheme);
+    }
+
+    const std::set<std::wstring> oldSelected = ParseRazerDeviceIds(
+        oldProfile->razerDeviceIds.c_str());
+    const std::set<std::wstring> newSelected = ParseRazerDeviceIds(
+        newProfile->razerDeviceIds.c_str());
+    if (oldProfile->controlRazer != newProfile->controlRazer ||
+        ((oldProfile->controlRazer || newProfile->controlRazer) &&
+            oldSelected != newSelected)) {
+        changes.razer = true;
+        changes.sensorInputs = true;
+    }
+    if (oldProfile->controlRazer || newProfile->controlRazer) {
+        changes.razer = changes.razer ||
+            before.smoothingFactor != after.smoothingFactor;
+        std::set<std::wstring> comparedKeys = oldSelected;
+        comparedKeys.insert(newSelected.begin(), newSelected.end());
+        if (comparedKeys.empty()) {
+            changes.razer = changes.razer ||
+                !SameThermalScheme(oldProfile->generalThermal,
+                    newProfile->generalThermal) ||
+                !SameRazerSettingsMaps(before.razerDeviceSettings,
+                    after.razerDeviceSettings);
+            changes.sensorInputs = changes.sensorInputs ||
+                !SameThermalInput(oldProfile->generalThermal,
+                    newProfile->generalThermal);
+        }
+        for (const auto& deviceKey : comparedKeys) {
+            const ThermalScheme& oldScheme = RazerRuntimeScheme(
+                *oldProfile, deviceKey);
+            const ThermalScheme& newScheme = RazerRuntimeScheme(
+                *newProfile, deviceKey);
+            changes.razer = changes.razer ||
+                !SameThermalScheme(oldScheme, newScheme) ||
+                !SameRazerDeviceSettings(
+                    RazerRuntimeSettings(before, deviceKey),
+                    RazerRuntimeSettings(after, deviceKey));
+            changes.sensorInputs = changes.sensorInputs ||
+                !SameThermalInput(oldScheme, newScheme);
+        }
+    }
+    return changes;
 }
 
 static std::uint64_t StableUtf16Hash(const std::wstring& value,
@@ -3074,6 +3233,26 @@ static void ClearTemperatureSnapshot() {
     g_asyncTemperatures.clear();
 }
 
+static void NotifyRuntimeConfigChanges(const RuntimeConfigChanges& changes,
+    const char* context, const int configVersion) {
+    if (!changes.Any()) return;
+
+    char message[224] = {};
+    snprintf(message, sizeof(message),
+        "[Config] %s version=%d sensor=%s MSI=%s Razer=%s",
+        context, configVersion,
+        (changes.sensorInputs || changes.sensorTiming) ? "changed" : "unchanged",
+        changes.msi ? "changed" : "unchanged",
+        changes.razer ? "changed" : "unchanged");
+    Log(message);
+
+    if ((changes.sensorInputs || changes.sensorTiming) && g_hSensorEvent) {
+        SetEvent(g_hSensorEvent);
+    }
+    if (changes.msi && g_hEngineEvent) SetEvent(g_hEngineEvent);
+    if (changes.razer && g_hRazerEvent) SetEvent(g_hRazerEvent);
+}
+
 static float TemperatureFromSnapshot(const TemperatureSnapshot& snapshot,
     const std::wstring& sensorId) {
     const auto value = snapshot.find(sensorId);
@@ -3095,8 +3274,8 @@ static TemperatureSnapshot GetTemperaturesFast(int& sampledConfigVersion) {
     {
         std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
         sampledConfigVersion = g_ConfigVersion.load();
-        wcscpy_s(localURL, g_cfg.webServerUrl);
-        sensorIds = ConfiguredSensorIds(g_cfg);
+        wcscpy_s(localURL, GetRuntimeCfgSafe().webServerUrl);
+        sensorIds = ConfiguredSensorIds(GetRuntimeCfgSafe());
     }
 
     ULONGLONG currentTime = GetTickCount64();
@@ -3181,20 +3360,20 @@ static void SensorThread() {
         TemperatureSnapshot sampledTemperatures = GetTemperaturesFast(sampledConfigVersion);
         Config activeConfig;
         bool publishSample = false;
+        TemperatureSnapshot previousTemperatures;
         {
             // Config writers use the same mutex while advancing the version.
-            // An HTTP result from an older profile/config is therefore discarded.
+            // Keep validation and publication in one critical section: otherwise
+            // a writer could advance the version after this check but before the
+            // temperature map is replaced, allowing a stale HTTP result back in.
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
             if (sampledConfigVersion == g_ConfigVersion.load()) {
-                activeConfig = g_cfg;
+                activeConfig = GetRuntimeCfgSafe();
+                std::lock_guard<std::mutex> temperatureLock(g_temperatureMutex);
+                previousTemperatures = std::move(g_asyncTemperatures);
+                g_asyncTemperatures = sampledTemperatures;
                 publishSample = true;
             }
-        }
-        TemperatureSnapshot previousTemperatures;
-        if (publishSample) {
-            std::lock_guard<std::mutex> lock(g_temperatureMutex);
-            previousTemperatures = std::move(g_asyncTemperatures);
-            g_asyncTemperatures = sampledTemperatures;
         }
         const bool sourceChanged = sourceBeforeSample != g_activeSource.load();
         if (publishSample && g_LedsEnabled.load()) {
@@ -3231,7 +3410,7 @@ static void SensorThread() {
 
         if (g_LedsEnabled) {
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-            waitMs = (DWORD)g_Global.sensorUpdateMS;
+            waitMs = (DWORD)g_RuntimeGlobal.sensorUpdateMS;
         }
 
         WaitForSingleObject(g_hSensorEvent, waitMs);
@@ -3281,28 +3460,33 @@ static bool ExtractMSIDLL() {
 
 static void SwitchActiveProfile(HWND hWnd, int index) {
     wchar_t profileLabel[64] = {};
+    RuntimeConfigChanges runtimeChanges;
+    int runtimeVersion = g_ConfigVersion.load();
     {
         std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
         if (index < 0 || index >= static_cast<int>(g_Global.profiles.size())) return;
         if (index == g_Global.activeProfileIndex) return;
         g_Global.activeProfileIndex = index;
         wcscpy_s(profileLabel, g_Global.profiles[index].label);
-        g_ConfigVersion++;
+        runtimeChanges = CompareRuntimeConfig(g_RuntimeGlobal, g_Global);
+        g_RuntimeGlobal = g_Global;
+        if (runtimeChanges.Any()) {
+            if (runtimeChanges.sensorInputs) ClearTemperatureSnapshot();
+            runtimeVersion = ++g_ConfigVersion;
+        }
         // A profile change is not a data-source failure. Preserve the latest
         // immutable sample so a shared sensor can render immediately; if the
         // new sensor is different, the workers hold the current output until
         // SensorThread publishes its version-checked sample.
-        if (g_activeSource.load() == DataSource::Searching) {
+        if (runtimeChanges.sensorInputs &&
+            g_activeSource.load() == DataSource::Searching) {
             g_lastDataSourceSearchRetry = 0;
         }
-        g_pendingStyleChange = true;
     }
 
     SaveSettings();
-
-    SetEvent(g_hSensorEvent);
-    SetEvent(g_hEngineEvent);
-    if (g_hRazerEvent) SetEvent(g_hRazerEvent);
+    NotifyRuntimeConfigChanges(runtimeChanges,
+        "active profile switched", runtimeVersion);
 
     wchar_t msg[128];
     swprintf_s(msg, T(STR_NOTIF_SWITCHED), profileLabel);
@@ -4360,6 +4544,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                         s_snapshot.profiles.size(), 0);
                     g_settingsProfileHotkeys.resize(
                         g_Global.profiles.size(), 0);
+                    g_RuntimeGlobal = s_snapshot;
                     SaveProfiles(s_snapshot);
                     SaveHotkeys(s_snapshot.hotkeys,
                         static_cast<int>(s_snapshot.profiles.size()));
@@ -4507,6 +4692,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                         g_settingsProfileHotkeys.begin() + deletedIndex);
                 }
                 g_settingsProfileHotkeys.resize(remainingCount, 0);
+                g_RuntimeGlobal = s_snapshot;
                 SaveProfiles(s_snapshot);
                 SaveHotkeys(s_snapshot.hotkeys,
                     static_cast<int>(s_snapshot.profiles.size()));
@@ -4594,22 +4780,29 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                 return TRUE;
             }
 
-            std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+            RuntimeConfigChanges runtimeChanges;
+            int runtimeVersion = g_ConfigVersion.load();
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
 
-            g_Global.activeProfileIndex = s_tempActiveIndex;
+                g_Global.activeProfileIndex = s_tempActiveIndex;
 
-            if (IsProfileIndex(s_currentTab)) SaveUIToProfile(hDlg, s_currentTab);
-            SaveHotkeysFromUI(hDlg);
-            SaveGlobalAdvancedFromUI(hDlg);
+                if (IsProfileIndex(s_currentTab)) SaveUIToProfile(hDlg, s_currentTab);
+                SaveHotkeysFromUI(hDlg);
+                SaveGlobalAdvancedFromUI(hDlg);
 
-            SetStartupTask(IsDlgButtonChecked(hDlg, IDC_CHK_STARTUP) == BST_CHECKED);
-            g_NotificationsEnabled = (IsDlgButtonChecked(hDlg, IDC_CHK_NOTIFICATIONS) == BST_CHECKED);
-            SaveSettings();
-            g_ConfigVersion++;
-            ClearTemperatureSnapshot();
-            SetEvent(g_hSensorEvent);
-            SetEvent(g_hEngineEvent);
-            if (g_hRazerEvent) SetEvent(g_hRazerEvent);
+                SetStartupTask(IsDlgButtonChecked(hDlg, IDC_CHK_STARTUP) == BST_CHECKED);
+                g_NotificationsEnabled = (IsDlgButtonChecked(hDlg, IDC_CHK_NOTIFICATIONS) == BST_CHECKED);
+                runtimeChanges = CompareRuntimeConfig(g_RuntimeGlobal, g_Global);
+                g_RuntimeGlobal = g_Global;
+                SaveSettings();
+                if (runtimeChanges.Any()) {
+                    if (runtimeChanges.sensorInputs) ClearTemperatureSnapshot();
+                    runtimeVersion = ++g_ConfigVersion;
+                }
+            }
+            NotifyRuntimeConfigChanges(runtimeChanges,
+                "runtime changes saved", runtimeVersion);
             EndDialog(hDlg, IDOK);
             return TRUE;
         }
@@ -4618,16 +4811,11 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             {
                 std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
                 g_Global = s_snapshot;
-                g_ConfigVersion++;
-                ClearTemperatureSnapshot();
             }
             g_Language = s_langSnapshot; // revert any live language change
-            // The engine runs in parallel and may have latched an edited color
-            // that was committed live on a tab switch. Force it to re-render the
-            // restored config instead of waiting for the next temperature change.
-            SetEvent(g_hEngineEvent);
-            SetEvent(g_hSensorEvent);
-            if (g_hRazerEvent) SetEvent(g_hRazerEvent);
+            // Worker threads consume g_RuntimeGlobal, never this editable draft.
+            // Cancelling therefore restores the UI model without invalidating
+            // sensors or issuing any RGB command.
             EndDialog(hDlg, IDCANCEL);
             return TRUE;
         }
@@ -5718,14 +5906,14 @@ static bool IsLedRequestCurrent(const LedRequestSnapshot& request) {
         request.enabled == g_LedsEnabled.load();
 }
 
-static bool AcknowledgeLedRequest(ULONGLONG& lastAcknowledgedGeneration,
+static bool AcknowledgeMsiLedRequest(ULONGLONG& lastAcknowledgedGeneration,
     const LedRequestSnapshot& appliedRequest) {
     if (!IsLedRequestCurrent(appliedRequest)) return false;
     if (appliedRequest.generation <= lastAcknowledgedGeneration) return true;
 
     lastAcknowledgedGeneration = appliedRequest.generation;
     char trace[160];
-    snprintf(trace, sizeof(trace), "[LED] APPLIED generation=%llu state=%s",
+    snprintf(trace, sizeof(trace), "[MSI SDK] APPLIED generation=%llu state=%s",
         appliedRequest.generation, appliedRequest.enabled ? "ON" : "OFF");
     Log(trace);
     return true;
@@ -5826,6 +6014,54 @@ static Config CopyMsiRuntimeConfig(const Config& source) {
     return copy;
 }
 
+static bool SameMsiOutputConfig(const Config& left, const Config& right) {
+    if (left.controlMsi != right.controlMsi) return false;
+    if (!left.controlMsi) return true;
+    return wcscmp(left.targetDevice, right.targetDevice) == 0 &&
+        left.targetLedIndex == right.targetLedIndex &&
+        SameThermalScheme(MsiRuntimeScheme(left), MsiRuntimeScheme(right));
+}
+
+static bool SameMsiTargetSelection(const Config& left, const Config& right) {
+    if (left.controlMsi != right.controlMsi) return false;
+    if (!left.controlMsi) return true;
+    return wcscmp(left.targetDevice, right.targetDevice) == 0 &&
+        left.targetLedIndex == right.targetLedIndex;
+}
+
+static std::wstring MsiScheduleDeviceName(const Config& config) {
+    std::lock_guard<std::mutex> lock(g_hwMutex);
+    for (const auto& device : g_hwSnapshot) {
+        if (device.type == config.targetDevice) {
+            return device.friendly.empty() ? device.type : device.friendly;
+        }
+    }
+    return config.targetDevice;
+}
+
+static void LogMsiDeviceSchedule(const Config& config, const int refreshFPS,
+    const float smoothingFactor, const ReleaseEffect releaseEffect,
+    const std::wstring& configuredReleaseStyle) {
+    if (!config.controlMsi) {
+        Log("[MSI SDK] Schedule: disabled for active profile");
+        return;
+    }
+
+    std::wstring releaseStyle = L"lights off";
+    if (releaseEffect == ReleaseEffect::Animated) {
+        const std::wstring resolved = FindMsiReleaseStyle(config.targetDevice,
+            static_cast<DWORD>(config.targetLedIndex), configuredReleaseStyle);
+        releaseStyle = resolved.empty() ? L"lights off (fallback)" : resolved;
+    }
+    const std::wstring displayName = MsiScheduleDeviceName(config);
+    char message[768] = {};
+    snprintf(message, sizeof(message),
+        "[MSI SDK] Schedule %ls [%ls; area %d]: %d FPS, smoothing=%.3f, release=%ls",
+        displayName.c_str(), config.targetDevice, config.targetLedIndex,
+        refreshFPS, smoothingFactor, releaseStyle.c_str());
+    Log(message);
+}
+
 // The engine owns the supervisor and IPC channel. The vendor SDK itself runs in
 // a killable child process, so a permanently blocked MSI call cannot strand the
 // UI or prevent bounded recovery.
@@ -5851,11 +6087,6 @@ static void EngineThread(HWND hWnd) {
     bool msiReleaseFallbackLogged = false;
     enum class MsiOutputMode { Unknown, Off, Search, Steady };
     MsiOutputMode msiOutputMode = MsiOutputMode::Unknown;
-    // Keep the cold-start path observable without scheduling a duplicate colour
-    // write: select Steady once and apply the first sensor-derived colour once.
-    bool startupOutputPending = true;
-    const int startupConfigVersion = g_ConfigVersion.load();
-    const ULONGLONG startupLedGeneration = CaptureLedRequest().generation;
     auto markMsiControlled = [&](const Config& config) {
         msiControlledSinceRelease = true;
         msiControlledDevice = config.targetDevice;
@@ -5880,6 +6111,12 @@ static void EngineThread(HWND hWnd) {
     }
 
     int lastProcessedVersion = -1;
+    bool haveMsiSchedule = false;
+    Config previousMsiConfig = {};
+    int previousLedRefreshFPS = -1;
+    float previousSmoothingFactor = -1.0f;
+    ReleaseEffect previousMsiReleaseEffect = ReleaseEffect::Off;
+    std::wstring previousMsiReleaseStyle;
     ULONGLONG nextFrameTime = 0;
     ULONGLONG lastAcknowledgedGeneration = 0;
     DWORD targetR = 0, targetG = 0, targetB = 0;
@@ -5895,21 +6132,48 @@ static void EngineThread(HWND hWnd) {
         int configVersion;
         int ledRefreshFPS;
         float smoothingFactor;
+        ReleaseEffect msiReleaseEffect;
+        std::wstring msiReleaseStyle;
         {
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-            cfgLocal = CopyMsiRuntimeConfig(g_cfg);
+            cfgLocal = CopyMsiRuntimeConfig(GetRuntimeCfgSafe());
             configVersion = g_ConfigVersion.load();
-            ledRefreshFPS = g_Global.ledRefreshFPS;
-            smoothingFactor = g_Global.smoothingFactor;
+            ledRefreshFPS = g_RuntimeGlobal.ledRefreshFPS;
+            smoothingFactor = g_RuntimeGlobal.smoothingFactor;
+            msiReleaseEffect = g_RuntimeGlobal.msiReleaseEffect;
+            msiReleaseStyle = g_RuntimeGlobal.msiReleaseStyle;
         }
 
         if (configVersion != lastProcessedVersion) {
             lastProcessedVersion = configVersion;
-            forceLEDRefresh();
-            colorTransitionActive = true;
-            nextFrameTime = 0;
-            g_pendingStyleChange = true;
-            Log("[MysticFight] Config refreshed");
+            const bool outputChanged = !haveMsiSchedule ||
+                !SameMsiOutputConfig(previousMsiConfig, cfgLocal);
+            const bool scheduleChanged = outputChanged || !haveMsiSchedule ||
+                ledRefreshFPS != previousLedRefreshFPS ||
+                smoothingFactor != previousSmoothingFactor ||
+                msiReleaseEffect != previousMsiReleaseEffect ||
+                msiReleaseStyle != previousMsiReleaseStyle;
+
+            const bool targetSelectionChanged = !haveMsiSchedule ||
+                !SameMsiTargetSelection(previousMsiConfig, cfgLocal);
+            if (outputChanged && (g_LedsEnabled.load() ||
+                targetSelectionChanged)) {
+                forceLEDRefresh();
+                colorTransitionActive = true;
+                nextFrameTime = 0;
+                g_pendingStyleChange = true;
+            }
+            if (scheduleChanged) {
+                LogMsiDeviceSchedule(cfgLocal, ledRefreshFPS, smoothingFactor,
+                    msiReleaseEffect, msiReleaseStyle);
+            }
+
+            previousMsiConfig = cfgLocal;
+            previousLedRefreshFPS = ledRefreshFPS;
+            previousSmoothingFactor = smoothingFactor;
+            previousMsiReleaseEffect = msiReleaseEffect;
+            previousMsiReleaseStyle = std::move(msiReleaseStyle);
+            haveMsiSchedule = true;
         }
 
         ULONGLONG currentTime = GetTickCount64();
@@ -5996,8 +6260,8 @@ static void EngineThread(HWND hWnd) {
                 std::wstring msiReleaseStyle;
                 {
                     std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-                    msiReleaseEffect = g_Global.msiReleaseEffect;
-                    msiReleaseStyle = g_Global.msiReleaseStyle;
+                    msiReleaseEffect = g_RuntimeGlobal.msiReleaseEffect;
+                    msiReleaseStyle = g_RuntimeGlobal.msiReleaseStyle;
                 }
                 std::wstring releaseStyle = L"Off";
                 if (msiReleaseEffect == ReleaseEffect::Animated) {
@@ -6052,7 +6316,6 @@ static void EngineThread(HWND hWnd) {
         // Per-profile output ownership: keep MSI enumeration/health available
         // for Settings, but issue no lighting command while MSI control is off.
         if (!cfgLocal.controlMsi) {
-            startupOutputPending = false;
             currentTime = GetTickCount64();
             if (currentTime - g_lastSdkProgress >= SDK_HEARTBEAT_OFF_INTERVAL_MS) {
                 if (SafeSDKCall(SdkHeartbeat(), "SDK heartbeat (MSI output disabled)") &&
@@ -6073,7 +6336,6 @@ static void EngineThread(HWND hWnd) {
         // OFF is an explicit user command and must win even while LHM is being
         // rediscovered. Previously the Searching branch masked it indefinitely.
         if (!g_LedsEnabled) {
-            startupOutputPending = false;
             g_pendingStyleChange.exchange(false);
             if (lastR != RGB_LEDS_OFF ||
                 msiOutputMode != MsiOutputMode::Off) {
@@ -6081,19 +6343,29 @@ static void EngineThread(HWND hWnd) {
                 if (request.enabled) {
                     g_pendingStyleChange = true;
                 }
-                else if (SafeSDKCall(
+                else {
+                    const bool acquiringOutput = !msiControlledSinceRelease;
+                    if (SafeSDKCall(
                     SdkSetStyle(
                         cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Off"),
-                    "Apply MSI Off")) {
-                    markMsiControlled(cfgLocal);
-                    msiOutputMode = MsiOutputMode::Off;
-                    lastR = RGB_LEDS_OFF;
-                    if (!AcknowledgeLedRequest(lastAcknowledgedGeneration, request)) {
+                        "Apply MSI Off")) {
+                        markMsiControlled(cfgLocal);
+                        msiOutputMode = MsiOutputMode::Off;
+                        lastR = RGB_LEDS_OFF;
+                        if (acquiringOutput) {
+                            char message[320] = {};
+                            snprintf(message, sizeof(message),
+                                "[MSI SDK] Output acquired %ls [area %d]: state=OFF",
+                                cfgLocal.targetDevice, cfgLocal.targetLedIndex);
+                            Log(message);
+                        }
+                        if (!AcknowledgeMsiLedRequest(lastAcknowledgedGeneration, request)) {
+                            g_pendingStyleChange = true;
+                        }
+                    }
+                    else if (!g_Resetting_sdk) {
                         g_pendingStyleChange = true;
                     }
-                }
-                else if (!g_Resetting_sdk) {
-                    g_pendingStyleChange = true;
                 }
             }
         }
@@ -6132,7 +6404,7 @@ static void EngineThread(HWND hWnd) {
                     }
                     if (applied) {
                         lastR = 255; lastG = 255; lastB = 255;
-                        if (!AcknowledgeLedRequest(lastAcknowledgedGeneration, request)) {
+                        if (!AcknowledgeMsiLedRequest(lastAcknowledgedGeneration, request)) {
                             g_pendingStyleChange = true;
                         }
                     }
@@ -6193,16 +6465,12 @@ static void EngineThread(HWND hWnd) {
                 if (steadyStyleRequired || sendR != lastR ||
                     sendG != lastG || sendB != lastB) {
                     LedRequestSnapshot request = CaptureLedRequest();
-                    if (request.generation != startupLedGeneration ||
-                        configVersion != startupConfigVersion) {
-                        startupOutputPending = false;
-                    }
                     if (!request.enabled) {
-                        startupOutputPending = false;
                         g_pendingStyleChange = true;
                     }
                     else {
                         bool applied = true;
+                        const bool acquiringOutput = !msiControlledSinceRelease;
                         if (steadyStyleRequired) {
                             applied = SafeSDKCall(
                                 SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Steady"),
@@ -6219,18 +6487,17 @@ static void EngineThread(HWND hWnd) {
                             if (applied) markMsiControlled(cfgLocal);
                         }
                         if (applied) {
-                            if (startupOutputPending) {
-                                startupOutputPending = false;
-                                char message[224] = {};
+                            if (acquiringOutput) {
+                                char message[320] = {};
                                 snprintf(message, sizeof(message),
-                                    "[SDK Supervisor] MSI startup output accepted: "
-                                    "style=Steady color=#%02lX%02lX%02lX; "
-                                    "single color write",
+                                    "[MSI SDK] Output acquired %ls [area %d]: "
+                                    "style=Steady color=#%02lX%02lX%02lX",
+                                    cfgLocal.targetDevice, cfgLocal.targetLedIndex,
                                     sendR, sendG, sendB);
                                 Log(message);
                             }
                             lastR = sendR; lastG = sendG; lastB = sendB;
-                            if (!AcknowledgeLedRequest(lastAcknowledgedGeneration, request)) {
+                            if (!AcknowledgeMsiLedRequest(lastAcknowledgedGeneration, request)) {
                                 g_pendingStyleChange = true;
                             }
                         }
@@ -6311,8 +6578,8 @@ static void EngineThread(HWND hWnd) {
         std::wstring configuredReleaseStyle;
         {
             std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-            releaseEffect = g_Global.msiReleaseEffect;
-            configuredReleaseStyle = g_Global.msiReleaseStyle;
+            releaseEffect = g_RuntimeGlobal.msiReleaseEffect;
+            configuredReleaseStyle = g_RuntimeGlobal.msiReleaseStyle;
         }
 
         std::wstring releaseStyle = L"Off";
@@ -6562,15 +6829,94 @@ static const ThermalScheme& ThermalSchemeForRazerDevice(const Config& config,
         ? scheme->second : config.generalThermal;
 }
 
+static bool SameRazerOutputConfig(const Config& left, const Config& right) {
+    if (left.controlRazer != right.controlRazer) return false;
+    if (!left.controlRazer) return true;
+
+    const auto leftSelected = ParseRazerDeviceIds(left.razerDeviceIds.c_str());
+    const auto rightSelected = ParseRazerDeviceIds(right.razerDeviceIds.c_str());
+    if (leftSelected != rightSelected) return false;
+    if (leftSelected.empty()) {
+        return SameThermalScheme(left.generalThermal, right.generalThermal);
+    }
+    for (const auto& deviceKey : leftSelected) {
+        if (!SameThermalScheme(ThermalSchemeForRazerDevice(left, deviceKey),
+            ThermalSchemeForRazerDevice(right, deviceKey))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool SameSelectedRazerSettings(const Config& config,
+    const std::map<std::wstring, RazerDeviceSettings>& left,
+    const std::map<std::wstring, RazerDeviceSettings>& right) {
+    if (!config.controlRazer) return true;
+    const auto selected = ParseRazerDeviceIds(config.razerDeviceIds.c_str());
+    if (selected.empty()) return SameRazerSettingsMaps(left, right);
+    for (const auto& deviceKey : selected) {
+        if (!SameRazerDeviceSettings(
+            SettingsForRazerDevice(left, deviceKey),
+            SettingsForRazerDevice(right, deviceKey))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void LogRazerDeviceSchedule(const RazerDeviceRuntime& runtime,
-    const RazerDeviceSettings& settings) {
+    const RazerDeviceSettings& settings, const float smoothingFactor) {
     char message[768] = {};
     snprintf(message, sizeof(message),
-        "[Razer HID] Schedule %ls [PID 0x%04X; %ls]: %d FPS, release=%s",
+        "[Razer HID] Schedule %ls [PID 0x%04X]: %d FPS, smoothing=%.3f, release=%s",
         runtime.device.productName.c_str(), runtime.device.productId,
-        runtime.device.deviceKey.c_str(), settings.refreshFPS,
+        settings.refreshFPS, smoothingFactor,
         settings.releaseEffect == ReleaseEffect::Animated
         ? "Spectrum Cycling" : "lights off");
+    Log(message);
+}
+
+static void LogRazerScheduleState(const Config& config,
+    const std::set<std::wstring>& availableSelectedKeys,
+    const std::map<std::wstring, std::unique_ptr<RazerDeviceRuntime>>& runtimes,
+    const std::map<std::wstring, RazerDeviceSettings>& settingsByDevice,
+    const float smoothingFactor) {
+    const auto configuredKeys = ParseRazerDeviceIds(config.razerDeviceIds.c_str());
+    if (!config.controlRazer) {
+        Log("[Razer HID] Schedule: disabled for active profile");
+        return;
+    }
+
+    for (const auto& deviceKey : availableSelectedKeys) {
+        const auto runtime = runtimes.find(deviceKey);
+        if (runtime == runtimes.end() || !runtime->second->present) continue;
+        LogRazerDeviceSchedule(*runtime->second,
+            SettingsForRazerDevice(settingsByDevice, deviceKey), smoothingFactor);
+    }
+    const size_t expectedDevices = configuredKeys.empty() ? 1 : configuredKeys.size();
+    if (availableSelectedKeys.size() < expectedDevices) {
+        char message[192] = {};
+        snprintf(message, sizeof(message),
+            "[Razer HID] Schedule: waiting for %zu of %zu selected device(s)",
+            expectedDevices - availableSelectedKeys.size(), expectedDevices);
+        Log(message);
+    }
+}
+
+static void LogRazerOutputAcquired(const RazerDeviceRuntime& runtime,
+    const bool enabled, const BYTE red, const BYTE green, const BYTE blue) {
+    char message[384] = {};
+    if (enabled) {
+        snprintf(message, sizeof(message),
+            "[Razer HID] Output acquired %ls [PID 0x%04X]: color=#%02X%02X%02X",
+            runtime.device.productName.c_str(), runtime.device.productId,
+            red, green, blue);
+    }
+    else {
+        snprintf(message, sizeof(message),
+            "[Razer HID] Output acquired %ls [PID 0x%04X]: state=OFF",
+            runtime.device.productName.c_str(), runtime.device.productId);
+    }
     Log(message);
 }
 
@@ -6586,24 +6932,48 @@ static void RazerThread(HWND hWnd) {
     ULONGLONG nextDetection = 0;
     ULONGLONG lastAcknowledgedLedGeneration = 0;
     bool detectionPublished = false;
+    bool haveRazerSchedule = false;
+    bool scheduleRefreshPending = false;
+    std::set<std::wstring> lastAvailableSelectedKeys;
 
     while (g_Running) {
         const int configVersion = g_ConfigVersion.load();
         if (configVersion != lastConfigVersion) {
+            Config nextConfig;
+            float nextSmoothingFactor;
+            std::map<std::wstring, RazerDeviceSettings> nextDeviceSettings;
             {
                 std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-                config = g_cfg;
-                smoothingFactor = g_Global.smoothingFactor;
-                deviceSettings = g_Global.razerDeviceSettings;
+                nextConfig = GetRuntimeCfgSafe();
+                nextSmoothingFactor = g_RuntimeGlobal.smoothingFactor;
+                nextDeviceSettings = g_RuntimeGlobal.razerDeviceSettings;
             }
+            const bool outputChanged = !haveRazerSchedule ||
+                !SameRazerOutputConfig(config, nextConfig);
+            const bool smoothingChanged = !haveRazerSchedule ||
+                smoothingFactor != nextSmoothingFactor;
+            const bool settingsChanged = !haveRazerSchedule ||
+                !SameSelectedRazerSettings(nextConfig,
+                    deviceSettings, nextDeviceSettings);
+
+            config = std::move(nextConfig);
+            smoothingFactor = nextSmoothingFactor;
+            deviceSettings = std::move(nextDeviceSettings);
             lastConfigVersion = configVersion;
-            for (auto& [key, runtime] : runtimes) {
-                ResetRazerThermalState(*runtime);
-                if (runtime->present) {
-                    LogRazerDeviceSchedule(*runtime,
-                        SettingsForRazerDevice(deviceSettings, key));
+            if (outputChanged) {
+                for (auto& [key, runtime] : runtimes) {
+                    ResetRazerThermalState(*runtime);
                 }
             }
+            else if (settingsChanged) {
+                const auto selected = ParseRazerDeviceIds(
+                    config.razerDeviceIds.c_str());
+                for (auto& [key, runtime] : runtimes) {
+                    if (selected.contains(key)) runtime->nextFrame = 0;
+                }
+            }
+            scheduleRefreshPending = scheduleRefreshPending || outputChanged ||
+                smoothingChanged || settingsChanged;
         }
 
         ULONGLONG now = GetTickCount64();
@@ -6617,7 +6987,6 @@ static void RazerThread(HWND hWnd) {
                 if (runtime->present) previouslyPresent.insert(key);
                 runtime->present = false;
             }
-            std::set<std::wstring> schedulesToLog;
             for (const auto& device : currentDetection.devices) {
                 if (!device.controllable) continue;
                 auto [it, inserted] = runtimes.try_emplace(device.deviceKey,
@@ -6629,14 +6998,12 @@ static void RazerThread(HWND hWnd) {
                     runtime.nextOpenAttempt = now;
                     runtime.hasAppliedFrame = false;
                     runtime.nextFrame = 0;
-                    schedulesToLog.insert(device.deviceKey);
                 }
                 runtime.device = device;
                 runtime.present = true;
                 if (inserted || !previouslyPresent.contains(device.deviceKey)) {
                     runtime.nextFrame = 0;
                     runtime.hasAppliedFrame = false;
-                    schedulesToLog.insert(device.deviceKey);
                 }
             }
             for (auto& [key, runtime] : runtimes) {
@@ -6650,13 +7017,7 @@ static void RazerThread(HWND hWnd) {
             detection = std::move(currentDetection);
             {
                 std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-                deviceSettings = g_Global.razerDeviceSettings;
-            }
-            for (const auto& [key, runtime] : runtimes) {
-                if (runtime->present && schedulesToLog.contains(key)) {
-                    LogRazerDeviceSchedule(*runtime,
-                        SettingsForRazerDevice(deviceSettings, key));
-                }
+                deviceSettings = g_RuntimeGlobal.razerDeviceSettings;
             }
             nextDetection = now + detectionIntervalMs;
         }
@@ -6665,6 +7026,16 @@ static void RazerThread(HWND hWnd) {
             return SettingsForRazerDevice(deviceSettings, key);
         };
         const auto selectedKeys = SelectedRazerDeviceKeys(config, detection);
+        if (!haveRazerSchedule || selectedKeys != lastAvailableSelectedKeys) {
+            scheduleRefreshPending = true;
+        }
+        if (scheduleRefreshPending) {
+            LogRazerScheduleState(config, selectedKeys, runtimes,
+                deviceSettings, smoothingFactor);
+            scheduleRefreshPending = false;
+            lastAvailableSelectedKeys = selectedKeys;
+            haveRazerSchedule = true;
+        }
         const auto waitForIdleWork = [&]() {
             const ULONGLONG waitNow = GetTickCount64();
             ULONGLONG nextWake = nextDetection;
@@ -6747,6 +7118,7 @@ static void RazerThread(HWND hWnd) {
 
                 const RazerDeviceSettings settings = settingsForKey(key);
                 runtime.nextFrame = sendNow + (1000 / settings.refreshFPS);
+                const bool firstFrameForHandle = !runtime.hasAppliedFrame;
                 if (!SendRazerUniformFrame(runtime.controller, red, green, blue,
                     1000 / settings.refreshFPS, operation)) {
                     char message[512] = {};
@@ -6768,6 +7140,9 @@ static void RazerThread(HWND hWnd) {
                 runtime.lastAppliedGreen = green;
                 runtime.lastAppliedBlue = blue;
                 runtime.lastAppliedGeneration = request.generation;
+                if (firstFrameForHandle) {
+                    LogRazerOutputAcquired(runtime, request.enabled, red, green, blue);
+                }
                 anyApplied = true;
             }
 
@@ -6794,7 +7169,8 @@ static void RazerThread(HWND hWnd) {
                 lastAcknowledgedLedGeneration = request.generation;
                 char message[160] = {};
                 snprintf(message, sizeof(message),
-                    "[Razer HID] APPLIED generation=%llu state=OFF", request.generation);
+                    "[Razer HID] APPLIED generation=%llu state=OFF devices=%zu",
+                    request.generation, selectedKeys.size());
                 Log(message);
             }
             waitForIdleWork();
@@ -6883,6 +7259,7 @@ static void RazerThread(HWND hWnd) {
             if (!EnsureRazerOpen(runtime, now, detectionIntervalMs)) continue;
 
             runtime.nextFrame = now + frameInterval;
+            const bool firstFrameForHandle = !runtime.hasAppliedFrame;
             if (!SendRazerUniformFrame(runtime.controller, outputRed, outputGreen,
                 outputBlue, frameInterval, "RGB frame")) {
                 char message[512] = {};
@@ -6903,6 +7280,10 @@ static void RazerThread(HWND hWnd) {
             runtime.lastAppliedGreen = outputGreen;
             runtime.lastAppliedBlue = outputBlue;
             runtime.lastAppliedGeneration = request.generation;
+            if (firstFrameForHandle) {
+                LogRazerOutputAcquired(runtime, request.enabled,
+                    outputRed, outputGreen, outputBlue);
+            }
             anyApplied = true;
         }
 
@@ -6922,7 +7303,8 @@ static void RazerThread(HWND hWnd) {
             lastAcknowledgedLedGeneration = request.generation;
             char message[160] = {};
             snprintf(message, sizeof(message),
-                "[Razer HID] APPLIED generation=%llu state=ON", request.generation);
+                "[Razer HID] APPLIED generation=%llu state=ON devices=%zu",
+                request.generation, selectedKeys.size());
             Log(message);
         }
 
@@ -7018,6 +7400,10 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
 
             bool isFirstRun = (GetFileAttributesW(INI_FILE) == INVALID_FILE_ATTRIBUTES);
             LoadSettings();
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+                g_RuntimeGlobal = g_Global;
+            }
 
             // Register Window Class
             WNDCLASSW wc = { 0 };
