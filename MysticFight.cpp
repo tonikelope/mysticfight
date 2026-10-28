@@ -5505,6 +5505,25 @@ static int SdkSetColor(const wchar_t* device, DWORD ledIndex, DWORD r, DWORD g, 
     return SendSdkCommand(request, nullptr, timeout);
 }
 
+static int SdkApplyMsiReleaseStyle(const wchar_t* device, DWORD ledIndex,
+    const wchar_t* style, DWORD timeout = SDK_RENDER_TIMEOUT_MS) {
+    if (wcscmp(style, L"Off") == 0) {
+        // Some MSI controllers restore their last colour when cold-started even
+        // after accepting the volatile Off style. Prime that retained colour
+        // with black first, then still issue the documented literal Off style.
+        // If the optional pre-clear fails, Off remains the authoritative release
+        // command and its result is returned to the existing recovery logic.
+        const int blackResult = SdkSetColor(device, ledIndex, 0, 0, 0, timeout);
+        if (blackResult == MLAPI_OK) {
+            Log("[MysticFight] MSI Off release pre-cleared to #000000.");
+        }
+        else {
+            LogSDKError("SetLedColor (MSI Off pre-clear)", blackResult);
+        }
+    }
+    return SdkSetStyle(device, ledIndex, style, timeout);
+}
+
 static int SdkHeartbeat() {
     SdkIpcRequest request = {};
     request.command = SdkCommand::Heartbeat;
@@ -6022,8 +6041,9 @@ static void EngineThread(HWND hWnd) {
                     }
                 }
 
-                const bool released = SafeSDKCall(SdkSetStyle(msiControlledDevice.c_str(),
-                    msiControlledLedIndex, releaseStyle.c_str()), "SetLedStyle (MSI release)");
+                const bool released = SafeSDKCall(SdkApplyMsiReleaseStyle(
+                    msiControlledDevice.c_str(), msiControlledLedIndex, releaseStyle.c_str()),
+                    "Apply MSI release style");
                 if (released) {
                     char message[256] = {};
                     snprintf(message, sizeof(message),
@@ -6082,8 +6102,9 @@ static void EngineThread(HWND hWnd) {
                     g_pendingStyleChange = true;
                 }
                 else if (SafeSDKCall(
-                    SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Off"),
-                    "SetLedStyle (Off)")) {
+                    SdkApplyMsiReleaseStyle(
+                        cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Off"),
+                    "Apply MSI Off")) {
                     markMsiControlled(cfgLocal);
                     msiOutputMode = MsiOutputMode::Off;
                     lastR = RGB_LEDS_OFF;
@@ -6348,7 +6369,7 @@ static void EngineThread(HWND hWnd) {
                 }
             }
         }
-        const int result = SdkSetStyle(msiControlledDevice.c_str(),
+        const int result = SdkApplyMsiReleaseStyle(msiControlledDevice.c_str(),
             msiControlledLedIndex, releaseStyle.c_str(), SDK_SHUTDOWN_TIMEOUT_MS);
         if (result == MLAPI_OK) {
             char message[256] = {};
@@ -6357,7 +6378,7 @@ static void EngineThread(HWND hWnd) {
                 releaseStyle.c_str());
             Log(message);
         }
-        else LogSDKError("SetLedStyle (MSI release on exit)", result);
+        else LogSDKError("Apply MSI release style on exit", result);
     }
     // Signal as soon as the configured lighting release has completed. Host
     // teardown can continue independently after WM_ENDSESSION is unblocked.
