@@ -116,8 +116,6 @@ const DWORD     MAX_HTTP_RESPONSE_SIZE = 4194304;   // 4MB Safety Limit
 const ULONGLONG LHM_RETRY_DELAY_MS = 5000;          // Cooldown for searching LHM
 const ULONGLONG KILL_LEDKEEPER_TASK_WAIT_MS = 2000; // Watchdog termination wait
 const ULONGLONG RESET_LEDKEEPER_TASK_DELAY_MS = 5000; // Cooldown for task restart
-const ULONGLONG SDK_RETRY_INITIAL_DELAY_MS = 2000;
-const ULONGLONG SDK_RETRY_MAX_DELAY_MS = 60000;
 const ULONGLONG MSI_SERVICE_RESTART_COOLDOWN_MS = 120000;
 const DWORD     SDK_RENDER_TIMEOUT_MS = 20000;
 const DWORD     SDK_HEARTBEAT_TIMEOUT_MS = 20000;
@@ -5879,10 +5877,10 @@ static void BeginSdkRecovery(const char* reason) {
 
 /**
  * Tracks SDK health without letting one successful frame erase an unstable
- * sequence. Transport failures and MSI timeouts enter recovery immediately;
- * ordinary API failures still use the bounded consecutive-failure threshold.
+ * sequence. Transport failures enter recovery immediately. A timeout returned
+ * by the MSI API can be retried on the same host for a lighting operation.
  */
-static bool SafeSDKCall(int result, const char* funcName) {
+static bool SafeSDKCall(int result, const char* funcName, bool lightingCall = false) {
     if (result == MLAPI_OK) {
         if (g_sdkSuccessStreak < 10) ++g_sdkSuccessStreak;
         if (g_sdkSuccessStreak >= 10) g_sdkFailCount = 0;
@@ -5893,7 +5891,8 @@ static bool SafeSDKCall(int result, const char* funcName) {
     LogSDKError(funcName, result);
     g_sdkSuccessStreak = 0;
 
-    bool immediateRecovery = result == MLAPI_TIMEOUT || result == MLAPI_NOT_INITIALIZED ||
+    const bool immediateRecovery = (!lightingCall && result == MLAPI_TIMEOUT) ||
+        result == MLAPI_NOT_INITIALIZED ||
         result == SDK_IPC_TIMEOUT || result == SDK_IPC_BROKEN ||
         result == SDK_HOST_LOAD_FAILED || result == SDK_HOST_PROTOCOL_ERROR ||
         result == SDK_HOST_COM_FAILED;
@@ -6102,7 +6101,6 @@ static void EngineThread(HWND hWnd) {
     bool msiControlledSinceRelease = false;
     std::wstring msiControlledDevice;
     DWORD msiControlledLedIndex = 0;
-    ULONGLONG msiNextReleaseAttempt = 0;
     bool msiReleaseFallbackLogged = false;
     enum class MsiOutputMode { Unknown, Off, Search, Steady };
     MsiOutputMode msiOutputMode = MsiOutputMode::Unknown;
@@ -6110,7 +6108,6 @@ static void EngineThread(HWND hWnd) {
         msiControlledSinceRelease = true;
         msiControlledDevice = config.targetDevice;
         msiControlledLedIndex = static_cast<DWORD>(config.targetLedIndex);
-        msiNextReleaseAttempt = 0;
         msiReleaseFallbackLogged = false;
     };
 
@@ -6128,7 +6125,6 @@ static void EngineThread(HWND hWnd) {
         BeginSdkRecovery("startup initialization or enumeration failed");
     }
 
-    ULONGLONG retryDelay = SDK_RETRY_INITIAL_DELAY_MS;
     ULONGLONG nextServiceRestart = 0;
     int lastProcessedVersion = -1;
     bool haveMsiSchedule = false;
@@ -6233,7 +6229,6 @@ static void EngineThread(HWND hWnd) {
                     if (!g_Running) break;
                     if (sdkReady) {
                         g_Resetting_sdk = false;
-                        retryDelay = SDK_RETRY_INITIAL_DELAY_MS;
                         g_sdkFailCount = 0;
                         g_sdkSuccessStreak = 0;
                         msiOutputMode = MsiOutputMode::Unknown;
@@ -6247,83 +6242,83 @@ static void EngineThread(HWND hWnd) {
                         PostMessage(hWnd, WM_APP_LETSDANCE, 0, 0);
                     }
                     else {
-                        g_ResetTimer = GetTickCount64() + retryDelay;
+                        g_ResetTimer = GetTickCount64();
                         const bool restartService = canRestartMsiService && g_ResetTimer >= nextServiceRestart;
                         g_ResetStage = restartService ? SdkRecoveryStage::StopService
                                                       : SdkRecoveryStage::ConnectHost;
-                        char message[192];
-                        snprintf(message, sizeof(message),
-                            "[SDK Supervisor] MSI unavailable; next %s in %llums",
-                            restartService ? "service restart" : "host reconnect", retryDelay);
-                        Log(message);
+                        Log(restartService
+                            ? "[SDK Supervisor] MSI unavailable; restarting service."
+                            : "[SDK Supervisor] MSI unavailable; reconnecting isolated host immediately.");
                         PostMessage(hWnd, WM_APP_STATUS, 3, 0);
-                        retryDelay = (std::min)(retryDelay * 2, SDK_RETRY_MAX_DELAY_MS);
                     }
                     break;
                 }
             }
-            if (g_Running && g_Resetting_sdk) EngineWaitUntil(g_ResetTimer);
+            if (g_Running && g_Resetting_sdk) {
+                if (g_ResetTimer > GetTickCount64()) EngineWaitUntil(g_ResetTimer);
+                else EngineWait(0);
+            }
             continue;
         }
+
+        bool retryMsiOutput = false;
+        const auto applyMsiOutput = [&](int result, const char* operation) {
+            const bool applied = SafeSDKCall(result, operation, true);
+            retryMsiOutput = !applied;
+            return applied;
+        };
 
         const bool controlledTargetStillSelected = cfgLocal.controlMsi &&
             msiControlledDevice == cfgLocal.targetDevice &&
             msiControlledLedIndex == static_cast<DWORD>(cfgLocal.targetLedIndex);
         if (msiControlledSinceRelease && !controlledTargetStillSelected) {
-            if (currentTime >= msiNextReleaseAttempt) {
-                ReleaseEffect msiReleaseEffect;
-                std::wstring msiReleaseStyle;
-                {
-                    std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
-                    msiReleaseEffect = g_RuntimeGlobal.msiReleaseEffect;
-                    msiReleaseStyle = g_RuntimeGlobal.msiReleaseStyle;
-                }
-                std::wstring releaseStyle = L"Off";
-                if (msiReleaseEffect == ReleaseEffect::Animated) {
-                    releaseStyle = FindMsiReleaseStyle(
-                        msiControlledDevice, msiControlledLedIndex, msiReleaseStyle);
-                    if (releaseStyle.empty()) {
-                        releaseStyle = L"Off";
-                        if (!msiReleaseFallbackLogged) {
-                            if (msiReleaseStyle.empty()) {
-                                Log("[MysticFight] MSI target exposes no supported automatic color animation; releasing to Off.");
-                            }
-                            else {
-                                char message[256] = {};
-                                snprintf(message, sizeof(message),
-                                    "[MysticFight] MSI target does not expose configured release style %ls; releasing to Off.",
-                                    msiReleaseStyle.c_str());
-                                Log(message);
-                            }
-                            msiReleaseFallbackLogged = true;
+            ReleaseEffect msiReleaseEffect;
+            std::wstring msiReleaseStyle;
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_cfgMutex);
+                msiReleaseEffect = g_RuntimeGlobal.msiReleaseEffect;
+                msiReleaseStyle = g_RuntimeGlobal.msiReleaseStyle;
+            }
+            std::wstring releaseStyle = L"Off";
+            if (msiReleaseEffect == ReleaseEffect::Animated) {
+                releaseStyle = FindMsiReleaseStyle(
+                    msiControlledDevice, msiControlledLedIndex, msiReleaseStyle);
+                if (releaseStyle.empty()) {
+                    releaseStyle = L"Off";
+                    if (!msiReleaseFallbackLogged) {
+                        if (msiReleaseStyle.empty()) {
+                            Log("[MysticFight] MSI target exposes no supported automatic color animation; releasing to Off.");
                         }
+                        else {
+                            char message[256] = {};
+                            snprintf(message, sizeof(message),
+                                "[MysticFight] MSI target does not expose configured release style %ls; releasing to Off.",
+                                msiReleaseStyle.c_str());
+                            Log(message);
+                        }
+                        msiReleaseFallbackLogged = true;
                     }
                 }
+            }
 
-                const bool released = SafeSDKCall(SdkSetStyle(
-                    msiControlledDevice.c_str(), msiControlledLedIndex, releaseStyle.c_str()),
-                    "Apply MSI release style");
-                if (released) {
-                    char message[256] = {};
-                    snprintf(message, sizeof(message),
-                        "[MysticFight] MSI target released with style %ls", releaseStyle.c_str());
-                    Log(message);
-                    msiControlledSinceRelease = false;
-                    msiControlledDevice.clear();
-                    msiNextReleaseAttempt = 0;
-                    msiOutputMode = MsiOutputMode::Unknown;
-                    forceLEDRefresh();
-                    g_pendingStyleChange = true;
-                }
-                else {
-                    msiNextReleaseAttempt = GetTickCount64() + 5000;
-                }
+            const bool released = applyMsiOutput(SdkSetStyle(
+                msiControlledDevice.c_str(), msiControlledLedIndex, releaseStyle.c_str()),
+                "Apply MSI release style");
+            if (released) {
+                char message[256] = {};
+                snprintf(message, sizeof(message),
+                    "[MysticFight] MSI target released with style %ls", releaseStyle.c_str());
+                Log(message);
+                msiControlledSinceRelease = false;
+                msiControlledDevice.clear();
+                msiOutputMode = MsiOutputMode::Unknown;
+                forceLEDRefresh();
+                g_pendingStyleChange = true;
             }
 
             // Never overwrite ownership with a new target until the previous
             // one has either been released or recovery has re-established IPC.
             if (msiControlledSinceRelease) {
-                EngineWait(250);
                 continue;
             }
         }
@@ -6343,8 +6338,7 @@ static void EngineThread(HWND hWnd) {
                     g_lastSdkHeartbeatLog = currentTime;
                 }
             }
-            if (g_Resetting_sdk) EngineWait(1);
-            else EngineWaitUntil(g_lastSdkProgress + SDK_HEARTBEAT_OFF_INTERVAL_MS);
+            if (!g_Resetting_sdk) EngineWaitUntil(g_lastSdkProgress + SDK_HEARTBEAT_OFF_INTERVAL_MS);
             continue;
         }
 
@@ -6360,7 +6354,7 @@ static void EngineThread(HWND hWnd) {
                 }
                 else {
                     const bool acquiringOutput = !msiControlledSinceRelease;
-                    if (SafeSDKCall(
+                    if (applyMsiOutput(
                     SdkSetStyle(
                         cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Off"),
                         "Apply MSI Off")) {
@@ -6400,7 +6394,7 @@ static void EngineThread(HWND hWnd) {
                     bool applied = true;
                     bool styleChanged = false;
                     if (msiOutputMode != MsiOutputMode::Search) {
-                        applied = SafeSDKCall(
+                        applied = applyMsiOutput(
                             SdkSetStyle(cfgLocal.targetDevice,
                                 cfgLocal.targetLedIndex, L"Breath"),
                             "SetLedStyle (Search)");
@@ -6412,7 +6406,13 @@ static void EngineThread(HWND hWnd) {
                     }
                     if (applied && (styleChanged || lastR != 255 ||
                         lastG != 255 || lastB != 255)) {
-                        applied = SafeSDKCall(
+                        if (styleChanged && (!IsLedRequestCurrent(request) ||
+                            g_ConfigVersion.load() != configVersion)) {
+                            lastR = RGB_LED_REFRESH;
+                            g_pendingStyleChange = true;
+                            continue;
+                        }
+                        applied = applyMsiOutput(
                             SdkSetColor(cfgLocal.targetDevice, cfgLocal.targetLedIndex, 255, 255, 255),
                             "SetLedColor (Search)");
                         if (applied) markMsiControlled(cfgLocal);
@@ -6487,7 +6487,7 @@ static void EngineThread(HWND hWnd) {
                         bool applied = true;
                         const bool acquiringOutput = !msiControlledSinceRelease;
                         if (steadyStyleRequired) {
-                            applied = SafeSDKCall(
+                            applied = applyMsiOutput(
                                 SdkSetStyle(cfgLocal.targetDevice, cfgLocal.targetLedIndex, L"Steady"),
                                 "SetLedStyle (Steady)");
                             if (applied) {
@@ -6496,7 +6496,12 @@ static void EngineThread(HWND hWnd) {
                             }
                         }
                         if (applied) {
-                            applied = SafeSDKCall(
+                            if (steadyStyleRequired && (!IsLedRequestCurrent(request) ||
+                                g_ConfigVersion.load() != configVersion)) {
+                                g_pendingStyleChange = true;
+                                continue;
+                            }
+                            applied = applyMsiOutput(
                                 SdkSetColor(cfgLocal.targetDevice, cfgLocal.targetLedIndex, sendR, sendG, sendB),
                                 "SetLedColor");
                             if (applied) markMsiControlled(cfgLocal);
@@ -6526,6 +6531,14 @@ static void EngineThread(HWND hWnd) {
             else nextFrameTime = 0;
         }
 
+        if (g_Resetting_sdk) continue;
+        if (retryMsiOutput) {
+            // Re-read the requested state before sending again. A profile or
+            // on/off change can supersede the failed command while IPC is busy.
+            nextFrameTime = 0;
+            continue;
+        }
+
         currentTime = GetTickCount64();
         // Active render/style traffic already proves the host is responsive.
         // Probe only after a genuinely idle interval, and much less frequently
@@ -6544,10 +6557,7 @@ static void EngineThread(HWND hWnd) {
             }
         }
 
-        if (g_Resetting_sdk) {
-            EngineWait(1);
-            continue;
-        }
+        if (g_Resetting_sdk) continue;
 
         currentTime = GetTickCount64();
         ULONGLONG nextWake = g_lastSdkProgress + heartbeatInterval;
