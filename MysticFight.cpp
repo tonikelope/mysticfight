@@ -85,9 +85,8 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define WM_TRAYICON             (WM_USER + 1)
 
 // Engine -> UI thread messages (posted by the LED engine thread, handled by WndProc)
-#define WM_APP_STATUS           (WM_APP + 1)   // wParam: 0=normal, 1=restarting, 2=connecting
+#define WM_APP_STATUS           (WM_APP + 1)   // wParam: 0=normal, 1=restarting, 2=connecting, 3=retrying
 #define WM_APP_LETSDANCE        (WM_APP + 2)   // show the startup notification
-#define WM_APP_FATAL            (WM_APP + 3)   // wParam: 1=SDK critical, 2=SDK fatal
 #define WM_APP_HWREADY          (WM_APP + 4)   // hardware snapshot (re)built; refresh an open dialog
 #define WM_APP_RAZERREADY       (WM_APP + 5)   // read-only Razer HID detection changed
 #define ID_TRAY_EXIT            1001
@@ -117,9 +116,13 @@ const DWORD     MAX_HTTP_RESPONSE_SIZE = 4194304;   // 4MB Safety Limit
 const ULONGLONG LHM_RETRY_DELAY_MS = 5000;          // Cooldown for searching LHM
 const ULONGLONG KILL_LEDKEEPER_TASK_WAIT_MS = 2000; // Watchdog termination wait
 const ULONGLONG RESET_LEDKEEPER_TASK_DELAY_MS = 5000; // Cooldown for task restart
-const ULONGLONG RESET_SDK_RETRY_DELAY_MS = 1000;
-const DWORD     SDK_RENDER_TIMEOUT_MS = 5000;         // Maximum time for a render command in the isolated SDK host
-const DWORD     SDK_INIT_TIMEOUT_MS = 15000;          // Initialize + enumerate timeout
+const ULONGLONG SDK_RETRY_INITIAL_DELAY_MS = 2000;
+const ULONGLONG SDK_RETRY_MAX_DELAY_MS = 60000;
+const ULONGLONG MSI_SERVICE_RESTART_COOLDOWN_MS = 120000;
+const DWORD     SDK_RENDER_TIMEOUT_MS = 20000;
+const DWORD     SDK_HEARTBEAT_TIMEOUT_MS = 20000;
+const DWORD     SDK_INIT_TIMEOUT_MS = 60000;         // Initialize + enumerate timeout
+const DWORD     SDK_EXIT_IN_FLIGHT_GRACE_MS = 500;
 const DWORD     SDK_SHUTDOWN_TIMEOUT_MS = 750;
 const DWORD     WINDOWS_SHUTDOWN_RELEASE_WAIT_MS = 4000;
 const ULONGLONG SDK_HEARTBEAT_ACTIVE_INTERVAL_MS = 60000;
@@ -205,9 +208,9 @@ enum StrId {
     STR_MSG_DUP_HOTKEY, STR_MSG_ERROR_TITLE, STR_MSG_ALREADY_RUNNING, STR_MSG_INFO_TITLE,
     STR_MSG_DELETE_PROFILE, STR_MSG_LAST_PROFILE, STR_MSG_ACTIVE_PROFILE,
     STR_MSG_PROFILE_LIMIT,
-    STR_MSG_SDK_CRITICAL, STR_MSG_SDK_FATAL, STR_MSG_UNKNOWN_ERROR, STR_MSG_CRASH_TITLE,
+    STR_MSG_UNKNOWN_ERROR, STR_MSG_CRASH_TITLE,
     // Tray tooltip status
-    STR_STATUS_RESTARTING, STR_STATUS_CONNECTING, STR_STATUS_INITIALIZING,
+    STR_STATUS_RESTARTING, STR_STATUS_CONNECTING, STR_STATUS_INITIALIZING, STR_STATUS_MSI_RETRYING,
     // About dialog
     STR_ABOUT_BY, STR_ABOUT_DESC, STR_ABOUT_GITHUB, STR_ABOUT_CLOSE,
     // Default (factory) profile label, e.g. "Profile 3" / "Perfil 3" (%d = number)
@@ -243,9 +246,8 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"At least one profile must remain.",
         L"The active profile cannot be deleted. Set another profile as active, save the changes, and try again.",
         L"The maximum of %d profiles has been reached.",
-        L"MSI SDK Critical Error. Please check MSI Center installation.", L"MSI SDK Fatal Error. Please reinstall MSI Center.",
         L"An unknown critical error occurred.", L"MysticFight Crash",
-        L"Restarting MSI Service...", L"Connecting to SDK...", L"Initializing...",
+        L"Restarting MSI Service...", L"Connecting to SDK...", L"Initializing...", L"MSI unavailable (retrying)",
         L"By tonikelope", L"Temperature-driven RGB for MSI and supported Razer devices", L"Visit GitHub Project", L"Close",
         L"Profile %d",
     },
@@ -275,9 +277,8 @@ static constexpr const wchar_t* const TR[LANG_COUNT][STR_COUNT] = {
         L"Debe quedar al menos un perfil.",
         L"No se puede borrar el perfil activo. Establece otro perfil como activo, guarda los cambios y vuelve a intentarlo.",
         L"Se ha alcanzado el máximo de %d perfiles.",
-        L"Error crítico del SDK de MSI. Comprueba la instalación de MSI Center.", L"Error fatal del SDK de MSI. Reinstala MSI Center.",
         L"Se ha producido un error crítico desconocido.", L"Fallo de MysticFight",
-        L"Reiniciando servicio MSI...", L"Conectando al SDK...", L"Inicializando...",
+        L"Reiniciando servicio MSI...", L"Conectando al SDK...", L"Inicializando...", L"MSI no disponible (reintentando)",
         L"Por tonikelope", L"RGB por temperatura para MSI y dispositivos Razer compatibles", L"Visitar proyecto en GitHub", L"Cerrar",
         L"Perfil %d",
     },
@@ -417,6 +418,7 @@ const int SDK_IPC_BROKEN = -10002;
 const int SDK_HOST_LOAD_FAILED = -10003;
 const int SDK_HOST_PROTOCOL_ERROR = -10004;
 const int SDK_HOST_COM_FAILED = -10005;
+const int SDK_IPC_CANCELLED = -10006;
 const DWORD SDK_IPC_MAX_DEVICES = 16;
 const DWORD SDK_IPC_MAX_AREAS = 32;
 
@@ -570,14 +572,13 @@ std::atomic<bool> g_razerAnyDetected{ false };
 std::atomic<ULONGLONG> g_lastDataSourceSearchRetry{ 0 };
 
 // SDK AUTO RESET
+enum class SdkRecoveryStage { ConnectHost, StopService, StartService };
 std::atomic<bool> g_Resetting_sdk{ false };
-int g_ResetStage = 0;
+SdkRecoveryStage g_ResetStage = SdkRecoveryStage::ConnectHost;
 ULONGLONG g_ResetTimer = 0;
 int g_sdkFailCount = 0;
 int g_sdkSuccessStreak = 0;
 const int MAX_SDK_FAILURES = 5;
-const int SDK_MAX_RESETS = 3;
-int g_resetCounter = 0;
 
 // SDK helper process state. These handles are owned exclusively by EngineThread.
 HANDLE g_hSdkHostProcess = NULL;
@@ -5190,6 +5191,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
     case WM_APP_STATUS:
         if (wParam == 1)      UpdateStatus(hWnd, T(STR_STATUS_RESTARTING));
         else if (wParam == 2) UpdateStatus(hWnd, T(STR_STATUS_CONNECTING));
+        else if (wParam == 3) UpdateStatus(hWnd, T(STR_STATUS_MSI_RETRYING));
         else                  UpdateStatus(hWnd, NULL);
         if (g_hSettingsDlg) SendMessageW(g_hSettingsDlg, WM_APP_STATUS, wParam, 0);
         return 0;
@@ -5208,13 +5210,6 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         // Detection never writes to the keyboard. It only changes whether the
         // optional Razer profile panel is visible.
         if (g_hSettingsDlg) SendMessageW(g_hSettingsDlg, WM_APP_RAZERREADY, 0, 0);
-        return 0;
-
-    case WM_APP_FATAL:
-        MessageBoxW(NULL, (wParam == 1) ? T(STR_MSG_SDK_CRITICAL) : T(STR_MSG_SDK_FATAL),
-            L"MysticFight", MB_OK | MB_ICONERROR);
-        g_Running = false;
-        PostQuitMessage(0);
         return 0;
 
     case WM_QUERYENDSESSION:
@@ -5426,38 +5421,55 @@ static bool StartSdkHost() {
     return true;
 }
 
-static bool ReadSdkResponseWithTimeout(SdkIpcResponse& response, DWORD expectedBytes,
-    DWORD timeout, bool& timedOut) {
-    timedOut = false;
+enum class SdkResponseWait { Complete, Broken, TimedOut, Cancelled };
+enum class SdkCallPhase { Runtime, Shutdown };
+
+static SdkResponseWait ReadSdkResponseWithTimeout(SdkIpcResponse& response,
+    DWORD expectedBytes, DWORD timeout, SdkCallPhase phase) {
     BYTE* cursor = reinterpret_cast<BYTE*>(&response);
     DWORD total = 0;
-    ULONGLONG started = GetTickCount64();
+    const ULONGLONG deadline = GetTickCount64() + timeout;
+    ULONGLONG exitDeadline = 0;
 
     while (total < expectedBytes) {
-        if (!g_hSdkResponseRead || !g_hSdkHostProcess) return false;
+        if (!g_hSdkResponseRead || !g_hSdkHostProcess) return SdkResponseWait::Broken;
 
         DWORD available = 0;
-        if (!PeekNamedPipe(g_hSdkResponseRead, NULL, 0, NULL, &available, NULL)) return false;
+        if (!PeekNamedPipe(g_hSdkResponseRead, NULL, 0, NULL, &available, NULL)) {
+            return SdkResponseWait::Broken;
+        }
 
         if (available > 0) {
             DWORD chunk = min(available, expectedBytes - total);
             DWORD received = 0;
-            if (!ReadFile(g_hSdkResponseRead, cursor + total, chunk, &received, NULL) || received == 0) return false;
+            if (!ReadFile(g_hSdkResponseRead, cursor + total, chunk, &received, NULL) || received == 0) {
+                return SdkResponseWait::Broken;
+            }
             total += received;
             continue;
         }
 
-        if (WaitForSingleObject(g_hSdkHostProcess, 0) != WAIT_TIMEOUT) return false;
-        if (GetTickCount64() - started >= timeout) {
-            timedOut = true;
-            return false;
+        if (WaitForSingleObject(g_hSdkHostProcess, 0) != WAIT_TIMEOUT) {
+            return SdkResponseWait::Broken;
         }
+        const ULONGLONG now = GetTickCount64();
+        if (phase == SdkCallPhase::Runtime && !g_Running) {
+            // A nearly finished command can still leave the host usable for
+            // releasing the LEDs. A wedged one must give way to shutdown.
+            if (exitDeadline == 0) {
+                exitDeadline = (std::min)(deadline, now + SDK_EXIT_IN_FLIGHT_GRACE_MS);
+            }
+            if (now >= exitDeadline) return SdkResponseWait::Cancelled;
+        }
+        if (now >= deadline) return SdkResponseWait::TimedOut;
         Sleep(10);
     }
-    return true;
+    return SdkResponseWait::Complete;
 }
 
-static int SendSdkCommand(SdkIpcRequest& request, SdkIpcResponse* responseOut, DWORD timeout) {
+static int SendSdkCommand(SdkIpcRequest& request, SdkIpcResponse* responseOut, DWORD timeout,
+    SdkCallPhase phase = SdkCallPhase::Runtime) {
+    if (phase == SdkCallPhase::Runtime && !g_Running) return SDK_IPC_CANCELLED;
     if (!g_hSdkHostProcess || !g_hSdkRequestWrite || !g_hSdkResponseRead) return SDK_IPC_BROKEN;
 
     request.magic = SDK_IPC_MAGIC;
@@ -5487,11 +5499,17 @@ static int SendSdkCommand(SdkIpcRequest& request, SdkIpcResponse* responseOut, D
     // commands only clear/read the compact header and do no heap allocation.
     static thread_local SdkIpcResponse response;
     ZeroMemory(&response, expectedBytes);
-    bool timedOut = false;
-    if (!ReadSdkResponseWithTimeout(response, expectedBytes, timeout, timedOut)) {
+    const SdkResponseWait wait = ReadSdkResponseWithTimeout(response, expectedBytes, timeout, phase);
+    if (wait == SdkResponseWait::Cancelled) {
+        TerminateSdkHost("in-flight SDK command cancelled for application exit");
+        return SDK_IPC_CANCELLED;
+    }
+    if (wait != SdkResponseWait::Complete) {
+        const bool timedOut = wait == SdkResponseWait::TimedOut;
         char failure[256];
-        snprintf(failure, sizeof(failure), "[SDK IPC] %s seq=%lu op=%s elapsed=%llums",
-            timedOut ? "TIMEOUT" : "BROKEN", request.sequence, opName, GetTickCount64() - started);
+        snprintf(failure, sizeof(failure), "[SDK IPC] %s seq=%lu op=%s elapsed=%llums budget=%lums",
+            timedOut ? "TIMEOUT" : "BROKEN", request.sequence, opName,
+            GetTickCount64() - started, timeout);
         Log(failure);
         TerminateSdkHost(timedOut ? "SDK call timeout" : "response pipe failure");
         return timedOut ? SDK_IPC_TIMEOUT : SDK_IPC_BROKEN;
@@ -5674,13 +5692,15 @@ static bool TryRunSdkHostFromCommandLine(int& exitCode) {
     return false;
 }
 static int SdkSetStyle(const wchar_t* device, DWORD ledIndex, const wchar_t* style,
-    DWORD timeout = SDK_RENDER_TIMEOUT_MS) {
+    SdkCallPhase phase = SdkCallPhase::Runtime) {
     SdkIpcRequest request = {};
     request.command = SdkCommand::SetStyle;
     wcsncpy_s(request.device, device, _TRUNCATE);
     wcsncpy_s(request.style, style, _TRUNCATE);
     request.ledIndex = ledIndex;
-    return SendSdkCommand(request, nullptr, timeout);
+    const DWORD timeout = phase == SdkCallPhase::Shutdown
+        ? SDK_SHUTDOWN_TIMEOUT_MS : SDK_RENDER_TIMEOUT_MS;
+    return SendSdkCommand(request, nullptr, timeout, phase);
 }
 
 static int SdkSetColor(const wchar_t* device, DWORD ledIndex, DWORD r, DWORD g, DWORD b,
@@ -5698,7 +5718,7 @@ static int SdkSetColor(const wchar_t* device, DWORD ledIndex, DWORD r, DWORD g, 
 static int SdkHeartbeat() {
     SdkIpcRequest request = {};
     request.command = SdkCommand::Heartbeat;
-    return SendSdkCommand(request, nullptr, SDK_RENDER_TIMEOUT_MS);
+    return SendSdkCommand(request, nullptr, SDK_HEARTBEAT_TIMEOUT_MS);
 }
 
 static std::vector<std::wstring> ParseMsiStyleInventory(const wchar_t* serialized) {
@@ -5797,13 +5817,14 @@ static std::wstring FindMsiReleaseStyle(const std::wstring& deviceType,
 }
 
 static bool StartAndValidateSdk() {
-    if (!StartSdkHost()) return false;
+    if (!g_Running || !StartSdkHost()) return false;
 
     SdkIpcRequest request = {};
     request.command = SdkCommand::Initialize;
     auto response = std::make_unique<SdkIpcResponse>();
     ZeroMemory(response.get(), sizeof(*response));
     int result = SendSdkCommand(request, response.get(), SDK_INIT_TIMEOUT_MS);
+    if (result == SDK_IPC_CANCELLED) return false;
     if (result != MLAPI_OK) {
         if (result <= SDK_IPC_TIMEOUT) {
             LogSDKError("SDK host transport/startup", result);
@@ -5834,7 +5855,7 @@ static void ShutdownSdkHost() {
 
     SdkIpcRequest request = {};
     request.command = SdkCommand::Shutdown;
-    int result = SendSdkCommand(request, nullptr, SDK_SHUTDOWN_TIMEOUT_MS);
+    int result = SendSdkCommand(request, nullptr, SDK_SHUTDOWN_TIMEOUT_MS, SdkCallPhase::Shutdown);
     if (result == MLAPI_OK && g_hSdkHostProcess) {
         if (WaitForSingleObject(g_hSdkHostProcess, SDK_SHUTDOWN_TIMEOUT_MS) == WAIT_OBJECT_0) {
             Log("[SDK Supervisor] SDK host stopped cleanly.");
@@ -5852,7 +5873,7 @@ static void BeginSdkRecovery(const char* reason) {
     snprintf(message, sizeof(message), "[SDK Supervisor] Recovery requested: %s",
         reason ? reason : "SDK failure threshold reached");
     Log(message);
-    g_ResetStage = 0;
+    g_ResetStage = SdkRecoveryStage::ConnectHost;
     g_ResetTimer = GetTickCount64();
 }
 
@@ -5868,6 +5889,7 @@ static bool SafeSDKCall(int result, const char* funcName) {
         return true;
     }
 
+    if (result == SDK_IPC_CANCELLED) return false;
     LogSDKError(funcName, result);
     g_sdkSuccessStreak = 0;
 
@@ -5878,7 +5900,7 @@ static bool SafeSDKCall(int result, const char* funcName) {
     if (immediateRecovery) g_sdkFailCount = MAX_SDK_FAILURES;
     else if (g_sdkFailCount < MAX_SDK_FAILURES) ++g_sdkFailCount;
 
-    if (g_sdkFailCount >= MAX_SDK_FAILURES) BeginSdkRecovery(funcName);
+    if (g_Running && g_sdkFailCount >= MAX_SDK_FAILURES) BeginSdkRecovery(funcName);
     return false;
 }
 
@@ -6067,17 +6089,14 @@ static void LogMsiDeviceSchedule(const Config& config, const int refreshFPS,
 // UI or prevent bounded recovery.
 static void EngineThread(HWND hWnd) {
     HRESULT coHr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    bool comInitialized = SUCCEEDED(coHr);
-    if (!comInitialized && coHr != RPC_E_CHANGED_MODE) {
+    const bool comInitialized = SUCCEEDED(coHr);
+    const bool canRestartMsiService = comInitialized || coHr == RPC_E_CHANGED_MODE;
+    if (!canRestartMsiService) {
         char message[160];
         snprintf(message, sizeof(message),
-            "[SDK Supervisor] Engine COM initialization failed: HRESULT=0x%08lX",
+            "[SDK Supervisor] Engine COM unavailable (HRESULT=0x%08lX); recovery will retry the isolated host only.",
             static_cast<unsigned long>(coHr));
         Log(message);
-        if (g_hHwReadyEvent) SetEvent(g_hHwReadyEvent);
-        if (g_hMsiReleaseDoneEvent) SetEvent(g_hMsiReleaseDoneEvent);
-        PostMessage(hWnd, WM_APP_FATAL, 1, 0);
-        return;
     }
 
     bool msiControlledSinceRelease = false;
@@ -6096,20 +6115,21 @@ static void EngineThread(HWND hWnd) {
     };
 
     bool sdkReady = StartAndValidateSdk();
-    if (sdkReady) {
+    if (sdkReady && g_Running) {
         g_sdkFailCount = 0;
         g_sdkSuccessStreak = 0;
-        g_resetCounter = 0;
         SetEvent(g_hHwReadyEvent);
         PostMessage(hWnd, WM_APP_HWREADY, 0, 0);
         PostMessage(hWnd, WM_APP_STATUS, 0, 0);
         PostMessage(hWnd, WM_APP_LETSDANCE, 0, 0);
     }
-    else {
+    else if (g_Running) {
         SetEvent(g_hHwReadyEvent); // unblock first-run settings while recovery proceeds
         BeginSdkRecovery("startup initialization or enumeration failed");
     }
 
+    ULONGLONG retryDelay = SDK_RETRY_INITIAL_DELAY_MS;
+    ULONGLONG nextServiceRestart = 0;
     int lastProcessedVersion = -1;
     bool haveMsiSchedule = false;
     Config previousMsiConfig = {};
@@ -6181,41 +6201,39 @@ static void EngineThread(HWND hWnd) {
         if (g_Resetting_sdk) {
             if (currentTime >= g_ResetTimer) {
                 switch (g_ResetStage) {
-                case 0: {
+                case SdkRecoveryStage::StopService: {
                     sdkReady = false;
-                    TerminateSdkHost("recovery attempt");
-                    char message[160];
-                    snprintf(message, sizeof(message),
-                        "[SDK Supervisor] Recovery attempt %d/%d: restarting MSI service",
-                        g_resetCounter + 1, SDK_MAX_RESETS);
-                    Log(message);
+                    TerminateSdkHost("MSI service restart");
+                    Log("[SDK Supervisor] Restarting MSI service after an unsuccessful host reconnect.");
                     PostMessage(hWnd, WM_APP_STATUS, 1, 0);
                     HRESULT hrTask = ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", false);
                     LogTaskControlFailure("stop", hrTask);
                     KillProcessByName(L"LEDKeeper2.exe");
-                    g_ResetTimer = currentTime + KILL_LEDKEEPER_TASK_WAIT_MS;
-                    g_ResetStage = 1;
+                    g_ResetTimer = GetTickCount64() + KILL_LEDKEEPER_TASK_WAIT_MS;
+                    g_ResetStage = SdkRecoveryStage::StartService;
                     break;
                 }
-                case 1: {
+                case SdkRecoveryStage::StartService: {
                     HRESULT hrTask = ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", true);
                     LogTaskControlFailure("start", hrTask);
-                    g_ResetTimer = currentTime + RESET_LEDKEEPER_TASK_DELAY_MS;
-                    g_ResetStage = 2;
+                    const ULONGLONG restartedAt = GetTickCount64();
+                    nextServiceRestart = restartedAt + MSI_SERVICE_RESTART_COOLDOWN_MS;
+                    g_ResetTimer = restartedAt + RESET_LEDKEEPER_TASK_DELAY_MS;
+                    g_ResetStage = SdkRecoveryStage::ConnectHost;
                     break;
                 }
-                case 2:
+                case SdkRecoveryStage::ConnectHost:
                     Log("[SDK Supervisor] Connecting isolated SDK host...");
                     PostMessage(hWnd, WM_APP_STATUS, 2, 0);
 
                     // Reconnect and enumerate without touching the LEDs. The
                     // normal loop first releases any previous target and then
                     // applies the current requested state through its usual path.
-                    const bool recoveryReady = StartAndValidateSdk();
-                    if (recoveryReady) {
-                        sdkReady = true;
+                    sdkReady = StartAndValidateSdk();
+                    if (!g_Running) break;
+                    if (sdkReady) {
                         g_Resetting_sdk = false;
-                        g_resetCounter = 0;
+                        retryDelay = SDK_RETRY_INITIAL_DELAY_MS;
                         g_sdkFailCount = 0;
                         g_sdkSuccessStreak = 0;
                         msiOutputMode = MsiOutputMode::Unknown;
@@ -6229,25 +6247,22 @@ static void EngineThread(HWND hWnd) {
                         PostMessage(hWnd, WM_APP_LETSDANCE, 0, 0);
                     }
                     else {
-                        ++g_resetCounter;
-                        if (g_resetCounter >= SDK_MAX_RESETS) {
-                            Log("[SDK Supervisor] Recovery exhausted after three validated attempts.");
-                            SendMessage(hWnd, WM_APP_FATAL, 2, 0);
-                        }
-                        else {
-                            ULONGLONG backoff = RESET_SDK_RETRY_DELAY_MS << (g_resetCounter - 1);
-                            char message[192];
-                            snprintf(message, sizeof(message),
-                                "[SDK Supervisor] Recovery attempt failed; retrying in %llums", backoff);
-                            Log(message);
-                            g_ResetStage = 0;
-                            g_ResetTimer = GetTickCount64() + backoff;
-                        }
+                        g_ResetTimer = GetTickCount64() + retryDelay;
+                        const bool restartService = canRestartMsiService && g_ResetTimer >= nextServiceRestart;
+                        g_ResetStage = restartService ? SdkRecoveryStage::StopService
+                                                      : SdkRecoveryStage::ConnectHost;
+                        char message[192];
+                        snprintf(message, sizeof(message),
+                            "[SDK Supervisor] MSI unavailable; next %s in %llums",
+                            restartService ? "service restart" : "host reconnect", retryDelay);
+                        Log(message);
+                        PostMessage(hWnd, WM_APP_STATUS, 3, 0);
+                        retryDelay = (std::min)(retryDelay * 2, SDK_RETRY_MAX_DELAY_MS);
                     }
                     break;
                 }
             }
-            EngineWait(100);
+            if (g_Running && g_Resetting_sdk) EngineWaitUntil(g_ResetTimer);
             continue;
         }
 
@@ -6601,7 +6616,7 @@ static void EngineThread(HWND hWnd) {
             }
         }
         const int result = SdkSetStyle(msiControlledDevice.c_str(),
-            msiControlledLedIndex, releaseStyle.c_str(), SDK_SHUTDOWN_TIMEOUT_MS);
+            msiControlledLedIndex, releaseStyle.c_str(), SdkCallPhase::Shutdown);
         if (result == MLAPI_OK) {
             char message[256] = {};
             snprintf(message, sizeof(message),
@@ -6615,6 +6630,10 @@ static void EngineThread(HWND hWnd) {
     // WM_ENDSESSION return while the bounded SDK-host shutdown is still in
     // flight, otherwise Windows may terminate us between BEGIN and END.
     ShutdownSdkHost();
+    if (g_ResetStage == SdkRecoveryStage::StartService && !g_windows_shutdown) {
+        // Finish a service restart interrupted by Exit from the tray.
+        LogTaskControlFailure("start on exit", ControlScheduledTask(L"MSI Task Host - LEDKeeper2_Host", true));
+    }
     if (g_hMsiReleaseDoneEvent) SetEvent(g_hMsiReleaseDoneEvent);
 
     Log("[MysticFight] Engine thread BYE BYE");
